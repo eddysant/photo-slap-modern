@@ -1,0 +1,39 @@
+{
+  "name": "photo-slap",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build && electron-builder",
+    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+    "preview": "vite preview",
+    "start": "open release/0.0.0/mac-arm64/photo-slap.app"
+  },
+  "dependencies": {
+    "blockhash-core": "^0.1.0",
+    "electron-store": "^11.0.2",
+    "exifreader": "^4.41.0",
+    "fast-glob": "^3.3.3",
+    "framer-motion": "^12.42.2",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-icons": "^5.7.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "electron": "^43.0.0",
+    "electron-builder": "^26.15.3",
+    "eslint": "^9.39.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.3",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.62.1",
+    "vite": "^8.1.3",
+    "vite-plugin-electron": "^1.1.0",
+    "vite-plugin-electron-renderer": "^1.0.0"
+  },
+  "main": "dist-electron/main.js"
+}

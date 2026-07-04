@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm outdated *)",
+      "Bash(npm info *)",
+      "Bash(npm install *)",
+      "Bash(npm audit *)",
+      "Bash(node install.js)",
+      "Bash(npx tsc *)",
+      "Bash(npx eslint *)",
+      "Bash(node -e \"const p = require\\('eslint-plugin-react-hooks'\\); console.log\\(Object.keys\\(p.configs\\)\\); console.log\\(Object.keys\\(p.configs.flat || {}\\)\\)\")",
+      "Bash(node -e \"const d=JSON.parse\\(require\\('fs'\\).readFileSync\\(0\\)\\); d.forEach\\(f=>f.messages.forEach\\(m=>console.log\\(f.filePath.replace\\(/.*photo-slap-modern\\\\//,''\\), m.line+':'+m.column, m.ruleId, '-', m.message.split\\('\\\\n'\\)[0]\\)\\)\\)\")",
+      "Bash(npx vite *)",
+      "Bash(timeout 25 npm run dev)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(git init *)",
+      "Bash(git add *)",
+      "Bash(git commit -m 'Baseline: modernized Gemini-generated slideshow app *)"
+    ]
+  }
+}
