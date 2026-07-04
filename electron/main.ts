@@ -1,9 +1,12 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, Menu, MenuItemConstructorOptions } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell, net, protocol, Menu, MenuItemConstructorOptions } from 'electron'
 
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
 import fs from 'node:fs/promises'
+import { statSync } from 'node:fs'
 import Store from 'electron-store'
+import sharp from 'sharp'
+import decodeHeic from 'heic-decode'
 import { scanDirectory } from './fileScanner'
 import { findExactDuplicates, scanFiles } from './dedupe'
 import ExifReader from 'exifreader';
@@ -31,8 +34,96 @@ if (process.platform === 'darwin') {
 // Store init
 const store = new Store();
 
-// Define File Access
-process.env['ELECTRON_DISABLE_SECURITY_WARNINGS'] = 'true';
+// --------- media:// protocol ---------
+// Media is served through a privileged custom scheme instead of file://
+// with webSecurity disabled. Only files inside directories the user has
+// explicitly opened via the folder picker are served.
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'media',
+    // corsEnabled + the Access-Control-Allow-Origin response header let
+    // fetch() (used by the perceptual-hash worker) read media responses.
+    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true },
+  },
+])
+
+const allowedRoots = new Set<string>();
+
+function isAllowedPath(filePath: string): boolean {
+  for (const root of allowedRoots) {
+    if (filePath === root || filePath.startsWith(root + path.sep)) return true;
+  }
+  return false;
+}
+
+// media://local/Users/me/pic.jpg -> /Users/me/pic.jpg (or C:\... on Windows)
+function mediaUrlToPath(urlStr: string): string {
+  const url = new URL(urlStr);
+  let p = decodeURIComponent(url.pathname);
+  if (/^\/[a-zA-Z]:[/\\]/.test(p)) p = p.slice(1); // strip leading slash of Windows drive paths
+  return path.normalize(p);
+}
+
+// CORS header so fetch() from the renderer and its workers can read media
+// (plain <img>/<video> tags don't need it, the perceptual-hash worker does).
+const MEDIA_CORS = { 'Access-Control-Allow-Origin': '*' };
+
+async function handleMediaRequest(request: Request): Promise<Response> {
+  const filePath = mediaUrlToPath(request.url);
+
+  if (!isAllowedPath(filePath)) {
+    return new Response('Forbidden', { status: 403, headers: MEDIA_CORS });
+  }
+
+  // Chromium can't decode HEIC/HEIF; transcode to JPEG on the fly.
+  // heic-decode (WASM libheif) handles the HEVC decode — prebuilt sharp
+  // binaries can't, HEVC being patent-encumbered — then sharp encodes
+  // the raw pixels to JPEG.
+  if (/\.(heic|heif)$/i.test(filePath)) {
+    try {
+      const buffer = await fs.readFile(filePath);
+      const { width, height, data } = await decodeHeic({ buffer });
+      const jpeg = await sharp(Buffer.from(data), { raw: { width, height, channels: 4 } })
+        .jpeg({ quality: 90 })
+        .toBuffer();
+      return new Response(new Uint8Array(jpeg), {
+        headers: { 'Content-Type': 'image/jpeg', 'Cache-Control': 'max-age=3600', ...MEDIA_CORS },
+      });
+    } catch (e) {
+      console.error(`Failed to transcode ${filePath}`, e);
+      return new Response('Decode failed', { status: 500, headers: MEDIA_CORS });
+    }
+  }
+
+  const res = await net.fetch(pathToFileURL(filePath).toString());
+  const headers = new Headers(res.headers);
+  for (const [k, v] of Object.entries(MEDIA_CORS)) headers.set(k, v);
+  return new Response(res.body, { status: res.status, headers });
+}
+
+// --------- Auto-open ---------
+// A directory can be passed as a CLI argument (packaged app) or via the
+// PHOTO_SLAP_DIR env var (dev, where electron's argv is taken by vite).
+function resolveAutoOpenDir(): string | null {
+  const candidates = [
+    ...process.argv.slice(app.isPackaged ? 1 : 2),
+    process.env.PHOTO_SLAP_DIR ?? '',
+  ];
+  for (const candidate of candidates) {
+    if (!candidate || candidate.startsWith('-')) continue;
+    try {
+      if (statSync(candidate).isDirectory()) return path.resolve(candidate);
+    } catch {
+      // not a path — ignore
+    }
+  }
+  return null;
+}
+
+// Expose the Chrome DevTools Protocol when explicitly requested (automation/debugging)
+if (process.env.PHOTO_SLAP_DEBUG_PORT) {
+  app.commandLine.appendSwitch('remote-debugging-port', process.env.PHOTO_SLAP_DEBUG_PORT);
+}
 
 let win: BrowserWindow | null = null
 
@@ -48,7 +139,6 @@ function createWindow() {
     icon: iconPath,
     webPreferences: {
       preload: path.join(__dirname, 'preload.mjs'),
-      webSecurity: false, // Required to load local files via file:// protocol
       nodeIntegration: false,
       contextIsolation: true,
     },
@@ -163,14 +253,26 @@ ipcMain.handle('dialog:openDirectory', async () => {
     return null;
   }
 
-  const allFiles = [];
+  const allFiles: Awaited<ReturnType<typeof scanDirectory>>['files'] = [];
+  const allErrors: string[] = [];
   for (const dirPath of result.filePaths) {
-
-    const files = await scanDirectory(dirPath);
+    allowedRoots.add(path.normalize(dirPath)); // permit media:// to serve from here
+    const { files, errors } = await scanDirectory(dirPath);
     allFiles.push(...files);
+    allErrors.push(...errors);
   }
 
-  return { paths: result.filePaths, files: allFiles };
+  return { paths: result.filePaths, files: allFiles, errors: allErrors };
+});
+
+// Renderer asks on startup whether a directory was passed on launch
+ipcMain.handle('app:getAutoOpen', async () => {
+  const dir = resolveAutoOpenDir();
+  if (!dir) return null;
+
+  allowedRoots.add(path.normalize(dir));
+  const { files, errors } = await scanDirectory(dir);
+  return { paths: [dir], files, errors };
 });
 
 ipcMain.handle('file:delete', async (_event, filePath) => {
@@ -256,6 +358,7 @@ app.on('activate', () => {
   }
 })
 
-app.whenReady().then(async () => {
+app.whenReady().then(() => {
+  protocol.handle('media', handleMediaRequest);
   createWindow();
 });

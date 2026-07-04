@@ -1,11 +1,12 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
+const VIDEO_EXTENSIONS = new Set(['.webm', '.mp4', '.gifv', '.ogg']);
+
 const SUPPORTED_EXTENSIONS = new Set([
-  // Images
-  '.jpg', '.jpeg', '.webp', '.gif', '.png', '.bmp',
-  // Videos
-  '.webm', '.mp4', '.gifv', '.ogg'
+  // Images (.heic/.heif are transcoded to JPEG by the media:// protocol)
+  '.jpg', '.jpeg', '.webp', '.gif', '.png', '.bmp', '.heic', '.heif',
+  ...VIDEO_EXTENSIONS,
 ]);
 
 export interface MediaFile {
@@ -14,38 +15,47 @@ export interface MediaFile {
   type: 'image' | 'video';
 }
 
-export async function scanDirectory(dirPath: string): Promise<MediaFile[]> {
-  let results: MediaFile[] = [];
+export interface ScanResult {
+  files: MediaFile[];
+  /** Human-readable descriptions of directories that could not be read. */
+  errors: string[];
+}
 
-  try {
-    const entries = await fs.readdir(dirPath, { withFileTypes: true });
+export async function scanDirectory(dirPath: string): Promise<ScanResult> {
+  const files: MediaFile[] = [];
+  const errors: string[] = [];
+
+  async function walk(dir: string) {
+    let entries;
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch (error) {
+      console.error(`Error scanning directory ${dir}:`, error);
+      errors.push(`${dir} (${(error as NodeJS.ErrnoException).code ?? 'unreadable'})`);
+      return;
+    }
 
     for (const entry of entries) {
       // Ignore dotfiles and system directories
       if (entry.name.startsWith('.')) continue;
 
-      const fullPath = path.join(dirPath, entry.name);
+      const fullPath = path.join(dir, entry.name);
 
       if (entry.isDirectory()) {
-        const subResults = await scanDirectory(fullPath);
-        results = results.concat(subResults);
+        await walk(fullPath);
       } else if (entry.isFile()) {
         const ext = path.extname(entry.name).toLowerCase();
         if (SUPPORTED_EXTENSIONS.has(ext)) {
-          const isVideo = ['.webm', '.mp4', '.gifv', '.ogg'].includes(ext);
-
-          results.push({
+          files.push({
             name: entry.name,
             path: fullPath,
-            type: isVideo ? 'video' : 'image'
+            type: VIDEO_EXTENSIONS.has(ext) ? 'video' : 'image',
           });
         }
       }
     }
-  } catch (error) {
-    console.error(`Error scanning directory ${dirPath}:`, error);
   }
 
-
-  return results;
+  await walk(dirPath);
+  return { files, errors };
 }

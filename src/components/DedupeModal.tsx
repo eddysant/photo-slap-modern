@@ -1,12 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { FiX, FiCheck, FiImage, FiLayers } from 'react-icons/fi';
-import { bmvbhash } from 'blockhash-core';
 import { getFileUrl } from '../utils';
+import type { PHashMessage, PHashRequest } from '../workers/phashWorker';
 
 interface DedupeModalProps {
     isOpen: boolean;
     onClose: () => void;
     rootPath: string; // To know where to scan
+    /** Called whenever files are moved to Trash so the slideshow can drop them. */
+    onFilesDeleted?: (paths: string[]) => void;
 }
 
 interface DuplicateGroup {
@@ -15,7 +17,18 @@ interface DuplicateGroup {
     type: 'exact' | 'similar';
 }
 
-export const DedupeModal: React.FC<DedupeModalProps> = ({ isOpen, onClose, rootPath }) => {
+// Hamming distance <= this over the 256-bit blockhash counts as "similar"
+const SIMILARITY_THRESHOLD = 12;
+
+const hammingDistance = (a: string, b: string) => {
+    let dist = 0;
+    for (let i = 0; i < a.length; i++) {
+        if (a[i] !== b[i]) dist++;
+    }
+    return dist;
+};
+
+export function DedupeModal({ isOpen, onClose, rootPath, onFilesDeleted }: DedupeModalProps) {
     const [step, setStep] = useState<'intro' | 'scanning' | 'review' | 'done'>('intro');
     const [scanType, setScanType] = useState<'exact' | 'similar'>('exact');
     const [progress, setProgress] = useState(0);
@@ -23,11 +36,13 @@ export const DedupeModal: React.FC<DedupeModalProps> = ({ isOpen, onClose, rootP
     const [groups, setGroups] = useState<DuplicateGroup[]>([]);
     const [currentGroupIndex, setCurrentGroupIndex] = useState(0);
 
-    // Review State: show the first two files of the current group side-by-side.
-    // Groups with > 2 files only get their first pair compared (v1 limitation).
-    const currentGroup = groups[currentGroupIndex];
-    const leftImage = currentGroup?.files[0] ?? '';
-    const rightImage = currentGroup?.files[1] ?? '';
+    // Files of the current group still in contention. We always compare the
+    // first two: the "keeper" (left) vs the next challenger (right). Whoever
+    // survives keeps facing the rest of the group, so groups of any size get
+    // fully reviewed.
+    const [groupFiles, setGroupFiles] = useState<string[]>([]);
+
+    const workerRef = useRef<Worker | null>(null);
 
     // Reset when opened
     useEffect(() => {
@@ -38,6 +53,36 @@ export const DedupeModal: React.FC<DedupeModalProps> = ({ isOpen, onClose, rootP
         }
     }, [isOpen]);
 
+    // Kill any in-flight hashing when the modal closes/unmounts
+    useEffect(() => {
+        if (!isOpen && workerRef.current) {
+            workerRef.current.terminate();
+            workerRef.current = null;
+        }
+        return () => {
+            workerRef.current?.terminate();
+            workerRef.current = null;
+        };
+    }, [isOpen]);
+
+    // Load the files of the group under review
+    useEffect(() => {
+        if (step === 'review') {
+            setGroupFiles(groups[currentGroupIndex]?.files ?? []);
+        }
+    }, [step, currentGroupIndex, groups]);
+
+    const enterReview = (found: DuplicateGroup[]) => {
+        if (found.length > 0) {
+            setGroups(found);
+            setCurrentGroupIndex(0);
+            setStep('review');
+        } else {
+            setStatusMsg(scanType === 'exact' ? 'No exact duplicates found!' : 'No similar photos found!');
+            setStep('done');
+        }
+    };
+
     const startScan = async () => {
         setStep('scanning');
         setProgress(0);
@@ -46,77 +91,60 @@ export const DedupeModal: React.FC<DedupeModalProps> = ({ isOpen, onClose, rootP
         try {
             if (scanType === 'exact') {
                 const result = await window.api.scanDedupeExact(rootPath);
-                if (result.length > 0) {
-                    setGroups(result.map(g => ({ ...g, type: 'exact' as const })));
-                    setStep('review');
-                    setCurrentGroupIndex(0);
-                } else {
-                    setStep('done');
-                    setStatusMsg('No exact duplicates found!');
-                }
-            } else {
-                // PERCEPTUAL HASHING (Renderer side)
-                setStatusMsg('Finding images...');
-                const files: string[] = await window.api.scanDedupeFiles(rootPath);
+                enterReview(result.map(g => ({ ...g, type: 'exact' as const })));
+                return;
+            }
 
-                setStatusMsg(`Processing ${files.length} images...`);
-                setProgress(0);
+            // Perceptual hashing, done in a worker to keep the UI responsive
+            setStatusMsg('Finding images...');
+            const files = await window.api.scanDedupeFiles(rootPath);
 
-                const hashes: { path: string; hash: string }[] = [];
+            setStatusMsg(`Processing ${files.length} images...`);
+            setProgress(0);
 
-                // Process in chunks to avoid blocking UI
-                const CHUNK_SIZE = 10;
-                for (let i = 0; i < files.length; i += CHUNK_SIZE) {
-                    const chunk = files.slice(i, i + CHUNK_SIZE);
-                    await Promise.all(chunk.map(async (f: string) => {
-                        try {
-                            const hash = await computePHash(f);
-                            if (hash) hashes.push({ path: f, hash });
-                        } catch {
-                            console.warn("Failed to hash", f);
-                        }
-                    }));
+            const worker = new Worker(new URL('../workers/phashWorker.ts', import.meta.url), { type: 'module' });
+            workerRef.current = worker;
 
-                    setProgress(Math.round(((i + chunk.length) / files.length) * 100));
-                    // Yield to UI
-                    await new Promise(r => setTimeout(r, 0));
-                }
-
-                // Find similarities (Naive O(n^2))
-                setStatusMsg('Comparing...');
-                const newGroups: DuplicateGroup[] = [];
-                const processed = new Set<string>();
-
-                for (let i = 0; i < hashes.length; i++) {
-                    if (processed.has(hashes[i].path)) continue;
-
-                    const currentGroup = [hashes[i].path];
-                    processed.add(hashes[i].path);
-
-                    for (let j = i + 1; j < hashes.length; j++) {
-                        if (processed.has(hashes[j].path)) continue;
-
-                        const dist = hammingDistance(hashes[i].hash, hashes[j].hash);
-                        if (dist <= 12) { // Threshold
-                            currentGroup.push(hashes[j].path);
-                            processed.add(hashes[j].path);
-                        }
+            const hashes = await new Promise<{ path: string; hash: string }[]>((resolve, reject) => {
+                worker.onmessage = (e: MessageEvent<PHashMessage>) => {
+                    if (e.data.type === 'progress') {
+                        setProgress(Math.round((e.data.done / e.data.total) * 100));
+                    } else {
+                        resolve(e.data.hashes);
                     }
+                };
+                worker.onerror = (e) => reject(new Error(e.message));
+                worker.postMessage({ paths: files } satisfies PHashRequest);
+            });
+            worker.terminate();
+            workerRef.current = null;
 
-                    if (currentGroup.length > 1) {
-                        newGroups.push({ hash: hashes[i].hash, files: currentGroup, type: 'similar' });
+            // Group by similarity (naive O(n^2) comparison)
+            setStatusMsg('Comparing...');
+            const newGroups: DuplicateGroup[] = [];
+            const processed = new Set<string>();
+
+            for (let i = 0; i < hashes.length; i++) {
+                if (processed.has(hashes[i].path)) continue;
+
+                const currentGroup = [hashes[i].path];
+                processed.add(hashes[i].path);
+
+                for (let j = i + 1; j < hashes.length; j++) {
+                    if (processed.has(hashes[j].path)) continue;
+
+                    if (hammingDistance(hashes[i].hash, hashes[j].hash) <= SIMILARITY_THRESHOLD) {
+                        currentGroup.push(hashes[j].path);
+                        processed.add(hashes[j].path);
                     }
                 }
 
-                if (newGroups.length > 0) {
-                    setGroups(newGroups);
-                    setStep('review');
-                    setCurrentGroupIndex(0);
-                } else {
-                    setStep('done');
-                    setStatusMsg('No similar photos found!');
+                if (currentGroup.length > 1) {
+                    newGroups.push({ hash: hashes[i].hash, files: currentGroup, type: 'similar' });
                 }
             }
+
+            enterReview(newGroups);
         } catch (e) {
             console.error(e);
             setStatusMsg('Error during scan.');
@@ -124,56 +152,46 @@ export const DedupeModal: React.FC<DedupeModalProps> = ({ isOpen, onClose, rootP
         }
     };
 
-    const computePHash = async (src: string): Promise<string | null> => {
-        return new Promise((resolve) => {
-            const img = new Image();
-            img.src = getFileUrl(src);
-            img.crossOrigin = "Anonymous";
-            img.onload = () => {
-                const canvas = document.createElement('canvas');
-                canvas.width = 16;
-                canvas.height = 16;
-                const ctx = canvas.getContext('2d');
-                if (!ctx) return resolve(null);
-                ctx.drawImage(img, 0, 0, 16, 16);
-                const imageData = ctx.getImageData(0, 0, 16, 16);
-                const hash = bmvbhash(imageData, 16);
-                resolve(hash);
-            };
-            img.onerror = () => resolve(null);
-        });
-    };
-
-    const hammingDistance = (a: string, b: string) => {
-        let dist = 0;
-        for (let i = 0; i < a.length; i++) {
-            if (a[i] !== b[i]) dist++;
-        }
-        return dist;
-    };
-
-    const resolveConflict = async (keep: 'left' | 'right' | 'both' | 'skip') => {
-
-        if (keep === 'left') {
-            // Delete right
-            await window.api.deleteFile(rightImage);
-        } else if (keep === 'right') {
-            // Delete left
-            await window.api.deleteFile(leftImage);
-        }
-        // Both/Skip = do nothing
-
-        // If group had > 2 items, we theoretically need to compare the winner against the next one.
-        // But for this V1 implementation, we just assume pairs or handle "Next"
-        // Ideally: remove distinct deleted items from group.files, if > 1 remaining, shift rightImage.
-
-        // Simple logic: Move to next group
+    const nextGroup = () => {
         if (currentGroupIndex < groups.length - 1) {
             setCurrentGroupIndex(prev => prev + 1);
         } else {
-            setStep('done');
             setStatusMsg('All duplicates resolved!');
-            // Refresh app file list? (Handled by App automatically if file watcher? No, probably need manual refresh or just acceptable staleness)
+            setStep('done');
+        }
+    };
+
+    const deleteFile = async (path: string) => {
+        const ok = await window.api.deleteFile(path);
+        if (ok) onFilesDeleted?.([path]);
+        return ok;
+    };
+
+    const leftImage = groupFiles[0] ?? '';
+    const rightImage = groupFiles[1] ?? '';
+
+    const resolveConflict = async (keep: 'left' | 'right' | 'both' | 'skip') => {
+        if (keep === 'skip') {
+            nextGroup();
+            return;
+        }
+
+        let remaining: string[];
+        if (keep === 'left') {
+            await deleteFile(rightImage);
+            remaining = [leftImage, ...groupFiles.slice(2)];
+        } else if (keep === 'right') {
+            await deleteFile(leftImage);
+            remaining = groupFiles.slice(1);
+        } else {
+            // Keep both: the challenger is safe; the keeper faces the next one
+            remaining = [leftImage, ...groupFiles.slice(2)];
+        }
+
+        if (remaining.length >= 2) {
+            setGroupFiles(remaining);
+        } else {
+            nextGroup();
         }
     };
 
@@ -234,6 +252,7 @@ export const DedupeModal: React.FC<DedupeModalProps> = ({ isOpen, onClose, rootP
                         <div className="step-review">
                             <div className="progress-indicator">
                                 Reviewing Group {currentGroupIndex + 1} / {groups.length}
+                                {groupFiles.length > 2 && ` — ${groupFiles.length} files in group`}
                             </div>
 
                             <div className="compare-container">
@@ -280,4 +299,4 @@ export const DedupeModal: React.FC<DedupeModalProps> = ({ isOpen, onClose, rootP
             </div>
         </div>
     );
-};
+}

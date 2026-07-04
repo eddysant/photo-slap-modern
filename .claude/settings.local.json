@@ -15,7 +15,25 @@
       "Bash(echo \"EXIT: $?\")",
       "Bash(git init *)",
       "Bash(git add *)",
-      "Bash(git commit -m 'Baseline: modernized Gemini-generated slideshow app *)"
+      "Bash(git commit -m 'Baseline: modernized Gemini-generated slideshow app *)",
+      "Bash(pkill -f \"photo-slap-modern/node_modules/electron\")",
+      "Bash(pkill -f \"photo-slap-modern/node_modules/.bin/vite\")",
+      "Bash(node -e \"const s=require\\('sharp'\\); console.log\\('sharp OK', s.versions.sharp ?? ''\\);\")",
+      "Bash(node -e \"console.log\\(JSON.stringify\\(require\\('./node_modules/sharp/package.json'\\).dependencies\\)\\)\")",
+      "Bash(grep -o 'import[^;]\\\\{0,60\\\\}\"sharp\"' dist-electron/main.js)",
+      "Bash(grep -oE '\\(import|require\\)[^;]{0,80}sharp[^;]{0,20}' dist-electron/main.js)",
+      "Bash(node -e ' *)",
+      "Bash(node -e \"console.log\\(require\\('fs'\\).readFileSync\\('node_modules/vite-plugin-electron/dist/simple.d.ts','utf8'\\)\\)\")",
+      "Bash(node -e \"const d = require\\('heic-decode'\\); console.log\\('heic-decode loads OK', typeof d\\)\")",
+      "Bash(curl -sL -o /private/tmp/claude-501/-Users-eddysant-Code-photo-slap-modern/315d0425-a766-4935-a70b-b317177f0da0/scratchpad/fixture/autumn.heic https://nokiatech.github.io/heif/content/images/autumn_1440x960.heic)",
+      "Bash(node /private/tmp/claude-501/-Users-eddysant-Code-photo-slap-modern/315d0425-a766-4935-a70b-b317177f0da0/scratchpad/gen-fixture.mjs /private/tmp/claude-501/-Users-eddysant-Code-photo-slap-modern/315d0425-a766-4935-a70b-b317177f0da0/scratchpad/fixture)",
+      "Bash(node -e \"console.log\\(require.resolve\\('sharp', { paths: ['/Users/eddysant/Code/photo-slap-modern'] }\\)\\)\")",
+      "Bash(node /private/tmp/claude-501/-Users-eddysant-Code-photo-slap-modern/315d0425-a766-4935-a70b-b317177f0da0/scratchpad/cdp.mjs 9223 /private/tmp/claude-501/-Users-eddysant-Code-photo-slap-modern/315d0425-a766-4935-a70b-b317177f0da0/scratchpad/test2.js)",
+      "Bash(curl -s http://127.0.0.1:9223/json/list)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\([\\(t['type'],t['title'],t['url']\\) for t in d]\\)\")",
+      "Bash(CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --dir)",
+      "Bash(pkill -f \"photo-slap.app/Contents/MacOS/photo-slap\")",
+      "Bash(cp /private/tmp/claude-501/-Users-eddysant-Code-photo-slap-modern/315d0425-a766-4935-a70b-b317177f0da0/scratchpad/config-backup.json '/Users/eddysant/Library/Application Support/photo-slap/config.json')"
     ]
   }
 }

@@ -19,7 +19,8 @@ interface ExifData {
 
 interface Window {
     api: {
-        openDirectory: () => Promise<{ paths: string[], files: MediaFile[] } | null>;
+        openDirectory: () => Promise<{ paths: string[], files: MediaFile[], errors: string[] } | null>;
+        getAutoOpen: () => Promise<{ paths: string[], files: MediaFile[], errors: string[] } | null>;
         deleteFile: (path: string) => Promise<boolean>;
         getStore: (key: string) => Promise<any>;
         setStore: (key: string, value: any) => Promise<void>;

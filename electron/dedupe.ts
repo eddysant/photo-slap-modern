@@ -15,7 +15,7 @@ export interface DuplicateGroup {
 
 export async function scanFiles(dir: string): Promise<string[]> {
     const searchPath = path.resolve(dir).replace(/\\/g, '/');
-    const patterns = ['**/*.jpg', '**/*.jpeg', '**/*.png', '**/*.webp', '**/*.gif'];
+    const patterns = ['**/*.jpg', '**/*.jpeg', '**/*.png', '**/*.webp', '**/*.gif', '**/*.heic', '**/*.heif'];
 
     const entries = await glob(patterns, {
         cwd: searchPath,
@@ -30,7 +30,7 @@ export async function findExactDuplicates(dir: string): Promise<DuplicateGroup[]
     const searchPath = path.resolve(dir).replace(/\\/g, '/');
     // Include videos for exact dedupe? Yes.
     const patterns = [
-        '**/*.jpg', '**/*.jpeg', '**/*.png', '**/*.webp', '**/*.gif',
+        '**/*.jpg', '**/*.jpeg', '**/*.png', '**/*.webp', '**/*.gif', '**/*.heic', '**/*.heif',
         '**/*.mp4', '**/*.mov', '**/*.webm', '**/*.mkv'
     ];
 

@@ -1,7 +1,7 @@
 // @see - https://www.electron.build/configuration/configuration
 {
   "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
-  "appId": "YourAppID",
+  "appId": "com.eddysant.photo-slap",
   "asar": true,
   "productName": "photo-slap",
   "directories": {
@@ -9,7 +9,20 @@
   },
   "files": [
     "dist",
-    "dist-electron"
+    "dist-electron",
+    // sharp and heic-decode are externalized from the main bundle (native
+    // module / WASM) and must ship with their runtime deps; everything else
+    // is bundled by Vite.
+    "node_modules/sharp/**",
+    "node_modules/@img/**",
+    "node_modules/detect-libc/**",
+    "node_modules/semver/**",
+    "node_modules/heic-decode/**",
+    "node_modules/libheif-js/**"
+  ],
+  "asarUnpack": [
+    "node_modules/sharp/**",
+    "node_modules/@img/**"
   ],
   "mac": {
     "target": [

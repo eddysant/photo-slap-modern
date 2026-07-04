@@ -3,6 +3,7 @@ import { ipcRenderer, contextBridge } from 'electron'
 // --------- Expose some API to the Renderer process ---------
 contextBridge.exposeInMainWorld('api', {
   openDirectory: () => ipcRenderer.invoke('dialog:openDirectory'),
+  getAutoOpen: () => ipcRenderer.invoke('app:getAutoOpen'),
   deleteFile: (path: string) => ipcRenderer.invoke('file:delete', path),
   getStore: (key: string) => ipcRenderer.invoke('store:get', key),
   setStore: (key: string, value: any) => ipcRenderer.invoke('store:set', key, value),

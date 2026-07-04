@@ -11,6 +11,17 @@ export default defineConfig({
       main: {
         // Shortcut of `build.lib.entry`.
         entry: 'electron/main.ts',
+        vite: {
+          build: {
+            // Vite 8 uses Rolldown (rolldownOptions, not rollupOptions)
+            rolldownOptions: {
+              // sharp is a native module; heic-decode ships WASM with
+              // filesystem-relative loading. Both are loaded from
+              // node_modules at runtime instead of being bundled.
+              external: ['sharp', 'heic-decode'],
+            },
+          },
+        },
       },
       preload: {
         // Shortcut of `build.rollupOptions.input`.

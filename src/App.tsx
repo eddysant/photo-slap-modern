@@ -1,83 +1,50 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiSettings, FiPlay, FiPause, FiSkipBack, FiSkipForward, FiTrash2, FiLayers, FiVolume2, FiVolumeX, FiFolder } from 'react-icons/fi'
+import { FiSettings, FiPlay, FiPause, FiSkipBack, FiSkipForward, FiTrash2, FiVolume2, FiVolumeX } from 'react-icons/fi'
 import './App.css'
 import { DedupeModal } from './components/DedupeModal'
+import { IntroScreen } from './components/IntroScreen'
+import { SettingsMenu, MediaFilter, ControlsPosition } from './components/SettingsMenu'
+import { Toast } from './components/Toast'
+import { usePersistedState } from './hooks/usePersistedState'
+import { slideTransitions, TransitionStyle } from './transitions'
 import { getFileUrl } from './utils'
 
-// Classic 5-point star, as [x, y] percentages of the slide box.
-const STAR_POINTS = [
-  [50, 0], [61, 35], [98, 35], [68, 57], [79, 91],
-  [50, 70], [21, 91], [32, 57], [2, 35], [39, 35],
-]
-
-// Star scaled around the center. scale 0 = collapsed to a point,
-// scale 4 = big enough that the star's inner edges clear the screen corners.
-const starPolygon = (scale: number) =>
-  `polygon(${STAR_POINTS.map(([x, y]) => `${50 + (x - 50) * scale}% ${50 + (y - 50) * scale}%`).join(', ')})`
+const KEN_BURNS_ANIMATIONS = ['kb-pan-left', 'kb-pan-right', 'kb-pan-up', 'kb-pan-down', 'kb-zoom-in', 'kb-zoom-out'];
 
 function App() {
   const [files, setFiles] = useState<MediaFile[]>([])
+  const [allFiles, setAllFiles] = useState<MediaFile[]>([])
   const [currentIndex, setCurrentIndex] = useState(0)
   const [isPlaying, setIsPlaying] = useState(false)
-  const [isShuffle, setIsShuffle] = useState(false)
-  const [slideDuration, setSlideDuration] = useState(3000)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [currentDir, setCurrentDir] = useState('')
   const [isDedupeOpen, setIsDedupeOpen] = useState(false)
-  const [controlsPosition, setControlsPosition] = useState<'bottom' | 'left'>('bottom')
+  const [exifData, setExifData] = useState<ExifData | null>(null)
+  const [kenBurnsClass, setKenBurnsClass] = useState('')
 
-  // Filtering State
-  const [allFiles, setAllFiles] = useState<MediaFile[]>([])
-  const [mediaFilter, setMediaFilter] = useState<'both' | 'photos' | 'videos'>('both')
+  // Settings (persisted across launches via electron-store)
+  const [isShuffle, setIsShuffle] = usePersistedState('isShuffle', false)
+  const [slideDuration, setSlideDuration] = usePersistedState('slideDuration', 3000)
+  const [mediaFilter, setMediaFilter] = usePersistedState<MediaFilter>('mediaFilter', 'both')
+  const [isSmart, setIsSmart] = usePersistedState('isSmart', false)
+  const [isSmartVideoEnabled, setIsSmartVideoEnabled] = usePersistedState('isSmartVideoEnabled', true)
+  const [isStretch, setIsStretch] = usePersistedState('isStretch', false)
+  const [isKenBurns, setIsKenBurns] = usePersistedState('isKenBurns', false)
+  const [isExifEnabled, setIsExifEnabled] = usePersistedState('isExifEnabled', false)
+  const [transitionStyle, setTransitionStyle] = usePersistedState<TransitionStyle>('transitionStyle', 'fade')
+  const [volume, setVolume] = usePersistedState('volume', 1)
+  const [isMuted, setIsMuted] = usePersistedState('isMuted', false)
+  const [controlsPosition, setControlsPosition] = usePersistedState<ControlsPosition>('controlsPosition', 'bottom')
 
-  // Smart Background State
-  const [isSmart, setIsSmart] = useState(false);
-  const [isSmartVideoEnabled, setIsSmartVideoEnabled] = useState(true);
-  const [isStretch, setIsStretch] = useState(false);
-  const [isKenBurns, setIsKenBurns] = useState(false);
-  const [isExifEnabled, setIsExifEnabled] = useState(false);
-  const [transitionStyle, setTransitionStyle] = useState<'fade' | 'slide' | 'zoom' | 'flip' | 'star'>('fade');
-  const [exifData, setExifData] = useState<ExifData | null>(null);
-  const [volume, setVolume] = useState(1);
-  const [isMuted, setIsMuted] = useState(false);
-  const [kenBurnsClass, setKenBurnsClass] = useState('');
-
-  useEffect(() => {
-    // Load settings
-    const loadSettings = async () => {
-      try {
-        const storedShuffle = await window.api.getStore('isShuffle');
-        const storedDuration = await window.api.getStore('slideDuration');
-        const storedSmart = await window.api.getStore('isSmart');
-        const storedSmartVideo = await window.api.getStore('isSmartVideoEnabled');
-        const storedMediaFilter = await window.api.getStore('mediaFilter');
-        const storedTransition = await window.api.getStore('transitionStyle');
-
-        if (storedShuffle !== undefined) setIsShuffle(storedShuffle);
-        if (storedDuration !== undefined) setSlideDuration(storedDuration);
-        if (storedSmart !== undefined) setIsSmart(storedSmart);
-        if (storedSmartVideo !== undefined) setIsSmartVideoEnabled(storedSmartVideo);
-        if (storedMediaFilter !== undefined) setMediaFilter(storedMediaFilter);
-        if (storedTransition !== undefined) setTransitionStyle(storedTransition);
-        const storedStretch = await window.api.getStore('isStretch');
-        if (storedStretch !== undefined) setIsStretch(storedStretch);
-        const storedKenBurns = await window.api.getStore('isKenBurns');
-        if (storedKenBurns !== undefined) setIsKenBurns(storedKenBurns);
-        const storedExif = await window.api.getStore('isExifEnabled');
-        if (storedExif !== undefined) setIsExifEnabled(storedExif);
-        const storedVolume = await window.api.getStore('volume');
-        if (storedVolume !== undefined) setVolume(storedVolume);
-        const storedMuted = await window.api.getStore('isMuted');
-        if (storedMuted !== undefined) setIsMuted(storedMuted);
-        const storedControlsPosition = await window.api.getStore('controlsPosition');
-        if (storedControlsPosition !== undefined) setControlsPosition(storedControlsPosition);
-      } catch (e) {
-        console.error("Failed to load settings:", e);
-      }
-    }
-    loadSettings();
+  // Toast
+  const [toast, setToast] = useState<string | null>(null)
+  const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const showToast = useCallback((message: string) => {
+    setToast(message);
+    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+    toastTimeoutRef.current = setTimeout(() => setToast(null), 4000);
   }, []);
 
   const applyFiltersAndSort = useCallback((unfiltered: MediaFile[], currentFilter: string, isShuffled: boolean) => {
@@ -103,24 +70,45 @@ function App() {
     setCurrentIndex(0);
   }, []);
 
+  const ingestScanResult = useCallback((result: { paths: string[], files: MediaFile[], errors: string[] }) => {
+    if (result.errors.length > 0) {
+      showToast(`${result.errors.length} folder${result.errors.length > 1 ? 's' : ''} couldn't be read`);
+    }
+
+    if (result.files.length > 0) {
+      if (result.paths.length > 0) {
+        setCurrentDir(result.paths[0]);
+      }
+      setAllFiles(result.files);
+      applyFiltersAndSort(result.files, mediaFilter, isShuffle);
+      setIsPlaying(false); // Default to paused
+    } else {
+      showToast('No media files found in that folder');
+    }
+  }, [applyFiltersAndSort, mediaFilter, isShuffle, showToast]);
+
   const handleOpenDirectory = useCallback(async () => {
     try {
       setIsLoading(true);
       const result = await window.api.openDirectory();
-      if (result && result.files.length > 0) {
-        if (result.paths && result.paths.length > 0) {
-          setCurrentDir(result.paths[0]);
-        }
-        setAllFiles(result.files);
-        applyFiltersAndSort(result.files, mediaFilter, isShuffle);
-        setIsPlaying(false); // Default to paused
-      }
+      if (result) ingestScanResult(result); // null = dialog cancelled
     } catch (error) {
       console.error("Error opening directory:", error);
+      showToast('Something went wrong opening that folder');
     } finally {
       setIsLoading(false);
     }
-  }, [applyFiltersAndSort, mediaFilter, isShuffle]);
+  }, [ingestScanResult, showToast]);
+
+  // Load a directory passed on the command line (or PHOTO_SLAP_DIR in dev)
+  const autoOpenedRef = useRef(false);
+  useEffect(() => {
+    if (autoOpenedRef.current) return;
+    autoOpenedRef.current = true;
+    window.api.getAutoOpen()
+      .then(result => { if (result) ingestScanResult(result); })
+      .catch(e => console.error('Auto-open failed:', e));
+  }, [ingestScanResult]);
 
   const nextSlide = useCallback(() => {
     setFiles((currentFiles) => {
@@ -143,57 +131,12 @@ function App() {
   const toggleShuffle = () => {
     const newShuffle = !isShuffle;
     setIsShuffle(newShuffle);
-    window.api.setStore('isShuffle', newShuffle);
     applyFiltersAndSort(allFiles, mediaFilter, newShuffle);
   };
 
-  const handleMediaFilterChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const newFilter = e.target.value as 'both' | 'photos' | 'videos';
+  const handleMediaFilterChange = (newFilter: MediaFilter) => {
     setMediaFilter(newFilter);
-    window.api.setStore('mediaFilter', newFilter);
     applyFiltersAndSort(allFiles, newFilter, isShuffle);
-  };
-
-  const toggleSmart = () => {
-    const newSmart = !isSmart;
-    setIsSmart(newSmart);
-    window.api.setStore('isSmart', newSmart);
-  };
-
-  const toggleSmartVideo = () => {
-    const newSmartVideo = !isSmartVideoEnabled;
-    setIsSmartVideoEnabled(newSmartVideo);
-    window.api.setStore('isSmartVideoEnabled', newSmartVideo);
-  };
-
-  const toggleStretch = () => {
-    const newStretch = !isStretch;
-    setIsStretch(newStretch);
-    window.api.setStore('isStretch', newStretch);
-  };
-
-  const toggleKenBurns = () => {
-    const newKenBurns = !isKenBurns;
-    setIsKenBurns(newKenBurns);
-    window.api.setStore('isKenBurns', newKenBurns);
-  };
-
-  const toggleExif = () => {
-    const newExif = !isExifEnabled;
-    setIsExifEnabled(newExif);
-    window.api.setStore('isExifEnabled', newExif);
-  };
-
-  const handleTransitionChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const newTransition = e.target.value as 'fade' | 'slide' | 'zoom' | 'flip' | 'star';
-    setTransitionStyle(newTransition);
-    window.api.setStore('transitionStyle', newTransition);
-  };
-
-  const handleControlsPositionChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const newPosition = e.target.value as 'bottom' | 'left';
-    setControlsPosition(newPosition);
-    window.api.setStore('controlsPosition', newPosition);
   };
 
   const deleteCurrentFile = useCallback(async () => {
@@ -201,6 +144,7 @@ function App() {
     const fileToDelete = files[currentIndex];
     const success = await window.api.deleteFile(fileToDelete.path);
     if (success) {
+      setAllFiles(prev => prev.filter(f => f.path !== fileToDelete.path));
       setFiles(prev => {
         const newFiles = prev.filter((_, i) => i !== currentIndex);
         if (currentIndex >= newFiles.length) {
@@ -211,26 +155,31 @@ function App() {
     }
   }, [files, currentIndex]);
 
-  const toggleSettings = () => setIsSettingsOpen(!isSettingsOpen);
+  // Dedupe moved files to Trash: drop them from the slideshow too
+  const handleFilesDeleted = useCallback((deleted: string[]) => {
+    const del = new Set(deleted);
+    setAllFiles(prev => prev.filter(f => !del.has(f.path)));
+    setFiles(prev => {
+      const newFiles = prev.filter(f => !del.has(f.path));
+      setCurrentIndex(ci => Math.min(ci, Math.max(0, newFiles.length - 1)));
+      return newFiles;
+    });
+  }, []);
 
-  const handleDurationChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const newDuration = parseInt(e.target.value);
-    setSlideDuration(newDuration);
-    window.api.setStore('slideDuration', newDuration);
-  };
+  const toggleSettings = () => setIsSettingsOpen(prev => !prev);
 
   // Video Scrubber Logic
-  const videoRef = useRef<HTMLVideoElement>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const bgVideoRef = useRef<HTMLVideoElement>(null);
   const [videoProgress, setVideoProgress] = useState(0);
   const [isUserPaused, setIsUserPaused] = useState(false);
 
+  // Per-slide state reset + EXIF fetch + Ken Burns randomization
   useEffect(() => {
     setVideoProgress(0);
     setIsUserPaused(false);
-    setExifData(null); // Reset EXIF
+    setExifData(null);
 
-    // Fetch EXIF if enabled
     if (files[currentIndex]?.type === 'image') {
       if (isExifEnabled) {
         window.api.getExif(files[currentIndex].path).then(data => {
@@ -238,9 +187,7 @@ function App() {
         });
       }
       if (isKenBurns) {
-        const animations = ['kb-pan-left', 'kb-pan-right', 'kb-pan-up', 'kb-pan-down', 'kb-zoom-in', 'kb-zoom-out'];
-        const randomAnim = animations[Math.floor(Math.random() * animations.length)];
-        setKenBurnsClass(randomAnim);
+        setKenBurnsClass(KEN_BURNS_ANIMATIONS[Math.floor(Math.random() * KEN_BURNS_ANIMATIONS.length)]);
       }
     }
   }, [currentIndex, isExifEnabled, isKenBurns, files]);
@@ -288,18 +235,12 @@ function App() {
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newVolume = parseFloat(e.target.value);
     setVolume(newVolume);
-    window.api.setStore('volume', newVolume);
     if (newVolume > 0 && isMuted) {
       setIsMuted(false);
-      window.api.setStore('isMuted', false);
     }
   };
 
-  const toggleMute = () => {
-    const newMuted = !isMuted;
-    setIsMuted(newMuted);
-    window.api.setStore('isMuted', newMuted);
-  };
+  const toggleMute = () => setIsMuted(!isMuted);
 
   // Video End Handler
   const handleVideoEnded = () => {
@@ -307,7 +248,6 @@ function App() {
       nextSlide();
     }
   };
-
 
   // Preloading Logic
   const preloadRefs = useRef<HTMLImageElement[]>([]);
@@ -335,7 +275,7 @@ function App() {
 
   // Auto-hide controls logic
   const [showControls, setShowControls] = useState(false);
-  const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const controlsTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isHoveringControlsRef = useRef(false);
 
   const handleMouseMove = useCallback(() => {
@@ -359,7 +299,7 @@ function App() {
 
   // Slideshow timer
   useEffect(() => {
-    let interval: any;
+    let interval: ReturnType<typeof setInterval> | undefined;
     if (isPlaying && files.length > 0) {
       const current = files[currentIndex];
       // Only start timer if it's an image. Videos handle their own progression via onEnded.
@@ -389,13 +329,13 @@ function App() {
           deleteCurrentFile();
           break;
         case 'Escape':
-          if (isSettingsOpen) setIsSettingsOpen(false);
+          setIsSettingsOpen(false);
           break;
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [nextSlide, prevSlide, togglePlay, deleteCurrentFile, isSettingsOpen]);
+  }, [nextSlide, prevSlide, togglePlay, deleteCurrentFile]);
 
   // Update window title
   useEffect(() => {
@@ -425,231 +365,73 @@ function App() {
   if (files.length === 0) {
     return (
       <div className="app-container">
-        {/* Settings Menu in Empty State too if needed, or just let them open dir first */}
         <div className="title-bar">photo-slap</div>
-
-        {/* Balatro Intro Screen */}
-        <div className="balatro-container">
-          <div className="crt-overlay" />
-
-          <div className="balatro-title">
-            PHOTO<br />SLAP
-          </div>
-
-          <button className="balatro-button" onClick={handleOpenDirectory} disabled={isLoading}>
-            {isLoading ? 'SCANNING...' : 'OPEN FOLDER'}
-          </button>
-        </div>
+        <IntroScreen isLoading={isLoading} onOpenDirectory={handleOpenDirectory} />
+        <Toast message={toast} />
       </div>
     );
   }
 
   const currentFile = files[currentIndex];
   const fileUrl = getFileUrl(currentFile.path);
-
-  // Define dynamic framer-motion variants based on the selected transition style
-  const motionVariants: Record<string, any> = {
-    fade: {
-      initial: { opacity: 0 },
-      animate: { opacity: 1 },
-      exit: { opacity: 0 },
-      transition: { duration: 0.3 }
-    },
-    slide: {
-      initial: { x: '100%', opacity: 0 },
-      animate: { x: 0, opacity: 1 },
-      exit: { x: '-100%', opacity: 0 },
-      transition: { type: "tween", duration: 0.4, ease: "easeInOut" }
-    },
-    zoom: {
-      initial: { scale: 0.8, opacity: 0 },
-      animate: { scale: 1, opacity: 1 },
-      exit: { scale: 1.2, opacity: 0 },
-      transition: { duration: 0.4 }
-    },
-    flip: {
-      initial: { rotateY: 90, opacity: 0 },
-      animate: { rotateY: 0, opacity: 1 },
-      exit: { rotateY: -90, opacity: 0 },
-      transition: { duration: 0.5 }
-    },
-    // Star wipe: the incoming slide is revealed through a growing star
-    // while the outgoing slide stays fully visible underneath. Requires
-    // AnimatePresence mode "sync" so both slides are mounted at once.
-    star: {
-      initial: { clipPath: starPolygon(0), zIndex: 2 },
-      animate: { clipPath: starPolygon(4), zIndex: 2 },
-      exit: {
-        zIndex: 1,
-        // Stay visible under the wipe, then disappear once fully covered.
-        opacity: 0,
-        transition: { duration: 0.01, delay: 0.65 }
-      },
-      transition: { duration: 0.6, ease: 'easeInOut' }
-    }
-  };
-
-  const currentTransition = motionVariants[transitionStyle];
+  const currentTransition = slideTransitions[transitionStyle];
 
   return (
     <div className="app-container">
-      {/* Settings Menu */}
-      <AnimatePresence>
-        {isSettingsOpen && (
-          <motion.div
-            className="settings-menu"
-            initial={{ x: '100%' }}
-            animate={{ x: 0 }}
-            exit={{ x: '100%' }}
-            transition={{ type: 'spring', stiffness: 300, damping: 30 }}
-          >
-            <div className="settings-header">Options</div>
-
-            <div className="setting-item">
-              <div className="setting-label">Media Filter</div>
-              <select className="setting-control" value={mediaFilter} onChange={handleMediaFilterChange}>
-                <option value="both">Both</option>
-                <option value="photos">Photos Only</option>
-                <option value="videos">Videos Only</option>
-              </select>
-            </div>
-
-            <div className="setting-item">
-              <label className="checkbox-control">
-                <input type="checkbox" checked={isShuffle} onChange={toggleShuffle} />
-                Shuffle Photos
-              </label>
-            </div>
-
-            <div className="setting-item">
-              <label className="checkbox-control">
-                <input type="checkbox" checked={isSmart} onChange={toggleSmart} />
-                Smart Background
-              </label>
-            </div>
-
-            {isSmart && (
-              <div className="setting-item" style={{ paddingLeft: '24px', marginTop: '-4px' }}>
-                <label className="checkbox-control">
-                  <input type="checkbox" checked={isSmartVideoEnabled} onChange={toggleSmartVideo} />
-                  Smart Background (Videos)
-                </label>
-              </div>
-            )}
-
-            <div className="setting-item">
-              <label className="checkbox-control">
-                <input type="checkbox" checked={isStretch} onChange={toggleStretch} />
-                Force Stretch
-              </label>
-            </div>
-
-            <div className="setting-item">
-              <label className="checkbox-control">
-                <input type="checkbox" checked={isKenBurns} onChange={toggleKenBurns} />
-                Ken Burns Effect
-              </label>
-            </div>
-
-            <div className="setting-item">
-              <label className="checkbox-control">
-                <input type="checkbox" checked={isExifEnabled} onChange={toggleExif} />
-                Show EXIF Data
-              </label>
-            </div>
-
-            <div className="setting-item">
-              <div className="setting-label">Slide Transition</div>
-              <select className="setting-control" value={transitionStyle} onChange={handleTransitionChange}>
-                <option value="fade">Fade</option>
-                <option value="slide">Slide</option>
-                <option value="zoom">Zoom</option>
-                <option value="flip">Flip</option>
-                <option value="star">Star Wipe</option>
-              </select>
-            </div>
-
-            <div className="setting-item">
-              <div className="setting-label">Slide Duration</div>
-              <select className="setting-control" value={slideDuration} onChange={handleDurationChange}>
-                <option value={2000}>2 Seconds</option>
-                <option value={3000}>3 Seconds</option>
-                <option value={5000}>5 Seconds</option>
-                <option value={10000}>10 Seconds</option>
-                <option value={30000}>30 Seconds</option>
-                <option value={60000}>1 Minute</option>
-              </select>
-            </div>
-
-            <div className="setting-item">
-              <div className="setting-label">Controls Position</div>
-              <select className="setting-control" value={controlsPosition} onChange={handleControlsPositionChange}>
-                <option value="bottom">Bottom Center</option>
-                <option value="left">Left Side</option>
-              </select>
-            </div>
-
-            <div className="setting-item">
-              <button
-                className="balatro-button"
-                style={{ width: '100%', fontSize: '14px', padding: '10px' }}
-                onClick={() => {
-                  if (files.length > 0) {
-                    window.api.showInFolder(files[currentIndex].path);
-                    toggleSettings();
-                  }
-                }}
-              >
-                <FiFolder style={{ marginRight: 8 }} /> SHOW IN FINDER
-              </button>
-            </div>
-
-            <div className="setting-item">
-              <button
-                className="balatro-button"
-                style={{ width: '100%', fontSize: '14px', padding: '10px' }}
-                onClick={() => {
-                  toggleSettings();
-                  setIsDedupeOpen(true);
-                }}
-              >
-                <FiLayers style={{ marginRight: 8 }} /> FIND DUPLICATES
-              </button>
-            </div>
-
-            <div style={{ marginTop: 'auto' }}>
-              <button className="primary-button" style={{ width: '100%', justifyContent: 'center', fontFamily: 'Silkscreen' }} onClick={toggleSettings}>
-                Close
-              </button>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      <SettingsMenu
+        isOpen={isSettingsOpen}
+        onClose={toggleSettings}
+        mediaFilter={mediaFilter}
+        onMediaFilterChange={handleMediaFilterChange}
+        isShuffle={isShuffle}
+        onToggleShuffle={toggleShuffle}
+        isSmart={isSmart}
+        onToggleSmart={() => setIsSmart(!isSmart)}
+        isSmartVideoEnabled={isSmartVideoEnabled}
+        onToggleSmartVideo={() => setIsSmartVideoEnabled(!isSmartVideoEnabled)}
+        isStretch={isStretch}
+        onToggleStretch={() => setIsStretch(!isStretch)}
+        isKenBurns={isKenBurns}
+        onToggleKenBurns={() => setIsKenBurns(!isKenBurns)}
+        isExifEnabled={isExifEnabled}
+        onToggleExif={() => setIsExifEnabled(!isExifEnabled)}
+        transitionStyle={transitionStyle}
+        onTransitionChange={setTransitionStyle}
+        slideDuration={slideDuration}
+        onDurationChange={setSlideDuration}
+        controlsPosition={controlsPosition}
+        onControlsPositionChange={setControlsPosition}
+        onShowInFinder={() => {
+          window.api.showInFolder(currentFile.path);
+          toggleSettings();
+        }}
+        onFindDuplicates={() => {
+          toggleSettings();
+          setIsDedupeOpen(true);
+        }}
+      />
 
       {/* Title Bar with Filename */}
       <div className={`title-bar ${showControls ? 'visible' : ''} ${controlsPosition === 'left' ? 'position-left' : ''}`}>
         {currentFile.name}
       </div>
 
-      <div className={`file-info ${showControls ? 'visible' : ''} ${controlsPosition === 'left' ? 'position-left' : ''}`} style={controlsPosition === 'left' ? {} : { top: '50px' }}> {/* Push down below title bar conceptually */}
+      <div className={`file-info ${showControls ? 'visible' : ''} ${controlsPosition === 'left' ? 'position-left' : ''}`} style={controlsPosition === 'left' ? {} : { top: '50px' }}>
         {currentIndex + 1} / {files.length}
       </div>
 
-
-      {
-        isExifEnabled && exifData && (
-          <div className={`exif-overlay ${controlsPosition === 'left' ? 'position-left' : ''}`}>
-            {exifData.make && <div>CAM: {exifData.make} {exifData.model}</div>}
-            {exifData.lens && <div>LENS: {exifData.lens}</div>}
-            <div style={{ display: 'flex', gap: '10px' }}>
-              {exifData.iso && <div>ISO: {exifData.iso}</div>}
-              {exifData.aperture && <div>ƒ/{exifData.aperture}</div>}
-              {exifData.shutter && <div>{exifData.shutter}s</div>}
-            </div>
-            {exifData.date && <div style={{ fontSize: '0.7em', marginTop: '4px', opacity: 0.8 }}>{exifData.date}</div>}
+      {isExifEnabled && exifData && (
+        <div className={`exif-overlay ${controlsPosition === 'left' ? 'position-left' : ''}`}>
+          {exifData.make && <div>CAM: {exifData.make} {exifData.model}</div>}
+          {exifData.lens && <div>LENS: {exifData.lens}</div>}
+          <div style={{ display: 'flex', gap: '10px' }}>
+            {exifData.iso && <div>ISO: {exifData.iso}</div>}
+            {exifData.aperture && <div>ƒ/{exifData.aperture}</div>}
+            {exifData.shutter && <div>{exifData.shutter}s</div>}
           </div>
-        )
-      }
+          {exifData.date && <div style={{ fontSize: '0.7em', marginTop: '4px', opacity: 0.8 }}>{exifData.date}</div>}
+        </div>
+      )}
 
       <div className="viewer-container" onClick={() => isSettingsOpen && setIsSettingsOpen(false)}>
         {/* "sync" keeps the old slide mounted underneath while the star wipes in over it */}
@@ -799,8 +581,11 @@ function App() {
         isOpen={isDedupeOpen}
         onClose={() => setIsDedupeOpen(false)}
         rootPath={currentDir}
+        onFilesDeleted={handleFilesDeleted}
       />
-    </div >
+
+      <Toast message={toast} />
+    </div>
   )
 }
 

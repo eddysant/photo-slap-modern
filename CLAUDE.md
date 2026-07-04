@@ -8,67 +8,76 @@ Standard three-part Electron app built with `vite-plugin-electron`:
 
 | Part | Source | Output | Notes |
 |---|---|---|---|
-| Main | `electron/main.ts` | `dist-electron/main.js` | ESM (`"type": "module"`), window + menu + all IPC handlers |
+| Main | `electron/main.ts` | `dist-electron/main.js` | ESM (`"type": "module"`), window + menu + protocol + all IPC handlers |
 | Preload | `electron/preload.ts` | `dist-electron/preload.mjs` | `contextBridge` exposes `window.api` only |
 | Renderer | `src/` | `dist/` | React 19, no direct Node access (`contextIsolation: true`, `nodeIntegration: false`) |
 
 `npm run dev` runs Vite; the electron plugin builds main/preload in watch mode and launches Electron pointed at the dev server. `npm run build` = `tsc && vite build && electron-builder`.
 
-**Security caveat:** `webSecurity: false` is set in `electron/main.ts` so the renderer can load local media via `file://` URLs (built by `src/utils.ts:getFileUrl`). The cleaner long-term fix is a custom `protocol.handle('media', ...)` scheme; see Improvement ideas below.
+**Vite 8 uses Rolldown**: bundler options for the main process live under `build.rolldownOptions` (NOT `rollupOptions` — those are silently ignored). `sharp` (native) and `heic-decode` (WASM) are externalized there and shipped via explicit `files` globs + `asarUnpack` in `electron-builder.json5`.
+
+## The media:// protocol
+
+Local media is served through a privileged custom scheme (`protocol.handle('media', ...)` in `electron/main.ts`) instead of `file://` — `webSecurity` stays enabled.
+
+- URL shape: `media://local/<encoded absolute path>`, built by `src/utils.ts:getFileUrl`. The `local` host is a required placeholder: standard-scheme URLs swallow (and lowercase) the first path segment as a host if you omit it.
+- **Allowlist**: only files under directories the user opened (folder picker, CLI arg) are served; anything else gets 403. Roots accumulate in `allowedRoots`.
+- Scheme privileges include `supportFetchAPI` + `corsEnabled`, and every response carries `Access-Control-Allow-Origin: *` — without both, `fetch()` from the renderer/worker fails with "Failed to fetch" even though `<img>`/`<video>` tags work.
+- **HEIC/HEIF**: Chromium can't decode them, and prebuilt sharp binaries can't either (HEVC is patent-encumbered — sharp only ships AVIF). So `heic-decode` (WASM libheif/libde265) decodes to raw RGBA and sharp encodes JPEG. Responses are marked cacheable so preloading isn't re-transcoded.
+
+## Launch options
+
+- `photo-slap <directory>` (packaged) or `PHOTO_SLAP_DIR=<dir> npm run dev` — auto-opens that folder (renderer pulls it via `app:getAutoOpen` on mount; pull, not push, to avoid load-order races).
+- `PHOTO_SLAP_DEBUG_PORT=<port>` — exposes the Chrome DevTools Protocol; used for E2E automation (drive the renderer with `Runtime.evaluate` over WebSocket).
 
 ## IPC channels (all defined in `electron/main.ts`, typed in `src/vite-env.d.ts`)
 
 | Channel | Direction | Purpose |
 |---|---|---|
-| `dialog:openDirectory` | invoke | Folder picker (multi-select) → recursive scan → `{ paths, files: MediaFile[] }` |
+| `dialog:openDirectory` | invoke | Folder picker (multi-select) → recursive scan → `{ paths, files, errors }` |
+| `app:getAutoOpen` | invoke | Scan the CLI/env-provided directory, if any |
 | `file:delete` | invoke | Move file to Trash (`shell.trashItem`) |
 | `file:showInFolder` | invoke | Reveal in Finder/Explorer |
 | `file:getExif` | invoke | Read EXIF via `exifreader` → flattened `ExifData` or `null` |
 | `store:get` / `store:set` | invoke | Settings persistence (`electron-store`) |
 | `dedupe:scan:exact` | invoke | Exact dupes: fast-glob → group by size → SHA-256 candidates |
-| `dedupe:scan:files` | invoke | Just lists image paths (perceptual hashing happens renderer-side) |
+| `dedupe:scan:files` | invoke | Lists image paths (perceptual hashing happens renderer-side) |
 | `menu:open-directory`, `menu:show-in-finder` | main → renderer | App menu items forward to renderer handlers |
 
 ## Renderer structure
 
-Nearly all state lives in `src/App.tsx` (single component, ~800 lines):
-
-- `allFiles` = everything scanned; `files` = filtered (photos/videos/both) + sorted (natural sort, optional Fisher-Yates shuffle); `currentIndex` drives the slideshow.
-- Slideshow timer only runs for images; videos advance via `onEnded`. Videos loop when the slideshow is paused.
-- Next 10 images are preloaded via `new Image()` (`preloadRefs`).
-- Settings are loaded from `electron-store` on mount and written back on every toggle.
-- Controls/title bar auto-hide after 3s without mouse movement; optional vertical layout on the left (`controlsPosition`).
-- `DedupeModal` does perceptual hashing in the renderer: draws each image on a 16×16 canvas, hashes with `blockhash-core` (`bmvbhash`), groups by Hamming distance ≤ 12 (naive O(n²) comparison).
+- `App.tsx` — slideshow state (file list, index, playback), viewer, video controls. Scan results from any source go through `ingestScanResult`.
+- `hooks/usePersistedState.ts` — `useState` that hydrates from electron-store on mount and persists on set; all settings use it.
+- `components/SettingsMenu.tsx` — the options side panel (pure props).
+- `components/DedupeModal.tsx` — duplicate finder wizard. Similar-photo hashing runs in `workers/phashWorker.ts` (module worker: fetch over media:// → `createImageBitmap` → 16×16 OffscreenCanvas → `blockhash-core`), grouped by Hamming distance ≤ 12 (naive O(n²)). Review compares the group's first two files ("keeper" vs challenger); the survivor keeps facing the rest, so groups of any size are fully reviewed. Deletions are reported to App via `onFilesDeleted` so the slideshow drops them immediately.
+- `components/Toast.tsx` — transient notices (no media found, unreadable folders); state lives in App (`showToast`).
+- `transitions.ts` — slide transition variants; see below.
+- Slideshow timer only runs for images; videos advance via `onEnded` and loop when paused. Next 10 images are preloaded via `new Image()`.
 
 ### Slide transitions
 
-Defined as `motionVariants` in `App.tsx` and applied to a keyed `motion.div` inside `AnimatePresence`. The slide wrapper is `position: absolute; inset: 0` so slides can stack.
+Applied to a keyed `motion.div` inside `AnimatePresence`. The slide wrapper is `position: absolute; inset: 0` so slides can stack.
 
-The **star wipe** is special: it needs the outgoing slide to stay visible while the incoming slide is revealed through a growing star-shaped `clip-path`. Therefore:
+The **star wipe** needs the outgoing slide to stay visible while the incoming slide is revealed through a growing star-shaped `clip-path`:
 
 - `AnimatePresence` uses `mode="sync"` for star (both slides mounted at once) and `mode="wait"` for everything else.
-- The star polygon is generated by `starPolygon(scale)` from `STAR_POINTS`; scale 0 = collapsed point, scale 4 = star big enough that its concave inner vertices clear the screen corners (corner distance in % space is √(50²+50²) ≈ 70.7; inner vertices sit at ≈ 18.6 × scale).
-- The outgoing slide's `exit` keeps it fully visible (opacity drops only after a 0.65s delay, once fully covered) and lowers `zIndex`.
-
-If you touch transitions, don't reintroduce an opacity fade on the star variant — it degrades the wipe into a crossfade (the original bug).
+- `starPolygon(scale)` generates the polygon; scale 0 = collapsed point, scale 4 = inner vertices clear the screen corners (corner distance in % space ≈ 70.7; inner vertices sit at ≈ 18.6 × scale).
+- The outgoing slide's `exit` keeps it fully visible (opacity drops only after a 0.65 s delay, once covered) and lowers `zIndex`.
+- Don't reintroduce an opacity fade on the star variant — it degrades the wipe into a crossfade (the original bug).
 
 ## Gotchas / conventions
 
 - `MediaFile`, `ExifData`, and `window.api` are ambient types in `src/vite-env.d.ts` — no imports needed in renderer code.
-- `blockhash-core` has no bundled types; a minimal declaration lives in `src/types/blockhash-core.d.ts`.
-- `scanDirectory` skips dotfiles and swallows per-directory errors (e.g. macOS `EPERM` on `Photos Library.photoslibrary`) so a partial scan still succeeds.
-- The dedupe "similar" scan and EXIF reads happen on demand, not during the initial scan, to keep folder opening fast.
+- `blockhash-core` and `heic-decode` have no bundled types; minimal declarations live in `src/types/blockhash-core.d.ts` and `electron/heic-decode.d.ts`.
+- `scanDirectory` skips dotfiles, collects per-directory errors (e.g. macOS `EPERM` on `Photos Library.photoslibrary`) into `errors`, and still returns the partial scan; the renderer surfaces the count in a toast.
 - ESLint: flat config in `eslint.config.js`; `react-hooks/set-state-in-effect` is intentionally off (the slideshow resets per-slide state in effects), `no-explicit-any` off for the IPC boundary.
 - `npm run build` requires the Electron binary; if `node_modules/electron/dist` is missing (npm `allow-scripts` blocking install scripts), run `node node_modules/electron/install.js`.
-- Not a git repository as of July 2026.
+- E2E testing recipe: generate fixtures with sharp, launch with `PHOTO_SLAP_DIR` + `PHOTO_SLAP_DEBUG_PORT`, then drive the page over CDP (`Runtime.evaluate`, Node's built-in WebSocket). Settings can be pre-seeded in `~/Library/Application Support/photo-slap/config.json` (back it up first).
 
 ## Improvement ideas (not yet done)
 
-1. **Replace `webSecurity: false`** with a custom privileged protocol (`protocol.handle('media', …)`) that streams files from allowed directories only.
-2. **Dedupe review for groups > 2** — currently only the first two files of a duplicate group are compared; the rest are ignored.
-3. **Slideshow list not refreshed after dedupe deletions** — deleted files can still appear in the running slideshow until the folder is reopened.
-4. **Split `App.tsx`** into hooks/components (settings panel, video controls, transitions) — it holds all app state today.
-5. **Show a toast when a scan finds no media** (silent today) and surface scan errors.
-6. **HEIC support** (common for iPhone photos) via a decode step; the scanner currently skips them.
-7. **Perceptual hashing in a worker** — hashing thousands of images on the main renderer thread still janks despite chunking.
-8. **`git init`** + first commit; the project has no version control.
+1. **Dedupe transitive grouping** — similar-scan groups form around the first file; A~B and B~C but A≁C ends up split.
+2. **Cache HEIC transcodes on disk** — repeated slideshow passes re-decode (in-memory HTTP cache helps within a session).
+3. **Video thumbnails / exact-dupe preview** — video duplicate pairs render as `<img>` in the review UI and show broken.
+4. **Range request passthrough** in the media protocol for smoother seeking of large videos.
+5. **Multi-folder session UI** — multiple roots are supported by the scanner/protocol, but the dedupe modal only scans the first (`currentDir`).

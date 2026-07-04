@@ -13,11 +13,14 @@ A retro, Balatro-inspired photo & video slideshow app for the desktop, built wit
 - **Media filtering & shuffle** — photos only / videos only / both, natural filename sort, or Fisher-Yates shuffle.
 - **Video controls** — scrubber, volume, mute, click-to-pause.
 - **EXIF overlay** — camera, lens, ISO, aperture, shutter speed, and date for photos.
-- **Duplicate finder** — exact duplicates (SHA-256 of file contents, pre-filtered by size) or visually similar photos (16×16 perceptual hash + Hamming distance), with a side-by-side keep/delete review flow.
+- **Duplicate finder** — exact duplicates (SHA-256 of file contents, pre-filtered by size) or visually similar photos (16×16 perceptual hash + Hamming distance, computed in a Web Worker), with a side-by-side keep/delete review that walks through groups of any size. Deletions update the running slideshow immediately.
+- **HEIC support** — iPhone photos are transcoded to JPEG on the fly (WASM HEVC decode + sharp encode in the main process).
+- **Safe media serving** — files are streamed over a custom `media://` protocol restricted to folders you've opened; Chromium web security stays fully enabled.
 - **Safe delete** — files are moved to the system Trash, never hard-deleted.
+- **Open a folder from the command line** — `photo-slap ~/Pictures/vacation` (or `PHOTO_SLAP_DIR=... npm run dev` during development).
 - **Keyboard shortcuts** — `←`/`→` previous/next, `Space` play/pause, `Delete`/`Backspace` delete, `Esc` close settings.
 
-Supported formats: `.jpg` `.jpeg` `.png` `.webp` `.gif` `.bmp` (images), `.mp4` `.webm` `.ogg` `.gifv` (videos).
+Supported formats: `.jpg` `.jpeg` `.png` `.webp` `.gif` `.bmp` `.heic` `.heif` (images), `.mp4` `.webm` `.ogg` `.gifv` (videos).
 
 ## Development
 
@@ -35,14 +38,17 @@ Packaged installers land in `release/<version>/` (macOS DMG, Windows NSIS — se
 
 ```
 electron/            Main & preload process code (bundled to dist-electron/)
-  main.ts            Window creation, app menu, all IPC handlers
+  main.ts            Window, menu, media:// protocol (allowlist + HEIC transcode), IPC
   preload.ts         contextBridge → exposes window.api to the renderer
   fileScanner.ts     Recursive media-file directory scanner
   dedupe.ts          Exact-duplicate detection (size grouping + SHA-256)
 src/                 React renderer
-  App.tsx            The whole slideshow UI and state
-  components/DedupeModal.tsx   Duplicate finder wizard (incl. perceptual hashing)
-  utils.ts           file:// URL encoding helper
+  App.tsx            Slideshow state and viewer
+  components/        SettingsMenu, DedupeModal, IntroScreen, Toast
+  workers/phashWorker.ts   Perceptual hashing off the main thread
+  hooks/usePersistedState.ts   useState + electron-store persistence
+  transitions.ts     Slide transition variants (incl. the star wipe)
+  utils.ts           media:// URL encoding helper
   vite-env.d.ts      MediaFile / ExifData / window.api type declarations
 scripts/             One-off asset utilities (icon transparency)
 ```
