@@ -6,7 +6,9 @@ A retro, Balatro-inspired photo & video slideshow app for the desktop, built wit
 
 ## Features
 
-- **Slideshow** — open one or more folders and play photos and videos full-screen. Images advance on a configurable timer (2s–1min); videos play through once, then advance.
+- **Slideshow** — open one or more folders (dialog, drag-and-drop onto the window, or a command-line argument) and play photos and videos full-screen. Images advance on a configurable timer (2s–1min); videos play through once, then advance. The intro screen offers to resume your last folder.
+- **Zoom & pan** — scroll to zoom toward the cursor, drag to pan, double-click to toggle.
+- **Sorting** — natural filename order, or by date taken (EXIF capture date with file-modified fallback), newest or oldest first.
 - **Transitions** — Fade, Slide, Zoom, Flip, and a classic **Star Wipe** (the new slide is revealed through a growing star over the old one).
 - **Ken Burns effect** — slow random pan/zoom on photos.
 - **Smart Background** — blurred, darkened copy of the current media fills the letterbox area (optionally for videos too).
@@ -28,9 +30,15 @@ Supported formats: `.jpg` `.jpeg` `.png` `.webp` `.gif` `.bmp` `.heic` `.heif` (
 npm install       # install dependencies
 npm run dev       # start Vite + Electron with hot reload
 npm run lint      # ESLint (flat config, eslint.config.js)
+npm test          # unit tests (vitest)
+npm run test:e2e  # end-to-end: launches the real app and drives it over CDP
 npx tsc           # type-check only
 npm run build     # type-check, bundle, and package with electron-builder
 ```
+
+The E2E suite is not headless — an app window appears briefly. It backs up
+and restores your settings, and needs any running photo-slap instance closed
+first (the app is single-instance).
 
 Packaged installers land in `release/<version>/` (macOS DMG, Windows NSIS — see [electron-builder.json5](electron-builder.json5)).
 
@@ -44,13 +52,15 @@ electron/            Main & preload process code (bundled to dist-electron/)
   dedupe.ts          Exact-duplicate detection (size grouping + SHA-256)
 src/                 React renderer
   App.tsx            Slideshow state and viewer
-  components/        SettingsMenu, DedupeModal, IntroScreen, Toast
+  components/        SettingsMenu, DedupeModal, IntroScreen, Toast, ZoomPan
   workers/phashWorker.ts   Perceptual hashing off the main thread
   hooks/usePersistedState.ts   useState + electron-store persistence
   transitions.ts     Slide transition variants (incl. the star wipe)
+  similarity.ts      Transitive perceptual-hash grouping (union-find)
   utils.ts           media:// URL encoding helper
   vite-env.d.ts      MediaFile / ExifData / window.api type declarations
-scripts/             One-off asset utilities (icon transparency)
+tests/               Vitest unit tests
+scripts/e2e.mjs      End-to-end test (CDP-driven)
 ```
 
 See [CLAUDE.md](CLAUDE.md) for a deeper architecture walkthrough, IPC channel reference, and known caveats.

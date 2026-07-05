@@ -10,7 +10,7 @@ const STAR_POINTS = [
 
 // Star scaled around the center. scale 0 = collapsed to a point,
 // scale 4 = big enough that the star's inner edges clear the screen corners.
-const starPolygon = (scale: number) =>
+export const starPolygon = (scale: number) =>
     `polygon(${STAR_POINTS.map(([x, y]) => `${50 + (x - 50) * scale}% ${50 + (y - 50) * scale}%`).join(', ')})`;
 
 interface SlideTransition {

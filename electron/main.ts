@@ -101,15 +101,19 @@ async function handleMediaRequest(request: Request): Promise<Response> {
   return new Response(res.body, { status: res.status, headers });
 }
 
+// Scan a directory and permit media:// to serve from it
+async function scanAndAllow(dir: string) {
+  const resolved = path.resolve(dir);
+  allowedRoots.add(path.normalize(resolved));
+  const { files, errors } = await scanDirectory(resolved);
+  return { paths: [resolved], files, errors };
+}
+
 // --------- Auto-open ---------
 // A directory can be passed as a CLI argument (packaged app) or via the
 // PHOTO_SLAP_DIR env var (dev, where electron's argv is taken by vite).
-function resolveAutoOpenDir(): string | null {
-  const candidates = [
-    ...process.argv.slice(app.isPackaged ? 1 : 2),
-    process.env.PHOTO_SLAP_DIR ?? '',
-  ];
-  for (const candidate of candidates) {
+function findDirectoryInArgs(args: string[]): string | null {
+  for (const candidate of args) {
     if (!candidate || candidate.startsWith('-')) continue;
     try {
       if (statSync(candidate).isDirectory()) return path.resolve(candidate);
@@ -119,6 +123,31 @@ function resolveAutoOpenDir(): string | null {
   }
   return null;
 }
+
+function resolveAutoOpenDir(): string | null {
+  return findDirectoryInArgs([
+    ...process.argv.slice(app.isPackaged ? 1 : 2),
+    process.env.PHOTO_SLAP_DIR ?? '',
+  ]);
+}
+
+// --------- Single instance ---------
+// A second launch focuses the existing window; if it was given a directory,
+// that directory opens in the running instance.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+}
+
+app.on('second-instance', async (_event, argv) => {
+  if (win) {
+    if (win.isMinimized()) win.restore();
+    win.focus();
+  }
+  const dir = findDirectoryInArgs(argv.slice(1));
+  if (dir && win) {
+    win.webContents.send('app:openScan', await scanAndAllow(dir));
+  }
+});
 
 // Expose the Chrome DevTools Protocol when explicitly requested (automation/debugging)
 if (process.env.PHOTO_SLAP_DEBUG_PORT) {
@@ -268,11 +297,17 @@ ipcMain.handle('dialog:openDirectory', async () => {
 // Renderer asks on startup whether a directory was passed on launch
 ipcMain.handle('app:getAutoOpen', async () => {
   const dir = resolveAutoOpenDir();
-  if (!dir) return null;
+  return dir ? await scanAndAllow(dir) : null;
+});
 
-  allowedRoots.add(path.normalize(dir));
-  const { files, errors } = await scanDirectory(dir);
-  return { paths: [dir], files, errors };
+// Scan an arbitrary directory (drag-and-drop, "resume last folder")
+ipcMain.handle('dir:scan', async (_event, dirPath: string) => {
+  try {
+    if (!statSync(dirPath).isDirectory()) return null;
+  } catch {
+    return null;
+  }
+  return await scanAndAllow(dirPath);
 });
 
 ipcMain.handle('file:delete', async (_event, filePath) => {
@@ -303,6 +338,52 @@ ipcMain.handle('dedupe:scan:exact', async (_event, dirPath) => {
 
 ipcMain.handle('dedupe:scan:files', async (_event, dirPath) => {
   return await scanFiles(dirPath);
+});
+
+// --------- Date-taken lookup (for date sorting) ---------
+// EXIF dates live near the start of the file, so only the first 256 KB is
+// read; anything without a parseable DateTimeOriginal falls back to mtime.
+const EXIF_DATE_RE = /^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/;
+
+async function getFileDate(filePath: string): Promise<number> {
+  let mtime = 0;
+  try {
+    mtime = (await fs.stat(filePath)).mtimeMs;
+  } catch {
+    return 0;
+  }
+
+  if (!/\.(jpe?g|png|webp|heic|heif|gif|bmp)$/i.test(filePath)) return mtime;
+
+  try {
+    const fh = await fs.open(filePath, 'r');
+    const buf = Buffer.alloc(256 * 1024);
+    const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+    await fh.close();
+    const tags = ExifReader.load(buf.subarray(0, bytesRead));
+    const raw = tags['DateTimeOriginal']?.description || tags['CreateDate']?.description;
+    const m = raw && EXIF_DATE_RE.exec(String(raw));
+    if (m) {
+      const t = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime();
+      if (!isNaN(t) && t > 0) return t;
+    }
+  } catch {
+    // truncated/absent EXIF — fall back to mtime
+  }
+  return mtime;
+}
+
+ipcMain.handle('files:getDates', async (_event, paths: string[]) => {
+  const result: Record<string, number> = {};
+  let next = 0;
+  const worker = async () => {
+    while (next < paths.length) {
+      const p = paths[next++];
+      result[p] = await getFileDate(p);
+    }
+  };
+  await Promise.all(Array.from({ length: 16 }, worker));
+  return result;
 });
 
 ipcMain.handle('file:getExif', async (_event, filePath) => {

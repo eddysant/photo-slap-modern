@@ -1,9 +1,13 @@
-import { ipcRenderer, contextBridge } from 'electron'
+import { ipcRenderer, contextBridge, webUtils } from 'electron'
 
 // --------- Expose some API to the Renderer process ---------
 contextBridge.exposeInMainWorld('api', {
   openDirectory: () => ipcRenderer.invoke('dialog:openDirectory'),
   getAutoOpen: () => ipcRenderer.invoke('app:getAutoOpen'),
+  scanPath: (path: string) => ipcRenderer.invoke('dir:scan', path),
+  // Dropped File objects no longer carry .path; this resolves it
+  getPathForFile: (file: File) => webUtils.getPathForFile(file),
+  getDates: (paths: string[]) => ipcRenderer.invoke('files:getDates', paths),
   deleteFile: (path: string) => ipcRenderer.invoke('file:delete', path),
   getStore: (key: string) => ipcRenderer.invoke('store:get', key),
   setStore: (key: string, value: any) => ipcRenderer.invoke('store:set', key, value),

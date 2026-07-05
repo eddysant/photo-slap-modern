@@ -4,6 +4,7 @@ import type { TransitionStyle } from '../transitions';
 
 export type MediaFilter = 'both' | 'photos' | 'videos';
 export type ControlsPosition = 'bottom' | 'left';
+export type SortOrder = 'name' | 'date-desc' | 'date-asc';
 
 interface SettingsMenuProps {
     isOpen: boolean;
@@ -24,6 +25,8 @@ interface SettingsMenuProps {
     onToggleExif: () => void;
     transitionStyle: TransitionStyle;
     onTransitionChange: (style: TransitionStyle) => void;
+    sortOrder: SortOrder;
+    onSortChange: (order: SortOrder) => void;
     slideDuration: number;
     onDurationChange: (duration: number) => void;
     controlsPosition: ControlsPosition;
@@ -55,6 +58,19 @@ export function SettingsMenu(props: SettingsMenuProps) {
                             <option value="both">Both</option>
                             <option value="photos">Photos Only</option>
                             <option value="videos">Videos Only</option>
+                        </select>
+                    </div>
+
+                    <div className="setting-item">
+                        <div className="setting-label">Sort By</div>
+                        <select
+                            className="setting-control"
+                            value={props.sortOrder}
+                            onChange={e => props.onSortChange(e.target.value as SortOrder)}
+                        >
+                            <option value="name">Name</option>
+                            <option value="date-desc">Date (Newest First)</option>
+                            <option value="date-asc">Date (Oldest First)</option>
                         </select>
                     </div>
 

@@ -1,7 +1,18 @@
 import { useState, useEffect, useRef } from 'react';
 import { FiX, FiCheck, FiImage, FiLayers } from 'react-icons/fi';
 import { getFileUrl } from '../utils';
+import { groupSimilar } from '../similarity';
 import type { PHashMessage, PHashRequest } from '../workers/phashWorker';
+
+const isVideoFile = (p: string) => /\.(mp4|mov|webm|mkv|ogg|gifv)$/i.test(p);
+
+// Exact duplicates can be videos; render those with a real video element
+function MediaPreview({ path, alt }: { path: string; alt: string }) {
+    if (isVideoFile(path)) {
+        return <video src={getFileUrl(path)} muted controls loop preload="metadata" />;
+    }
+    return <img src={getFileUrl(path)} alt={alt} />;
+}
 
 interface DedupeModalProps {
     isOpen: boolean;
@@ -19,14 +30,6 @@ interface DuplicateGroup {
 
 // Hamming distance <= this over the 256-bit blockhash counts as "similar"
 const SIMILARITY_THRESHOLD = 12;
-
-const hammingDistance = (a: string, b: string) => {
-    let dist = 0;
-    for (let i = 0; i < a.length; i++) {
-        if (a[i] !== b[i]) dist++;
-    }
-    return dist;
-};
 
 export function DedupeModal({ isOpen, onClose, rootPath, onFilesDeleted }: DedupeModalProps) {
     const [step, setStep] = useState<'intro' | 'scanning' | 'review' | 'done'>('intro');
@@ -119,30 +122,10 @@ export function DedupeModal({ isOpen, onClose, rootPath, onFilesDeleted }: Dedup
             worker.terminate();
             workerRef.current = null;
 
-            // Group by similarity (naive O(n^2) comparison)
+            // Group by similarity, transitively (A~B and B~C land together)
             setStatusMsg('Comparing...');
-            const newGroups: DuplicateGroup[] = [];
-            const processed = new Set<string>();
-
-            for (let i = 0; i < hashes.length; i++) {
-                if (processed.has(hashes[i].path)) continue;
-
-                const currentGroup = [hashes[i].path];
-                processed.add(hashes[i].path);
-
-                for (let j = i + 1; j < hashes.length; j++) {
-                    if (processed.has(hashes[j].path)) continue;
-
-                    if (hammingDistance(hashes[i].hash, hashes[j].hash) <= SIMILARITY_THRESHOLD) {
-                        currentGroup.push(hashes[j].path);
-                        processed.add(hashes[j].path);
-                    }
-                }
-
-                if (currentGroup.length > 1) {
-                    newGroups.push({ hash: hashes[i].hash, files: currentGroup, type: 'similar' });
-                }
-            }
+            const newGroups: DuplicateGroup[] = groupSimilar(hashes, SIMILARITY_THRESHOLD)
+                .map(files => ({ hash: '', files, type: 'similar' as const }));
 
             enterReview(newGroups);
         } catch (e) {
@@ -259,7 +242,7 @@ export function DedupeModal({ isOpen, onClose, rootPath, onFilesDeleted }: Dedup
                                 {/* LEFT */}
                                 <div className="compare-card">
                                     <div className="img-wrapper">
-                                        <img src={getFileUrl(leftImage)} alt="Left" />
+                                        <MediaPreview path={leftImage} alt="Left" />
                                     </div>
                                     <div className="card-actions">
                                         <button className="keep-btn" onClick={() => resolveConflict('left')}>
@@ -271,7 +254,7 @@ export function DedupeModal({ isOpen, onClose, rootPath, onFilesDeleted }: Dedup
                                 {/* RIGHT */}
                                 <div className="compare-card">
                                     <div className="img-wrapper">
-                                        <img src={getFileUrl(rightImage)} alt="Right" />
+                                        <MediaPreview path={rightImage} alt="Right" />
                                     </div>
                                     <div className="card-actions">
                                         <button className="keep-btn" onClick={() => resolveConflict('right')}>

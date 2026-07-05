@@ -17,10 +17,19 @@ interface ExifData {
     date: string;
 }
 
+interface ScanResult {
+    paths: string[];
+    files: MediaFile[];
+    errors: string[];
+}
+
 interface Window {
     api: {
-        openDirectory: () => Promise<{ paths: string[], files: MediaFile[], errors: string[] } | null>;
-        getAutoOpen: () => Promise<{ paths: string[], files: MediaFile[], errors: string[] } | null>;
+        openDirectory: () => Promise<ScanResult | null>;
+        getAutoOpen: () => Promise<ScanResult | null>;
+        scanPath: (path: string) => Promise<ScanResult | null>;
+        getPathForFile: (file: File) => string;
+        getDates: (paths: string[]) => Promise<Record<string, number>>;
         deleteFile: (path: string) => Promise<boolean>;
         getStore: (key: string) => Promise<any>;
         setStore: (key: string, value: any) => Promise<void>;

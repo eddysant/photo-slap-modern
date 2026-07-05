@@ -4,11 +4,18 @@ import { FiSettings, FiPlay, FiPause, FiSkipBack, FiSkipForward, FiTrash2, FiVol
 import './App.css'
 import { DedupeModal } from './components/DedupeModal'
 import { IntroScreen } from './components/IntroScreen'
-import { SettingsMenu, MediaFilter, ControlsPosition } from './components/SettingsMenu'
+import { SettingsMenu, MediaFilter, ControlsPosition, SortOrder } from './components/SettingsMenu'
 import { Toast } from './components/Toast'
+import { ZoomPan } from './components/ZoomPan'
 import { usePersistedState } from './hooks/usePersistedState'
 import { slideTransitions, TransitionStyle } from './transitions'
 import { getFileUrl } from './utils'
+
+const mergeScans = (results: ScanResult[]): ScanResult => ({
+  paths: results.flatMap(r => r.paths),
+  files: results.flatMap(r => r.files),
+  errors: results.flatMap(r => r.errors),
+})
 
 const KEN_BURNS_ANIMATIONS = ['kb-pan-left', 'kb-pan-right', 'kb-pan-up', 'kb-pan-down', 'kb-zoom-in', 'kb-zoom-out'];
 
@@ -37,6 +44,18 @@ function App() {
   const [volume, setVolume] = usePersistedState('volume', 1)
   const [isMuted, setIsMuted] = usePersistedState('isMuted', false)
   const [controlsPosition, setControlsPosition] = usePersistedState<ControlsPosition>('controlsPosition', 'bottom')
+  const [sortOrder, setSortOrder] = usePersistedState<SortOrder>('sortOrder', 'name')
+
+  // Zoom state (per-slide; ZoomPan reports in so Ken Burns can pause)
+  const [isZoomed, setIsZoomed] = useState(false)
+
+  // Last opened folder(s), for the intro screen's Resume button
+  const [lastDirs, setLastDirs] = useState<string[]>([])
+  useEffect(() => {
+    window.api.getStore('lastDirs')
+      .then(v => { if (Array.isArray(v) && v.length > 0) setLastDirs(v); })
+      .catch(() => { });
+  }, []);
 
   // Toast
   const [toast, setToast] = useState<string | null>(null)
@@ -47,7 +66,13 @@ function App() {
     toastTimeoutRef.current = setTimeout(() => setToast(null), 4000);
   }, []);
 
-  const applyFiltersAndSort = useCallback((unfiltered: MediaFile[], currentFilter: string, isShuffled: boolean) => {
+  const applyFiltersAndSort = useCallback((
+    unfiltered: MediaFile[],
+    currentFilter: string,
+    isShuffled: boolean,
+    sort: SortOrder,
+    dates: Record<string, number> | null,
+  ) => {
     let filtered = unfiltered;
     if (currentFilter === 'photos') {
       filtered = unfiltered.filter(f => f.type === 'image');
@@ -55,8 +80,16 @@ function App() {
       filtered = unfiltered.filter(f => f.type === 'video');
     }
 
-    // Sort naturally first
+    // Natural name sort first — it's also the tiebreaker for equal dates
     const sorted = [...filtered].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+
+    if (sort !== 'name' && dates) {
+      sorted.sort((a, b) => {
+        const da = dates[a.path] ?? 0;
+        const db = dates[b.path] ?? 0;
+        return sort === 'date-desc' ? db - da : da - db;
+      });
+    }
 
     if (isShuffled) {
       // Fisher-Yates shuffle
@@ -70,22 +103,45 @@ function App() {
     setCurrentIndex(0);
   }, []);
 
-  const ingestScanResult = useCallback((result: { paths: string[], files: MediaFile[], errors: string[] }) => {
+  // Date-taken lookup, fetched lazily the first time a date sort is used
+  // and cached until a different folder is opened.
+  const fileDatesRef = useRef<Record<string, number> | null>(null);
+  const ensureDates = useCallback(async (fileList: MediaFile[]) => {
+    if (!fileDatesRef.current) {
+      showToast('Reading photo dates…');
+      fileDatesRef.current = await window.api.getDates(fileList.map(f => f.path));
+    }
+    return fileDatesRef.current;
+  }, [showToast]);
+
+  const ingestScanResult = useCallback((result: ScanResult) => {
     if (result.errors.length > 0) {
       showToast(`${result.errors.length} folder${result.errors.length > 1 ? 's' : ''} couldn't be read`);
     }
 
     if (result.files.length > 0) {
-      if (result.paths.length > 0) {
-        setCurrentDir(result.paths[0]);
-      }
-      setAllFiles(result.files);
-      applyFiltersAndSort(result.files, mediaFilter, isShuffle);
+      setCurrentDir(result.paths[0] ?? '');
+      fileDatesRef.current = null;
+      setAllFiles(result.files); // the filter/sort effect below picks this up
       setIsPlaying(false); // Default to paused
+      window.api.setStore('lastDirs', result.paths);
+      setLastDirs(result.paths);
     } else {
       showToast('No media files found in that folder');
     }
-  }, [applyFiltersAndSort, mediaFilter, isShuffle, showToast]);
+  }, [showToast]);
+
+  // Derive the playable list whenever the source files or any list-shaping
+  // setting changes (also handles persisted settings hydrating after launch).
+  useEffect(() => {
+    if (allFiles.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const dates = sortOrder !== 'name' ? await ensureDates(allFiles) : null;
+      if (!cancelled) applyFiltersAndSort(allFiles, mediaFilter, isShuffle, sortOrder, dates);
+    })();
+    return () => { cancelled = true; };
+  }, [allFiles, mediaFilter, isShuffle, sortOrder, ensureDates, applyFiltersAndSort]);
 
   const handleOpenDirectory = useCallback(async () => {
     try {
@@ -100,6 +156,23 @@ function App() {
     }
   }, [ingestScanResult, showToast]);
 
+  // Resume the folder(s) from the previous session
+  const handleResume = useCallback(async () => {
+    if (lastDirs.length === 0) return;
+    try {
+      setIsLoading(true);
+      const results = await Promise.all(lastDirs.map(d => window.api.scanPath(d)));
+      const valid = results.filter((r): r is ScanResult => r !== null);
+      if (valid.length > 0) {
+        ingestScanResult(mergeScans(valid));
+      } else {
+        showToast("That folder doesn't exist anymore");
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  }, [lastDirs, ingestScanResult, showToast]);
+
   // Load a directory passed on the command line (or PHOTO_SLAP_DIR in dev)
   const autoOpenedRef = useRef(false);
   useEffect(() => {
@@ -109,6 +182,40 @@ function App() {
       .then(result => { if (result) ingestScanResult(result); })
       .catch(e => console.error('Auto-open failed:', e));
   }, [ingestScanResult]);
+
+  // A second app launch with a folder argument opens it here
+  useEffect(() => {
+    return window.api.on('app:openScan', (_event, result: ScanResult) => {
+      ingestScanResult(result);
+    });
+  }, [ingestScanResult]);
+
+  // Drag-and-drop folders onto the window to open them
+  useEffect(() => {
+    const onDragOver = (e: DragEvent) => e.preventDefault();
+    const onDrop = async (e: DragEvent) => {
+      e.preventDefault();
+      const dropped = [...(e.dataTransfer?.files ?? [])];
+      if (dropped.length === 0) return;
+      const results: ScanResult[] = [];
+      for (const file of dropped) {
+        const path = window.api.getPathForFile(file);
+        const result = path ? await window.api.scanPath(path) : null;
+        if (result) results.push(result);
+      }
+      if (results.length > 0) {
+        ingestScanResult(mergeScans(results));
+      } else {
+        showToast('Drop a folder to open it');
+      }
+    };
+    window.addEventListener('dragover', onDragOver);
+    window.addEventListener('drop', onDrop);
+    return () => {
+      window.removeEventListener('dragover', onDragOver);
+      window.removeEventListener('drop', onDrop);
+    };
+  }, [ingestScanResult, showToast]);
 
   const nextSlide = useCallback(() => {
     setFiles((currentFiles) => {
@@ -128,16 +235,9 @@ function App() {
 
   const togglePlay = useCallback(() => setIsPlaying(prev => !prev), []);
 
-  const toggleShuffle = () => {
-    const newShuffle = !isShuffle;
-    setIsShuffle(newShuffle);
-    applyFiltersAndSort(allFiles, mediaFilter, newShuffle);
-  };
-
-  const handleMediaFilterChange = (newFilter: MediaFilter) => {
-    setMediaFilter(newFilter);
-    applyFiltersAndSort(allFiles, newFilter, isShuffle);
-  };
+  // List-shaping settings just persist; the effect above re-derives the list
+  const toggleShuffle = () => setIsShuffle(!isShuffle);
+  const handleMediaFilterChange = (newFilter: MediaFilter) => setMediaFilter(newFilter);
 
   const deleteCurrentFile = useCallback(async () => {
     if (files.length === 0) return;
@@ -366,7 +466,12 @@ function App() {
     return (
       <div className="app-container">
         <div className="title-bar">photo-slap</div>
-        <IntroScreen isLoading={isLoading} onOpenDirectory={handleOpenDirectory} />
+        <IntroScreen
+          isLoading={isLoading}
+          onOpenDirectory={handleOpenDirectory}
+          lastDirName={lastDirs[0]?.split(/[/\\]/).pop() ?? null}
+          onResume={handleResume}
+        />
         <Toast message={toast} />
       </div>
     );
@@ -397,6 +502,8 @@ function App() {
         onToggleExif={() => setIsExifEnabled(!isExifEnabled)}
         transitionStyle={transitionStyle}
         onTransitionChange={setTransitionStyle}
+        sortOrder={sortOrder}
+        onSortChange={setSortOrder}
         slideDuration={slideDuration}
         onDurationChange={setSlideDuration}
         controlsPosition={controlsPosition}
@@ -496,18 +603,20 @@ function App() {
                 )}
               </>
             ) : (
-              <img
-                src={fileUrl}
-                className={`media-element ${isKenBurns ? `ken-burns-active ${kenBurnsClass}` : ''}`}
-                alt={currentFile.name}
-                style={{
-                  objectFit: isStretch ? 'contain' : (isKenBurns ? 'cover' : 'contain'),
-                  width: isStretch || isKenBurns ? '100%' : 'auto',
-                  height: isStretch || isKenBurns ? '100%' : 'auto',
-                  maxWidth: isStretch ? '100%' : (isKenBurns ? 'none' : '100%'),
-                  maxHeight: isStretch ? '100%' : (isKenBurns ? 'none' : '100%')
-                }}
-              />
+              <ZoomPan resetKey={currentFile.path} onZoomChange={setIsZoomed}>
+                <img
+                  src={fileUrl}
+                  className={`media-element ${isKenBurns && !isZoomed ? `ken-burns-active ${kenBurnsClass}` : ''}`}
+                  alt={currentFile.name}
+                  style={{
+                    objectFit: isStretch ? 'contain' : (isKenBurns ? 'cover' : 'contain'),
+                    width: isStretch || isKenBurns ? '100%' : 'auto',
+                    height: isStretch || isKenBurns ? '100%' : 'auto',
+                    maxWidth: isStretch ? '100%' : (isKenBurns ? 'none' : '100%'),
+                    maxHeight: isStretch ? '100%' : (isKenBurns ? 'none' : '100%')
+                  }}
+                />
+              </ZoomPan>
             )}
           </motion.div>
         </AnimatePresence>

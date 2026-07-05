@@ -28,7 +28,9 @@ Local media is served through a privileged custom scheme (`protocol.handle('medi
 ## Launch options
 
 - `photo-slap <directory>` (packaged) or `PHOTO_SLAP_DIR=<dir> npm run dev` — auto-opens that folder (renderer pulls it via `app:getAutoOpen` on mount; pull, not push, to avoid load-order races).
-- `PHOTO_SLAP_DEBUG_PORT=<port>` — exposes the Chrome DevTools Protocol; used for E2E automation (drive the renderer with `Runtime.evaluate` over WebSocket).
+- `PHOTO_SLAP_DEBUG_PORT=<port>` — exposes the Chrome DevTools Protocol; used by `npm run test:e2e`.
+- The app is **single-instance** (`requestSingleInstanceLock`); a second launch focuses the running window and, if given a directory argument, pushes its scan to the renderer over `app:openScan`. This also means dev and packaged builds can't run simultaneously.
+- Folders can also arrive by **drag-and-drop** (renderer resolves paths via `webUtils.getPathForFile` in the preload — `File.path` no longer exists) or the intro screen's **Resume** button (`lastDirs` in electron-store). All ingestion paths funnel through `ingestScanResult` in App.
 
 ## IPC channels (all defined in `electron/main.ts`, typed in `src/vite-env.d.ts`)
 
@@ -36,6 +38,9 @@ Local media is served through a privileged custom scheme (`protocol.handle('medi
 |---|---|---|
 | `dialog:openDirectory` | invoke | Folder picker (multi-select) → recursive scan → `{ paths, files, errors }` |
 | `app:getAutoOpen` | invoke | Scan the CLI/env-provided directory, if any |
+| `dir:scan` | invoke | Scan an arbitrary directory (drag-and-drop, Resume) and allowlist it |
+| `files:getDates` | invoke | Date-taken per path: EXIF `DateTimeOriginal` from the first 256 KB, mtime fallback (16-way concurrent) |
+| `app:openScan` | main → renderer | Scan result pushed from a second app launch |
 | `file:delete` | invoke | Move file to Trash (`shell.trashItem`) |
 | `file:showInFolder` | invoke | Reveal in Finder/Explorer |
 | `file:getExif` | invoke | Read EXIF via `exifreader` → flattened `ExifData` or `null` |
@@ -46,10 +51,12 @@ Local media is served through a privileged custom scheme (`protocol.handle('medi
 
 ## Renderer structure
 
-- `App.tsx` — slideshow state (file list, index, playback), viewer, video controls. Scan results from any source go through `ingestScanResult`.
+- `App.tsx` — slideshow state (file list, index, playback), viewer, video controls. Scan results from any source (dialog, drag-drop, resume, CLI, second instance) go through `ingestScanResult`, which only sets `allFiles`; a single reactive effect derives the playable `files` list from `allFiles` + mediaFilter + sortOrder + shuffle, so persisted settings hydrating after launch re-sort automatically.
+- **Date sort**: lazily fetches `files:getDates` the first time a date sort is active (toast: "Reading photo dates…"), cached in a ref until another folder is opened. Name sort runs first so it's the tiebreaker.
 - `hooks/usePersistedState.ts` — `useState` that hydrates from electron-store on mount and persists on set; all settings use it.
+- `components/ZoomPan.tsx` — wheel-zoom toward cursor / drag-pan / double-click toggle for photos. Transform state lives in refs and is written straight to the DOM (no re-render per pointermove); the wheel listener is attached manually to be non-passive. Resets on slide change via `resetKey`; reports `onZoomChange` so App suspends the Ken Burns class while zoomed.
 - `components/SettingsMenu.tsx` — the options side panel (pure props).
-- `components/DedupeModal.tsx` — duplicate finder wizard. Similar-photo hashing runs in `workers/phashWorker.ts` (module worker: fetch over media:// → `createImageBitmap` → 16×16 OffscreenCanvas → `blockhash-core`), grouped by Hamming distance ≤ 12 (naive O(n²)). Review compares the group's first two files ("keeper" vs challenger); the survivor keeps facing the rest, so groups of any size are fully reviewed. Deletions are reported to App via `onFilesDeleted` so the slideshow drops them immediately.
+- `components/DedupeModal.tsx` — duplicate finder wizard. Similar-photo hashing runs in `workers/phashWorker.ts` (module worker: fetch over media:// → `createImageBitmap` → 16×16 OffscreenCanvas → `blockhash-core`); grouping is transitive union-find in `similarity.ts` (Hamming ≤ 12, O(n²) pairs). Review compares the group's first two files ("keeper" vs challenger); the survivor keeps facing the rest, so groups of any size are fully reviewed. Video duplicates render with a `<video>` preview. Deletions are reported to App via `onFilesDeleted` so the slideshow drops them immediately.
 - `components/Toast.tsx` — transient notices (no media found, unreadable folders); state lives in App (`showToast`).
 - `transitions.ts` — slide transition variants; see below.
 - Slideshow timer only runs for images; videos advance via `onEnded` and loop when paused. Next 10 images are preloaded via `new Image()`.
@@ -72,12 +79,16 @@ The **star wipe** needs the outgoing slide to stay visible while the incoming sl
 - `scanDirectory` skips dotfiles, collects per-directory errors (e.g. macOS `EPERM` on `Photos Library.photoslibrary`) into `errors`, and still returns the partial scan; the renderer surfaces the count in a toast.
 - ESLint: flat config in `eslint.config.js`; `react-hooks/set-state-in-effect` is intentionally off (the slideshow resets per-slide state in effects), `no-explicit-any` off for the IPC boundary.
 - `npm run build` requires the Electron binary; if `node_modules/electron/dist` is missing (npm `allow-scripts` blocking install scripts), run `node node_modules/electron/install.js`.
-- E2E testing recipe: generate fixtures with sharp, launch with `PHOTO_SLAP_DIR` + `PHOTO_SLAP_DEBUG_PORT`, then drive the page over CDP (`Runtime.evaluate`, Node's built-in WebSocket). Settings can be pre-seeded in `~/Library/Application Support/photo-slap/config.json` (back it up first).
+
+## Testing
+
+- `npm test` — Vitest unit tests in `tests/` (scanner, exact dedupe, similarity grouping, star polygon geometry, media URL encoding). Config lives in `vitest.config.ts`, deliberately separate from `vite.config.ts` so the electron plugin doesn't launch during tests.
+- `npm run test:e2e` — `scripts/e2e.mjs` generates an image fixture (deterministic mtimes; downloads a sample HEIC when online), seeds the star-wipe setting (user config backed up and restored), launches the real app with `PHOTO_SLAP_DIR` + `PHOTO_SLAP_DEBUG_PORT`, and asserts over CDP: media:// serving + 403 allowlist, HEIC transcode, star-wipe clip-path interpolation, date sorting, zoom/pan, and the full dedupe review flow. Not headless; needs the single-instance lock free. Gotcha: the very first slide mounts before settings hydrate, so transition assertions need one warm-up slide change.
 
 ## Improvement ideas (not yet done)
 
-1. **Dedupe transitive grouping** — similar-scan groups form around the first file; A~B and B~C but A≁C ends up split.
-2. **Cache HEIC transcodes on disk** — repeated slideshow passes re-decode (in-memory HTTP cache helps within a session).
-3. **Video thumbnails / exact-dupe preview** — video duplicate pairs render as `<img>` in the review UI and show broken.
-4. **Range request passthrough** in the media protocol for smoother seeking of large videos.
-5. **Multi-folder session UI** — multiple roots are supported by the scanner/protocol, but the dedupe modal only scans the first (`currentDir`).
+1. **Cache HEIC transcodes on disk** — repeated slideshow passes re-decode (in-memory HTTP cache helps within a session).
+2. **Range request passthrough** in the media protocol for smoother seeking of large videos.
+3. **Multi-folder session UI** — multiple roots are supported by the scanner/protocol/resume, but the dedupe modal only scans the first (`currentDir`).
+4. **CI** — a GitHub Actions workflow running tsc/eslint/vitest (E2E needs a display, so keep it local or use a macOS runner).
+5. **Pinch-to-zoom** — ZoomPan handles wheel + drag; trackpad pinch arrives as ctrl+wheel and mostly works, but true multi-touch pointer pinch is unimplemented.
