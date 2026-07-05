@@ -486,13 +486,24 @@ function App() {
 
   // Listen for menu events
   useEffect(() => {
+    // Items in the Actions menu mirror the keyboard shortcuts
+    const actions: Record<string, () => void> = {
+      'next': nextSlide,
+      'prev': prevSlide,
+      'toggle-play': togglePlay,
+      'seek-forward': () => seekVideoBy(10),
+      'seek-back': () => seekVideoBy(-10),
+      'reveal': showCurrentInFinder,
+      'delete': deleteCurrentFile,
+    };
     const cleanups = [
       window.api.on('menu:open-directory', () => handleOpenDirectory()),
       window.api.on('menu:show-in-finder', () => showCurrentInFinder()),
       window.api.on('menu:open-settings', () => setIsSettingsOpen(true)),
+      window.api.on('menu:action', (_event, name: string) => actions[name]?.()),
     ];
     return () => cleanups.forEach(c => c());
-  }, [handleOpenDirectory, showCurrentInFinder]);
+  }, [handleOpenDirectory, showCurrentInFinder, nextSlide, prevSlide, togglePlay, seekVideoBy, deleteCurrentFile]);
 
   const currentFile: MediaFile | null = files.length > 0 ? files[currentIndex] : null;
   const fileUrl = currentFile ? getFileUrl(currentFile.path) : '';

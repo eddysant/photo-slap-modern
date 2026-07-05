@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, net, protocol, Menu, MenuItemConstructorOptions } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell, net, protocol, screen, Menu, MenuItemConstructorOptions } from 'electron'
 
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
@@ -156,33 +156,47 @@ if (process.env.PHOTO_SLAP_DEBUG_PORT) {
 
 let win: BrowserWindow | null = null
 
-function createWindow() {
-  const iconPath = path.join(process.env.VITE_PUBLIC, 'icon.png');
+// Move the slideshow fullscreen onto a given display. This is the "cast to
+// TV" path: connect the TV via macOS Screen Mirroring (as an extended
+// display) and it shows up here. Electron cannot initiate AirPlay streaming
+// itself — that API is Safari/AVKit-only.
+function sendToDisplay(displayId: number) {
+  if (!win) return;
+  const display = screen.getAllDisplays().find(d => d.id === displayId);
+  if (!display) return;
 
-  win = new BrowserWindow({
-    width: 1200,
-    height: 800,
-    minWidth: 800,
-    minHeight: 600,
-    title: 'photo-slap',
-    icon: iconPath,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.mjs'),
-      nodeIntegration: false,
-      contextIsolation: true,
-    },
-    titleBarStyle: 'hiddenInset',
-    vibrancy: 'under-window', // macos blur effect
-    visualEffectState: 'active',
-  })
+  const move = () => {
+    win?.setBounds(display.bounds);
+    win?.setFullScreen(true);
+  };
 
-  // Set dock icon explicitly for macOS dev
-  if (process.platform === 'darwin' && VITE_DEV_SERVER_URL) {
-    app.dock?.setIcon(iconPath);
+  if (win.isFullScreen()) {
+    // Leave fullscreen on the current display first; the transition is
+    // animated on macOS, so wait for it before moving.
+    win.once('leave-full-screen', () => setTimeout(move, 150));
+    win.setFullScreen(false);
+  } else {
+    move();
   }
+}
 
-  // Create Menu
+function buildApplicationMenu() {
   const isMac = process.platform === 'darwin'
+
+  // Renderer-handled shortcuts, surfaced in the menu so they're
+  // discoverable. registerAccelerator: false (macOS) shows the key without
+  // registering it — the renderer's keydown handler stays the one owner.
+  const action = (label: string, accelerator: string, name: string): MenuItemConstructorOptions => ({
+    label,
+    accelerator,
+    registerAccelerator: false,
+    click: () => win?.webContents.send('menu:action', name),
+  });
+
+  const displayItems: MenuItemConstructorOptions[] = screen.getAllDisplays().map((d, i) => ({
+    label: `${d.label || `Display ${i + 1}`} (${d.size.width}×${d.size.height})`,
+    click: () => sendToDisplay(d.id),
+  }));
 
   const template: MenuItemConstructorOptions[] = [
     // { role: 'appMenu' }
@@ -232,6 +246,21 @@ function createWindow() {
         isMac ? { role: 'close' } : { role: 'quit' }
       ] as MenuItemConstructorOptions[]
     },
+    // All slideshow shortcuts, discoverable in one place
+    {
+      label: 'Actions',
+      submenu: [
+        action('Next Slide', 'Right', 'next'),
+        action('Previous Slide', 'Left', 'prev'),
+        action('Play / Pause Slideshow', 'Space', 'toggle-play'),
+        { type: 'separator' },
+        action('Video: Skip Forward 10s', 'M', 'seek-forward'),
+        action('Video: Skip Back 10s', 'N', 'seek-back'),
+        { type: 'separator' },
+        action('Reveal in Finder', 'F', 'reveal'),
+        action('Move File to Trash', 'Backspace', 'delete'),
+      ]
+    },
     // { role: 'viewMenu' }
     {
       label: 'View',
@@ -253,6 +282,10 @@ function createWindow() {
       submenu: [
         { role: 'minimize' },
         { role: 'zoom' },
+        {
+          label: 'Send to Display',
+          submenu: displayItems,
+        },
         ...(isMac
           ? [
             { type: 'separator' },
@@ -267,8 +300,35 @@ function createWindow() {
     },
   ]
 
-  const menu = Menu.buildFromTemplate(template)
-  Menu.setApplicationMenu(menu)
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
+
+function createWindow() {
+  const iconPath = path.join(process.env.VITE_PUBLIC, 'icon.png');
+
+  win = new BrowserWindow({
+    width: 1200,
+    height: 800,
+    minWidth: 800,
+    minHeight: 600,
+    title: 'photo-slap',
+    icon: iconPath,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.mjs'),
+      nodeIntegration: false,
+      contextIsolation: true,
+    },
+    titleBarStyle: 'hiddenInset',
+    vibrancy: 'under-window', // macos blur effect
+    visualEffectState: 'active',
+  })
+
+  // Set dock icon explicitly for macOS dev
+  if (process.platform === 'darwin' && VITE_DEV_SERVER_URL) {
+    app.dock?.setIcon(iconPath);
+  }
+
+  buildApplicationMenu();
 
   if (process.env.VITE_DEV_SERVER_URL) {
     win.loadURL(process.env.VITE_DEV_SERVER_URL)
@@ -476,4 +536,9 @@ app.on('activate', () => {
 app.whenReady().then(() => {
   protocol.handle('media', handleMediaRequest);
   createWindow();
+
+  // Keep the "Send to Display" submenu in sync as displays (e.g. an
+  // AirPlay-mirrored TV) come and go.
+  screen.on('display-added', buildApplicationMenu);
+  screen.on('display-removed', buildApplicationMenu);
 });

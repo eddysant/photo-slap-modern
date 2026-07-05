@@ -21,9 +21,19 @@ A retro, Balatro-inspired photo & video slideshow app for the desktop, built wit
 - **Safe media serving** — files are streamed over a custom `media://` protocol restricted to folders you've opened; Chromium web security stays fully enabled.
 - **Safe delete** — files are moved to the system Trash, never hard-deleted.
 - **Open a folder from the command line** — `photo-slap ~/Pictures/vacation` (or `PHOTO_SLAP_DIR=... npm run dev` during development).
-- **Keyboard shortcuts** — `←`/`→` previous/next, `Space` play/pause, `F` reveal in Finder, `M`/`N` video ±10 seconds, `Delete`/`Backspace` delete, `Esc` close settings.
+- **Keyboard shortcuts** — `←`/`→` previous/next, `Space` play/pause, `F` reveal in Finder, `M`/`N` video ±10 seconds, `Delete`/`Backspace` delete, `Esc` close settings. All of them are listed in the **Actions** menu in the menu bar.
+- **Send to Display** — `Window → Send to Display` moves the slideshow fullscreen onto any connected screen.
 
 Supported formats: `.jpg` `.jpeg` `.png` `.webp` `.gif` `.bmp` `.heic` `.heif` (images), `.mp4` `.webm` `.ogg` `.gifv` (videos).
+
+## Casting to a TV (AirPlay)
+
+Electron apps can't start an AirPlay stream directly (that API is Safari-only), but the two-step equivalent works well:
+
+1. On your Mac: **Control Center → Screen Mirroring → your TV**, and set it to *Use As Separate Display*.
+2. In photo-slap: **Window → Send to Display → your TV**. The slideshow goes fullscreen on the TV; keyboard controls keep working from your Mac.
+
+The display list updates automatically as screens connect and disconnect.
 
 ## Development
 

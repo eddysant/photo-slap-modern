@@ -32,6 +32,12 @@ Local media is served through a privileged custom scheme (`protocol.handle('medi
 - The app is **single-instance** (`requestSingleInstanceLock`); a second launch focuses the running window and, if given a directory argument, pushes its scan to the renderer over `app:openScan`. This also means dev and packaged builds can't run simultaneously.
 - Folders can also arrive by **drag-and-drop** (renderer resolves paths via `webUtils.getPathForFile` in the preload — `File.path` no longer exists) or the intro screen's **Resume** button (`lastDirs` in electron-store). All ingestion paths funnel through `ingestScanResult` in App.
 
+## Menus & displays
+
+- `buildApplicationMenu()` in `electron/main.ts` owns the whole menu and is re-run on `screen` `display-added`/`display-removed` so **Window → Send to Display** stays current. `sendToDisplay` moves the window to a display's bounds and fullscreens it (leaving fullscreen first if needed — the macOS transition is animated, hence the `leave-full-screen` wait).
+- The **Actions** menu lists every renderer keyboard shortcut using `registerAccelerator: false` (macOS): the key is *displayed* but not registered, so the renderer's keydown handler remains the single owner (registering `Space`/letter accelerators would swallow them from inputs). Menu clicks dispatch over the `menu:action` channel.
+- True AirPlay initiation is impossible from Electron; the supported flow is macOS Screen Mirroring (extended display) + Send to Display, documented in the README.
+
 ## IPC channels (all defined in `electron/main.ts`, typed in `src/vite-env.d.ts`)
 
 | Channel | Direction | Purpose |
@@ -50,6 +56,7 @@ Local media is served through a privileged custom scheme (`protocol.handle('medi
 | `dedupe:scan:files` | invoke | Lists image or video paths (perceptual hashing happens renderer-side) |
 | `files:getInfo` | invoke | Size/mtime per path, for the dedupe compare cards |
 | `menu:open-directory`, `menu:show-in-finder`, `menu:open-settings` | main → renderer | App menu items (Cmd+O / Cmd+Shift+O / Cmd+,) forward to renderer handlers |
+| `menu:action` | main → renderer | Actions-menu items (next/prev/toggle-play/seek-forward/seek-back/reveal/delete) dispatch to the same handlers as the keyboard shortcuts |
 
 ## Renderer structure
 
