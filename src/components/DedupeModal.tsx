@@ -47,14 +47,24 @@ export function DedupeModal({ isOpen, onClose, rootPath, onFilesDeleted }: Dedup
 
     const workerRef = useRef<Worker | null>(null);
 
+    // The folder to scan: defaults to the open slideshow folder, but can be
+    // picked here directly (the modal is reachable from the start screen).
+    const [scanRoot, setScanRoot] = useState(rootPath);
+
     // Reset when opened
     useEffect(() => {
         if (isOpen) {
             setStep('intro');
             setGroups([]);
             setProgress(0);
+            setScanRoot(rootPath);
         }
-    }, [isOpen]);
+    }, [isOpen, rootPath]);
+
+    const chooseFolder = async () => {
+        const dir = await window.api.pickDirectory();
+        if (dir) setScanRoot(dir);
+    };
 
     // Kill any in-flight hashing when the modal closes/unmounts
     useEffect(() => {
@@ -93,14 +103,14 @@ export function DedupeModal({ isOpen, onClose, rootPath, onFilesDeleted }: Dedup
 
         try {
             if (scanType === 'exact') {
-                const result = await window.api.scanDedupeExact(rootPath);
+                const result = await window.api.scanDedupeExact(scanRoot);
                 enterReview(result.map(g => ({ ...g, type: 'exact' as const })));
                 return;
             }
 
             // Perceptual hashing, done in a worker to keep the UI responsive
             setStatusMsg('Finding images...');
-            const files = await window.api.scanDedupeFiles(rootPath);
+            const files = await window.api.scanDedupeFiles(scanRoot);
 
             setStatusMsg(`Processing ${files.length} images...`);
             setProgress(0);
@@ -213,7 +223,14 @@ export function DedupeModal({ isOpen, onClose, rootPath, onFilesDeleted }: Dedup
                                 </button>
                             </div>
 
-                            <button className="balatro-button primary" onClick={startScan} disabled={!rootPath}>
+                            <div className="dedupe-folder">
+                                <span className="dedupe-folder-name">
+                                    {scanRoot ? scanRoot.split(/[/\\]/).pop() : 'No folder selected'}
+                                </span>
+                                <button className="text-btn" onClick={chooseFolder}>Choose Folder…</button>
+                            </div>
+
+                            <button className="balatro-button primary" onClick={startScan} disabled={!scanRoot}>
                                 START SCAN
                             </button>
                         </div>

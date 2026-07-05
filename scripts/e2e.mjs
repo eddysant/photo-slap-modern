@@ -202,6 +202,40 @@ try {
     check('incoming clip-path interpolates', new Set(incoming).size >= 4, `${new Set(incoming).size} distinct shapes`);
     check('outgoing slide keeps full-star clip', midWipe.every(s => s.clips[0]?.includes('-150%')));
 
+    console.log('directional slide transition');
+    const dir = await cdp.evaluate(`(async () => {
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+        // Switch the transition style to "slide"
+        document.querySelector('button[title="Settings"]').click();
+        await sleep(400);
+        const select = [...document.querySelectorAll('select')]
+            .find(s => [...s.options].some(o => o.value === 'star'));
+        Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set.call(select, 'slide');
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        await sleep(200);
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+        await sleep(400);
+
+        // Sample the outgoing slide's translateX right after a nav keypress:
+        // forward should move left (negative), backward should move right.
+        const sampleExitX = async (key) => {
+            window.dispatchEvent(new KeyboardEvent('keydown', { key }));
+            const xs = [];
+            for (let i = 0; i < 6; i++) {
+                await sleep(45);
+                const el = document.querySelector('.viewer-container > div');
+                if (el) xs.push(new DOMMatrix(getComputedStyle(el).transform).m41);
+            }
+            await sleep(900); // let the full transition finish
+            return xs;
+        };
+        const forward = await sampleExitX('ArrowRight');
+        const backward = await sampleExitX('ArrowLeft');
+        return JSON.stringify({ forward, backward });
+    })()`).then(JSON.parse);
+    check('forward exit slides left', Math.min(...dir.forward) < -50, `min x=${Math.min(...dir.forward).toFixed(0)}`);
+    check('backward exit slides right (reversed)', Math.max(...dir.backward) > 50, `max x=${Math.max(...dir.backward).toFixed(0)}`);
+
     console.log('date sort');
     const sortResult = await cdp.evaluate(`(async () => {
         const sleep = ms => new Promise(r => setTimeout(r, ms));

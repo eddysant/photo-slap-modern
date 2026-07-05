@@ -9,18 +9,19 @@ A retro, Balatro-inspired photo & video slideshow app for the desktop, built wit
 - **Slideshow** — open one or more folders (dialog, drag-and-drop onto the window, or a command-line argument) and play photos and videos full-screen. Images advance on a configurable timer (2s–1min); videos play through once, then advance. The intro screen offers to resume your last folder.
 - **Zoom & pan** — scroll to zoom toward the cursor, drag to pan, double-click to toggle.
 - **Sorting** — natural filename order, or by date taken (EXIF capture date with file-modified fallback), newest or oldest first.
-- **Transitions** — Fade, Slide, Zoom, Flip, and a classic **Star Wipe** (the new slide is revealed through a growing star over the old one).
+- **Transitions** — Fade, Slide, Zoom, Flip, and a classic **Star Wipe** (the new slide is revealed through a growing star over the old one). Directional transitions mirror when you navigate backwards.
 - **Ken Burns effect** — slow random pan/zoom on photos.
 - **Smart Background** — blurred, darkened copy of the current media fills the letterbox area (optionally for videos too).
 - **Media filtering & shuffle** — photos only / videos only / both, natural filename sort, or Fisher-Yates shuffle.
 - **Video controls** — scrubber, volume, mute, click-to-pause.
 - **EXIF overlay** — camera, lens, ISO, aperture, shutter speed, and date for photos.
-- **Duplicate finder** — exact duplicates (SHA-256 of file contents, pre-filtered by size) or visually similar photos (16×16 perceptual hash + Hamming distance, computed in a Web Worker), with a side-by-side keep/delete review that walks through groups of any size. Deletions update the running slideshow immediately.
+- **Duplicate finder** — exact duplicates (SHA-256 of file contents, pre-filtered by size) or visually similar photos (16×16 perceptual hash + Hamming distance, computed in a Web Worker), with a side-by-side keep/delete review that walks through groups of any size. Deletions update the running slideshow immediately. Available straight from the start screen with its own folder picker.
+- **Settings everywhere** — the options panel opens from the control bar, the start screen, or the app menu (`Cmd+,`), so the slideshow can be configured before opening a folder.
 - **HEIC support** — iPhone photos are transcoded to JPEG on the fly (WASM HEVC decode + sharp encode in the main process).
 - **Safe media serving** — files are streamed over a custom `media://` protocol restricted to folders you've opened; Chromium web security stays fully enabled.
 - **Safe delete** — files are moved to the system Trash, never hard-deleted.
 - **Open a folder from the command line** — `photo-slap ~/Pictures/vacation` (or `PHOTO_SLAP_DIR=... npm run dev` during development).
-- **Keyboard shortcuts** — `←`/`→` previous/next, `Space` play/pause, `Delete`/`Backspace` delete, `Esc` close settings.
+- **Keyboard shortcuts** — `←`/`→` previous/next, `Space` play/pause, `F` reveal in Finder, `M`/`N` video ±10 seconds, `Delete`/`Backspace` delete, `Esc` close settings.
 
 Supported formats: `.jpg` `.jpeg` `.png` `.webp` `.gif` `.bmp` `.heic` `.heif` (images), `.mp4` `.webm` `.ogg` `.gifv` (videos).
 

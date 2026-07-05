@@ -44,14 +44,45 @@ describe('starPolygon', () => {
 });
 
 describe('slideTransitions.star', () => {
+    const star = slideTransitions.star;
+
     it('does not fade the incoming slide (a fade degrades the wipe)', () => {
-        expect(slideTransitions.star.initial).not.toHaveProperty('opacity');
-        expect(slideTransitions.star.animate).not.toHaveProperty('opacity');
+        expect(star.variants.enter).not.toHaveProperty('opacity');
+        expect(star.variants.center).not.toHaveProperty('opacity');
     });
 
     it('keeps the outgoing slide visible for the wipe duration', () => {
-        const exit = slideTransitions.star.exit as { transition?: { delay?: number } };
-        const enter = slideTransitions.star.transition as { duration?: number };
-        expect(exit.transition?.delay ?? 0).toBeGreaterThanOrEqual(enter.duration ?? 0);
+        const exit = star.variants.exit as { transition?: { delay?: number } };
+        const duration = (star.transition as { duration?: number }).duration ?? 0;
+        expect(exit.transition?.delay ?? 0).toBeGreaterThanOrEqual(duration);
+    });
+});
+
+describe('directional transitions', () => {
+    type Dynamic = (dir: number) => Record<string, unknown>;
+
+    it('slide mirrors when navigating backwards', () => {
+        const enter = slideTransitions.slide.variants.enter as Dynamic;
+        const exit = slideTransitions.slide.variants.exit as Dynamic;
+        expect(enter(1).x).toBe('100%');
+        expect(enter(-1).x).toBe('-100%');
+        expect(exit(1).x).toBe('-100%');
+        expect(exit(-1).x).toBe('100%');
+    });
+
+    it('flip mirrors when navigating backwards', () => {
+        const enter = slideTransitions.flip.variants.enter as Dynamic;
+        const exit = slideTransitions.flip.variants.exit as Dynamic;
+        expect(enter(1).rotateY).toBe(90);
+        expect(enter(-1).rotateY).toBe(-90);
+        expect(exit(1).rotateY).toBe(-90);
+        expect(exit(-1).rotateY).toBe(90);
+    });
+
+    it('zoom swaps in/out scales when navigating backwards', () => {
+        const enter = slideTransitions.zoom.variants.enter as Dynamic;
+        const exit = slideTransitions.zoom.variants.exit as Dynamic;
+        expect(enter(1).scale).toBe(exit(-1).scale);
+        expect(enter(-1).scale).toBe(exit(1).scale);
     });
 });

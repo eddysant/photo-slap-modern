@@ -26,6 +26,7 @@ interface ScanResult {
 interface Window {
     api: {
         openDirectory: () => Promise<ScanResult | null>;
+        pickDirectory: () => Promise<string | null>;
         getAutoOpen: () => Promise<ScanResult | null>;
         scanPath: (path: string) => Promise<ScanResult | null>;
         getPathForFile: (file: File) => string;

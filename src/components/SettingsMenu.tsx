@@ -9,6 +9,8 @@ export type SortOrder = 'name' | 'date-desc' | 'date-asc';
 interface SettingsMenuProps {
     isOpen: boolean;
     onClose: () => void;
+    /** False on the intro screen — file-specific actions are hidden. */
+    hasFiles: boolean;
     mediaFilter: MediaFilter;
     onMediaFilterChange: (filter: MediaFilter) => void;
     isShuffle: boolean;
@@ -161,15 +163,17 @@ export function SettingsMenu(props: SettingsMenuProps) {
                         </select>
                     </div>
 
-                    <div className="setting-item">
-                        <button
-                            className="balatro-button"
-                            style={{ width: '100%', fontSize: '14px', padding: '10px' }}
-                            onClick={props.onShowInFinder}
-                        >
-                            <FiFolder style={{ marginRight: 8 }} /> SHOW IN FINDER
-                        </button>
-                    </div>
+                    {props.hasFiles && (
+                        <div className="setting-item">
+                            <button
+                                className="balatro-button"
+                                style={{ width: '100%', fontSize: '14px', padding: '10px' }}
+                                onClick={props.onShowInFinder}
+                            >
+                                <FiFolder style={{ marginRight: 8 }} /> SHOW IN FINDER
+                            </button>
+                        </div>
+                    )}
 
                     <div className="setting-item">
                         <button

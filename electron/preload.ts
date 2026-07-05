@@ -3,6 +3,7 @@ import { ipcRenderer, contextBridge, webUtils } from 'electron'
 // --------- Expose some API to the Renderer process ---------
 contextBridge.exposeInMainWorld('api', {
   openDirectory: () => ipcRenderer.invoke('dialog:openDirectory'),
+  pickDirectory: () => ipcRenderer.invoke('dialog:pickDirectory'),
   getAutoOpen: () => ipcRenderer.invoke('app:getAutoOpen'),
   scanPath: (path: string) => ipcRenderer.invoke('dir:scan', path),
   // Dropped File objects no longer carry .path; this resolves it

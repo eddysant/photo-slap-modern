@@ -1,15 +1,23 @@
+import { FiSettings, FiLayers } from 'react-icons/fi';
+
 interface IntroScreenProps {
     isLoading: boolean;
     onOpenDirectory: () => void;
     /** Name of the most recently opened folder, if any. */
     lastDirName?: string | null;
     onResume?: () => void;
+    onOpenSettings: () => void;
+    onFindDuplicates: () => void;
 }
 
-export function IntroScreen({ isLoading, onOpenDirectory, lastDirName, onResume }: IntroScreenProps) {
+export function IntroScreen({ isLoading, onOpenDirectory, lastDirName, onResume, onOpenSettings, onFindDuplicates }: IntroScreenProps) {
     return (
         <div className="balatro-container">
             <div className="crt-overlay" />
+
+            <button className="control-btn intro-settings-btn" onClick={onOpenSettings} title="Settings">
+                <FiSettings size={22} />
+            </button>
 
             <div className="balatro-title">
                 PHOTO<br />SLAP
@@ -24,6 +32,10 @@ export function IntroScreen({ isLoading, onOpenDirectory, lastDirName, onResume 
                     RESUME "{lastDirName}"
                 </button>
             )}
+
+            <button className="balatro-button resume-button" onClick={onFindDuplicates} disabled={isLoading}>
+                <FiLayers style={{ marginRight: 8 }} /> FIND DUPLICATES
+            </button>
 
             <div className="intro-hint">or drop a folder anywhere</div>
         </div>

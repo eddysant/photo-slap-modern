@@ -220,6 +220,15 @@ function createWindow() {
             win?.webContents.send('menu:show-in-finder');
           }
         },
+        { type: 'separator' },
+        {
+          label: 'Settings...',
+          accelerator: 'CmdOrCtrl+,',
+          click: () => {
+            win?.webContents.send('menu:open-settings');
+          }
+        },
+        { type: 'separator' },
         isMac ? { role: 'close' } : { role: 'quit' }
       ] as MenuItemConstructorOptions[]
     },
@@ -298,6 +307,17 @@ ipcMain.handle('dialog:openDirectory', async () => {
 ipcMain.handle('app:getAutoOpen', async () => {
   const dir = resolveAutoOpenDir();
   return dir ? await scanAndAllow(dir) : null;
+});
+
+// Pick a directory without scanning it (used by the duplicate finder,
+// which does its own scans). Registers it with media:// for previews.
+ipcMain.handle('dialog:pickDirectory', async () => {
+  if (!win) return null;
+  const result = await dialog.showOpenDialog(win, { properties: ['openDirectory'] });
+  if (result.canceled || result.filePaths.length === 0) return null;
+  const dir = path.resolve(result.filePaths[0]);
+  allowedRoots.add(path.normalize(dir));
+  return dir;
 });
 
 // Scan an arbitrary directory (drag-and-drop, "resume last folder")

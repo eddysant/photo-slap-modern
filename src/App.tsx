@@ -30,6 +30,8 @@ function App() {
   const [isDedupeOpen, setIsDedupeOpen] = useState(false)
   const [exifData, setExifData] = useState<ExifData | null>(null)
   const [kenBurnsClass, setKenBurnsClass] = useState('')
+  // 1 = forward, -1 = backward; mirrors directional slide transitions
+  const [direction, setDirection] = useState(1)
 
   // Settings (persisted across launches via electron-store)
   const [isShuffle, setIsShuffle] = usePersistedState('isShuffle', false)
@@ -218,6 +220,7 @@ function App() {
   }, [ingestScanResult, showToast]);
 
   const nextSlide = useCallback(() => {
+    setDirection(1);
     setFiles((currentFiles) => {
       if (currentFiles.length === 0) return currentFiles;
       setCurrentIndex((prev) => (prev + 1) % currentFiles.length);
@@ -226,6 +229,7 @@ function App() {
   }, []);
 
   const prevSlide = useCallback(() => {
+    setDirection(-1);
     setFiles((currentFiles) => {
       if (currentFiles.length === 0) return currentFiles;
       setCurrentIndex((prev) => (prev - 1 + currentFiles.length) % currentFiles.length);
@@ -300,9 +304,11 @@ function App() {
     }
   }, [volume, isMuted, currentIndex]); // Update when file changes too to ensure new video gets volume
 
-  // Sync Video Playback
+  // Sync Video Playback: this effect is the single owner of play/pause for
+  // both the main and blurred background video (the bg video deliberately
+  // has no autoPlay attribute — it must not start while the main is paused,
+  // e.g. when smart background is toggled on mid-pause).
   useEffect(() => {
-    // Sync both main and optional background video
     const els = [videoRef.current, bgVideoRef.current];
     els.forEach(el => {
       if (el) {
@@ -310,7 +316,7 @@ function App() {
         else el.play().catch(() => { });
       }
     });
-  }, [isUserPaused, currentIndex]);
+  }, [isUserPaused, currentIndex, isSmart, isSmartVideoEnabled]);
 
   const toggleVideoPause = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -327,10 +333,28 @@ function App() {
   const handleVideoSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
     const time = parseFloat(e.target.value);
     if (videoRef.current) {
-      videoRef.current.currentTime = (time / 100) * videoRef.current.duration;
+      const target = (time / 100) * videoRef.current.duration;
+      videoRef.current.currentTime = target;
+      if (bgVideoRef.current) bgVideoRef.current.currentTime = target; // keep blur in sync
       setVideoProgress(time);
     }
   };
+
+  // Jump the playing video by delta seconds (M/N shortcuts)
+  const seekVideoBy = useCallback((delta: number) => {
+    const video = videoRef.current;
+    if (!video || !isFinite(video.duration)) return;
+    const target = Math.min(Math.max(0, video.currentTime + delta), Math.max(0, video.duration - 0.1));
+    video.currentTime = target;
+    if (bgVideoRef.current) bgVideoRef.current.currentTime = target;
+    setVideoProgress((target / video.duration) * 100);
+  }, []);
+
+  const showCurrentInFinder = useCallback(() => {
+    if (files.length > 0 && files[currentIndex]) {
+      window.api.showInFolder(files[currentIndex].path);
+    }
+  }, [files, currentIndex]);
 
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newVolume = parseFloat(e.target.value);
@@ -413,6 +437,11 @@ function App() {
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't hijack keys while a form control has focus or a chord is held
+      const target = e.target as HTMLElement;
+      if (['INPUT', 'SELECT', 'TEXTAREA'].includes(target?.tagName)) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+
       switch (e.key) {
         case 'ArrowRight':
           nextSlide();
@@ -428,6 +457,15 @@ function App() {
         case 'Backspace':
           deleteCurrentFile();
           break;
+        case 'f':
+          showCurrentInFinder();
+          break;
+        case 'm':
+          seekVideoBy(10);
+          break;
+        case 'n':
+          seekVideoBy(-10);
+          break;
         case 'Escape':
           setIsSettingsOpen(false);
           break;
@@ -435,7 +473,7 @@ function App() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [nextSlide, prevSlide, togglePlay, deleteCurrentFile]);
+  }, [nextSlide, prevSlide, togglePlay, deleteCurrentFile, showCurrentInFinder, seekVideoBy]);
 
   // Update window title
   useEffect(() => {
@@ -448,44 +486,26 @@ function App() {
 
   // Listen for menu events
   useEffect(() => {
-    const cleanupOpen = window.api.on('menu:open-directory', () => {
-      handleOpenDirectory();
-    });
-    const cleanupShow = window.api.on('menu:show-in-finder', () => {
-      if (files.length > 0) {
-        window.api.showInFolder(files[currentIndex].path);
-      }
-    });
-    return () => {
-      cleanupOpen();
-      cleanupShow();
-    };
-  }, [handleOpenDirectory, files, currentIndex]);
+    const cleanups = [
+      window.api.on('menu:open-directory', () => handleOpenDirectory()),
+      window.api.on('menu:show-in-finder', () => showCurrentInFinder()),
+      window.api.on('menu:open-settings', () => setIsSettingsOpen(true)),
+    ];
+    return () => cleanups.forEach(c => c());
+  }, [handleOpenDirectory, showCurrentInFinder]);
 
-  if (files.length === 0) {
-    return (
-      <div className="app-container">
-        <div className="title-bar">photo-slap</div>
-        <IntroScreen
-          isLoading={isLoading}
-          onOpenDirectory={handleOpenDirectory}
-          lastDirName={lastDirs[0]?.split(/[/\\]/).pop() ?? null}
-          onResume={handleResume}
-        />
-        <Toast message={toast} />
-      </div>
-    );
-  }
-
-  const currentFile = files[currentIndex];
-  const fileUrl = getFileUrl(currentFile.path);
+  const currentFile: MediaFile | null = files.length > 0 ? files[currentIndex] : null;
+  const fileUrl = currentFile ? getFileUrl(currentFile.path) : '';
   const currentTransition = slideTransitions[transitionStyle];
 
+  // Settings, dedupe, and toasts are available in both states — you can
+  // configure the slideshow or hunt duplicates before opening a folder.
   return (
     <div className="app-container">
       <SettingsMenu
         isOpen={isSettingsOpen}
         onClose={toggleSettings}
+        hasFiles={currentFile !== null}
         mediaFilter={mediaFilter}
         onMediaFilterChange={handleMediaFilterChange}
         isShuffle={isShuffle}
@@ -509,15 +529,29 @@ function App() {
         controlsPosition={controlsPosition}
         onControlsPositionChange={setControlsPosition}
         onShowInFinder={() => {
-          window.api.showInFolder(currentFile.path);
+          showCurrentInFinder();
           toggleSettings();
         }}
         onFindDuplicates={() => {
-          toggleSettings();
+          setIsSettingsOpen(false);
           setIsDedupeOpen(true);
         }}
       />
 
+      {currentFile === null ? (
+        <>
+          <div className="title-bar">photo-slap</div>
+          <IntroScreen
+            isLoading={isLoading}
+            onOpenDirectory={handleOpenDirectory}
+            lastDirName={lastDirs[0]?.split(/[/\\]/).pop() ?? null}
+            onResume={handleResume}
+            onOpenSettings={() => setIsSettingsOpen(true)}
+            onFindDuplicates={() => setIsDedupeOpen(true)}
+          />
+        </>
+      ) : (
+        <>
       {/* Title Bar with Filename */}
       <div className={`title-bar ${showControls ? 'visible' : ''} ${controlsPosition === 'left' ? 'position-left' : ''}`}>
         {currentFile.name}
@@ -541,13 +575,16 @@ function App() {
       )}
 
       <div className="viewer-container" onClick={() => isSettingsOpen && setIsSettingsOpen(false)}>
-        {/* "sync" keeps the old slide mounted underneath while the star wipes in over it */}
-        <AnimatePresence mode={transitionStyle === 'star' ? 'sync' : 'wait'}>
+        {/* "sync" keeps the old slide mounted underneath while the star wipes in over it.
+            `custom` carries the nav direction so exiting slides mirror correctly too. */}
+        <AnimatePresence mode={transitionStyle === 'star' ? 'sync' : 'wait'} custom={direction}>
           <motion.div
             key={currentFile.path}
-            initial={currentTransition.initial}
-            animate={currentTransition.animate}
-            exit={currentTransition.exit}
+            custom={direction}
+            variants={currentTransition.variants}
+            initial="enter"
+            animate="center"
+            exit="exit"
             transition={currentTransition.transition}
             style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
           >
@@ -560,8 +597,9 @@ function App() {
                     src={fileUrl}
                     className="blurred-media"
                     muted
-                    autoPlay
                     loop
+                    // no autoPlay: playback is owned by the sync effect so
+                    // the blur pauses and seeks together with the main video
                   />
                 ) : (
                   <img src={fileUrl} className="blurred-media" alt="" />
@@ -685,6 +723,8 @@ function App() {
           </button>
         </div>
       </div>
+        </>
+      )}
 
       <DedupeModal
         isOpen={isDedupeOpen}
