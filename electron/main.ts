@@ -352,12 +352,26 @@ ipcMain.handle('store:set', (_event, key, value) => {
   store.set(key, value);
 });
 
-ipcMain.handle('dedupe:scan:exact', async (_event, dirPath) => {
-  return await findExactDuplicates(dirPath);
+ipcMain.handle('dedupe:scan:exact', async (_event, dirPath, includeVideos: boolean = true) => {
+  return await findExactDuplicates(dirPath, includeVideos);
 });
 
-ipcMain.handle('dedupe:scan:files', async (_event, dirPath) => {
-  return await scanFiles(dirPath);
+ipcMain.handle('dedupe:scan:files', async (_event, dirPath, kind: 'images' | 'videos' = 'images') => {
+  return await scanFiles(dirPath, kind);
+});
+
+// Basic file stats for the dedupe compare cards
+ipcMain.handle('files:getInfo', async (_event, paths: string[]) => {
+  const result: Record<string, { size: number; mtimeMs: number }> = {};
+  await Promise.all(paths.map(async (p) => {
+    try {
+      const stat = await fs.stat(p);
+      result[p] = { size: stat.size, mtimeMs: stat.mtimeMs };
+    } catch {
+      // unreadable — leave out
+    }
+  }));
+  return result;
 });
 
 // --------- Date-taken lookup (for date sorting) ---------

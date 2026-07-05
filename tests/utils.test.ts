@@ -1,5 +1,15 @@
 import { describe, it, expect } from 'vitest';
-import { getFileUrl } from '../src/utils';
+import { getFileUrl, formatBytes } from '../src/utils';
+
+describe('formatBytes', () => {
+    it('formats each magnitude', () => {
+        expect(formatBytes(512)).toBe('512 B');
+        expect(formatBytes(2048)).toBe('2.0 KB');
+        expect(formatBytes(5 * 1024 * 1024)).toBe('5.0 MB');
+        expect(formatBytes(250 * 1024 * 1024)).toBe('250 MB');
+        expect(formatBytes(3 * 1024 * 1024 * 1024)).toBe('3.0 GB');
+    });
+});
 
 describe('getFileUrl', () => {
     it('builds a media:// URL with the local placeholder host', () => {

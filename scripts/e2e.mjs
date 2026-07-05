@@ -10,7 +10,7 @@
 // - Your settings are backed up and restored (the test forces the star wipe).
 // - Requires Node >= 21 (built-in WebSocket).
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -70,7 +70,17 @@ async function makeFixture() {
         console.log('  (offline — skipping HEIC checks)');
     }
 
-    return { dir, heicPath };
+    // Two encodes of the same clip, for video frame-matching (optional — needs ffmpeg)
+    let hasVideos = false;
+    const clip = path.join(dir, 'clip.mp4');
+    const gen = spawnSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc=duration=2:size=320x240:rate=10', '-pix_fmt', 'yuv420p', clip]);
+    if (gen.status === 0) {
+        const re = spawnSync('ffmpeg', ['-v', 'error', '-i', clip, '-vf', 'scale=160:120', '-b:v', '100k', path.join(dir, 'clip-small.mp4')]);
+        hasVideos = re.status === 0;
+    }
+    if (!hasVideos) console.log('  (no ffmpeg — skipping video-similarity checks)');
+
+    return { dir, heicPath, hasVideos };
 }
 
 // ---------- CDP ----------
@@ -118,7 +128,7 @@ function connect(page) {
 }
 
 // ---------- main ----------
-const { dir: fixture, heicPath } = await makeFixture();
+const { dir: fixture, heicPath, hasVideos } = await makeFixture();
 const fixtureCount = (await fs.readdir(fixture)).length;
 
 // Back up user settings, seed the star wipe
@@ -287,11 +297,17 @@ try {
         await sleep(500);
         btnByText('FIND DUPLICATES').click();
         await sleep(300);
-        btnByText('Similar Photos').click();
+        // Set the strictness slider to "Normal" (perceptual matching)
+        const slider = document.querySelector('.strictness-slider');
+        Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(slider, '2');
+        slider.dispatchEvent(new Event('input', { bubbles: true }));
         await sleep(100);
         btnByText('START SCAN').click();
         for (let i = 0; i < 120 && !document.querySelector('.step-review, .step-done'); i++) await sleep(250);
         const header = document.querySelector('.progress-indicator')?.textContent ?? '';
+        await sleep(600); // let the compare cards load their metadata
+        const metaName = document.querySelector('.file-meta-name')?.textContent ?? '';
+        const metaStats = document.querySelector('.file-meta-stats')?.textContent ?? '';
         for (let guard = 0; guard < 10 && document.querySelector('.step-review'); guard++) {
             document.querySelectorAll('.keep-btn')[0].click();
             await sleep(700);
@@ -299,12 +315,18 @@ try {
         const done = !!document.querySelector('.step-done');
         btnByText('CLOSE')?.click();
         await sleep(400);
-        return JSON.stringify({ before, header, done, after: document.querySelector('.file-info')?.textContent });
+        return JSON.stringify({ before, header, metaName, metaStats, done, after: document.querySelector('.file-info')?.textContent });
     })()`).then(JSON.parse);
     check('similar scan found the 3-file group', dedupe.header.includes('3 files in group'), dedupe.header);
+    if (hasVideos) {
+        check('re-encoded video pair grouped by frame match', dedupe.header.includes('/ 2'), dedupe.header);
+    }
+    check('compare card shows filename', /\.(jpg|png)$/.test(dedupe.metaName), dedupe.metaName);
+    check('compare card shows size and dimensions', /B/.test(dedupe.metaStats) && /×/.test(dedupe.metaStats), dedupe.metaStats);
     check('review flow completed', dedupe.done);
-    check('slideshow dropped the 2 deleted files',
-        dedupe.after === `1 / ${fixtureCount - 2}`, `${dedupe.before} -> ${dedupe.after}`);
+    const expectedDeletes = hasVideos ? 3 : 2; // 2 from the image trio + 1 from the video pair
+    check(`slideshow dropped the ${expectedDeletes} deleted files`,
+        dedupe.after === `1 / ${fixtureCount - expectedDeletes}`, `${dedupe.before} -> ${dedupe.after}`);
 } catch (e) {
     failures++;
     console.error('✗ E2E aborted:', e.message);

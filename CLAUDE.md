@@ -46,8 +46,9 @@ Local media is served through a privileged custom scheme (`protocol.handle('medi
 | `file:getExif` | invoke | Read EXIF via `exifreader` → flattened `ExifData` or `null` |
 | `store:get` / `store:set` | invoke | Settings persistence (`electron-store`) |
 | `dialog:pickDirectory` | invoke | Folder picker without scanning (dedupe-from-start-screen); allowlists the dir |
-| `dedupe:scan:exact` | invoke | Exact dupes: fast-glob → group by size → SHA-256 candidates |
-| `dedupe:scan:files` | invoke | Lists image paths (perceptual hashing happens renderer-side) |
+| `dedupe:scan:exact` | invoke | Exact dupes: fast-glob → group by size → SHA-256 candidates (videos optional) |
+| `dedupe:scan:files` | invoke | Lists image or video paths (perceptual hashing happens renderer-side) |
+| `files:getInfo` | invoke | Size/mtime per path, for the dedupe compare cards |
 | `menu:open-directory`, `menu:show-in-finder`, `menu:open-settings` | main → renderer | App menu items (Cmd+O / Cmd+Shift+O / Cmd+,) forward to renderer handlers |
 
 ## Renderer structure
@@ -58,7 +59,7 @@ Local media is served through a privileged custom scheme (`protocol.handle('medi
 - `components/ZoomPan.tsx` — wheel-zoom toward cursor / drag-pan / double-click toggle for photos. Transform state lives in refs and is written straight to the DOM (no re-render per pointermove); the wheel listener is attached manually to be non-passive. Resets on slide change via `resetKey`; reports `onZoomChange` so App suspends the Ken Burns class while zoomed.
 - `components/SettingsMenu.tsx` — the options side panel (pure props). Rendered in the intro state too (settings and dedupe are usable before a folder is open); `hasFiles` hides file-specific actions there.
 - The blurred smart-background video has **no autoPlay attribute**: the playback-sync effect in App is the single owner of play/pause/seek for both videos, so pausing the main video (or toggling smart background while paused) can't leave the blur playing.
-- `components/DedupeModal.tsx` — duplicate finder wizard. Similar-photo hashing runs in `workers/phashWorker.ts` (module worker: fetch over media:// → `createImageBitmap` → 16×16 OffscreenCanvas → `blockhash-core`); grouping is transitive union-find in `similarity.ts` (Hamming ≤ 12, O(n²) pairs). Review compares the group's first two files ("keeper" vs challenger); the survivor keeps facing the rest, so groups of any size are fully reviewed. Video duplicates render with a `<video>` preview. Deletions are reported to App via `onFilesDeleted` so the slideshow drops them immediately.
+- `components/DedupeModal.tsx` — duplicate finder wizard. One **strictness slider**: level 0 = exact (SHA-256 in main), levels 1–3 = perceptual with Hamming thresholds 4/12/20. Image hashing runs in `workers/phashWorker.ts` (module worker: fetch over media:// → `createImageBitmap` → 16×16 OffscreenCanvas → `blockhash-core`); videos (optional) are hashed by a frame sampled ~1s in, on the main thread — the `<video>` element MUST set `crossOrigin='anonymous'` or the canvas is tainted and `getImageData` throws (media:// is cross-origin to the app). Grouping is transitive union-find in `similarity.ts`. Review compares the group's first two files ("keeper" vs challenger); the survivor keeps facing the rest, so groups of any size are fully reviewed. Compare cards show filename/folder/size/dimensions (`files:getInfo` IPC + media load events) with the better side highlighted. Deletions are reported to App via `onFilesDeleted` so the slideshow drops them immediately.
 - `components/Toast.tsx` — transient notices (no media found, unreadable folders); state lives in App (`showToast`).
 - `transitions.ts` — slide transition variants; see below.
 - Slideshow timer only runs for images; videos advance via `onEnded` and loop when paused. Next 10 images are preloaded via `new Image()`.

@@ -17,8 +17,9 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener(channel, listener);
   },
   // Dedupe
-  scanDedupeExact: (dir: string) => ipcRenderer.invoke('dedupe:scan:exact', dir),
-  scanDedupeFiles: (dir: string) => ipcRenderer.invoke('dedupe:scan:files', dir),
+  scanDedupeExact: (dir: string, includeVideos: boolean) => ipcRenderer.invoke('dedupe:scan:exact', dir, includeVideos),
+  scanDedupeFiles: (dir: string, kind: 'images' | 'videos') => ipcRenderer.invoke('dedupe:scan:files', dir, kind),
+  getFileInfo: (paths: string[]) => ipcRenderer.invoke('files:getInfo', paths),
   showInFolder: (path: string) => ipcRenderer.invoke('file:showInFolder', path),
   getExif: (path: string) => ipcRenderer.invoke('file:getExif', path),
 })
