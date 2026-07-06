@@ -1,7 +1,10 @@
 {
   "name": "photo-slap",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
+  "description": "Retro-styled photo & video slideshow with duplicate finder",
+  "author": "Eddy Sant <eddysant@gmail.com>",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",

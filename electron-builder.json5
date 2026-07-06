@@ -4,6 +4,7 @@
   "appId": "com.eddysant.photo-slap",
   "asar": true,
   "productName": "photo-slap",
+  "copyright": "Copyright © 2026 Eddy Sant",
   "directories": {
     "output": "release/${version}"
   },

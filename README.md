@@ -2,6 +2,8 @@
 
 A retro, Balatro-inspired photo & video slideshow app for the desktop, built with Electron, React, and TypeScript.
 
+By [Eddy Sant](https://github.com/eddysant), built with AI assistance.
+
 ![Electron](https://img.shields.io/badge/Electron-43-9feaf9) ![React](https://img.shields.io/badge/React-19-61dafb) ![Vite](https://img.shields.io/badge/Vite-8-646cff) ![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178c6)
 
 ## Features
