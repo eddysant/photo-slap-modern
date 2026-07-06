@@ -60,8 +60,7 @@ function isAllowedPath(filePath: string): boolean {
 }
 
 // media://local/Users/me/pic.jpg -> /Users/me/pic.jpg (or C:\... on Windows)
-function mediaUrlToPath(urlStr: string): string {
-  const url = new URL(urlStr);
+function mediaUrlToPath(url: URL): string {
   let p = decodeURIComponent(url.pathname);
   if (/^\/[a-zA-Z]:[/\\]/.test(p)) p = p.slice(1); // strip leading slash of Windows drive paths
   return path.normalize(p);
@@ -79,26 +78,26 @@ const MIME_TYPES: Record<string, string> = {
 };
 const mimeFor = (p: string) => MIME_TYPES[path.extname(p).toLowerCase()] ?? 'application/octet-stream';
 
-// Transcoded HEIC JPEGs are cached on disk (keyed by path+mtime+size) so
-// each photo only pays the WASM decode once, ever.
-let heicCacheDir: string | null = null;
-const HEIC_CACHE_MAX_BYTES = 500 * 1024 * 1024;
+// Derived images (HEIC transcodes and display-sized downscales) are cached
+// on disk keyed by path+mtime+size+dimension, so each variant is computed once.
+let imageCacheDir: string | null = null;
+const IMAGE_CACHE_MAX_BYTES = 500 * 1024 * 1024;
 
 // LRU sweep at startup: hits touch mtime, so oldest mtime = least recently used
-async function evictHeicCache() {
-  if (!heicCacheDir) return;
+async function evictImageCache() {
+  if (!imageCacheDir) return;
   try {
-    const names = await fs.readdir(heicCacheDir);
+    const names = await fs.readdir(imageCacheDir);
     const entries = await Promise.all(names.map(async (name) => {
-      const p = path.join(heicCacheDir!, name);
+      const p = path.join(imageCacheDir!, name);
       const stat = await fs.stat(p);
       return { p, size: stat.size, mtimeMs: stat.mtimeMs };
     }));
     let total = entries.reduce((sum, e) => sum + e.size, 0);
-    if (total <= HEIC_CACHE_MAX_BYTES) return;
+    if (total <= IMAGE_CACHE_MAX_BYTES) return;
     entries.sort((a, b) => a.mtimeMs - b.mtimeMs);
     for (const entry of entries) {
-      if (total <= HEIC_CACHE_MAX_BYTES) break;
+      if (total <= IMAGE_CACHE_MAX_BYTES) break;
       await fs.unlink(entry.p).catch(() => { });
       total -= entry.size;
     }
@@ -107,49 +106,75 @@ async function evictHeicCache() {
   }
 }
 
-async function transcodeHeic(filePath: string): Promise<Buffer> {
+const isHeic = (p: string) => /\.(heic|heif)$/i.test(p);
+// Formats safe to downscale server-side (GIFs would lose animation)
+const isScalableImage = (p: string) => /\.(jpe?g|png|webp|bmp|heic|heif)$/i.test(p);
+
+/**
+ * HEIC transcode and/or downscale to `maxDim` (longest side), disk-cached.
+ * Downscaling exists because full-resolution camera photos (often 48MP)
+ * become ~200MB GPU textures — several of those alive at once during a
+ * transition causes texture thrash and visible artifacts. A display-sized
+ * variant is a fraction of the memory and decodes in a fraction of the time.
+ */
+async function deriveImage(filePath: string, maxDim: number | null): Promise<{ buffer: Buffer; type: string }> {
+  const asPng = /\.png$/i.test(filePath); // keep alpha for PNGs
   let cachePath: string | null = null;
-  if (heicCacheDir) {
+  if (imageCacheDir) {
     try {
       const stat = await fs.stat(filePath);
-      const key = crypto.createHash('sha1').update(`${filePath}:${stat.mtimeMs}:${stat.size}`).digest('hex');
-      cachePath = path.join(heicCacheDir, `${key}.jpg`);
+      const key = crypto.createHash('sha1')
+        .update(`${filePath}:${stat.mtimeMs}:${stat.size}:${maxDim ?? 'full'}`)
+        .digest('hex');
+      cachePath = path.join(imageCacheDir, `${key}.${asPng ? 'png' : 'jpg'}`);
       const cached = await fs.readFile(cachePath); // cache hit
       fs.utimes(cachePath, new Date(), new Date()).catch(() => { }); // LRU touch
-      return cached;
+      return { buffer: cached, type: asPng ? 'image/png' : 'image/jpeg' };
     } catch {
-      // cache miss — decode below
+      // cache miss — derive below
     }
   }
 
-  const buffer = await fs.readFile(filePath);
-  const { width, height, data } = await decodeHeic({ buffer });
-  const jpeg = await sharp(Buffer.from(data), { raw: { width, height, channels: 4 } })
-    .jpeg({ quality: 90 })
-    .toBuffer();
-  if (cachePath) fs.writeFile(cachePath, jpeg).catch(() => { });
-  return jpeg;
+  let pipeline: ReturnType<typeof sharp>;
+  if (isHeic(filePath)) {
+    // heic-decode (WASM libheif) does the HEVC decode — prebuilt sharp
+    // binaries can't, HEVC being patent-encumbered
+    const { width, height, data } = await decodeHeic({ buffer: await fs.readFile(filePath) });
+    pipeline = sharp(Buffer.from(data), { raw: { width, height, channels: 4 } });
+  } else {
+    pipeline = sharp(filePath).rotate(); // bake EXIF orientation
+  }
+  if (maxDim) {
+    pipeline = pipeline.resize(maxDim, maxDim, { fit: 'inside', withoutEnlargement: true });
+  }
+  const buffer = asPng
+    ? await pipeline.png().toBuffer()
+    : await pipeline.jpeg({ quality: 90 }).toBuffer();
+
+  if (cachePath) fs.writeFile(cachePath, buffer).catch(() => { });
+  return { buffer, type: asPng ? 'image/png' : 'image/jpeg' };
 }
 
 async function handleMediaRequest(request: Request): Promise<Response> {
-  const filePath = mediaUrlToPath(request.url);
+  const url = new URL(request.url);
+  const filePath = mediaUrlToPath(url);
 
   if (!isAllowedPath(filePath)) {
     return new Response('Forbidden', { status: 403, headers: MEDIA_CORS });
   }
 
-  // Chromium can't decode HEIC/HEIF; transcode to JPEG on the fly.
-  // heic-decode (WASM libheif) handles the HEVC decode — prebuilt sharp
-  // binaries can't, HEVC being patent-encumbered — then sharp encodes
-  // the raw pixels to JPEG.
-  if (/\.(heic|heif)$/i.test(filePath)) {
+  // Derived variants: HEIC always needs transcoding (Chromium can't decode
+  // it); any scalable image can request a display-sized version via ?w=.
+  const requestedDim = Number(url.searchParams.get('w')) || null;
+  const maxDim = requestedDim && isScalableImage(filePath) ? requestedDim : null;
+  if (maxDim || isHeic(filePath)) {
     try {
-      const jpeg = await transcodeHeic(filePath);
-      return new Response(new Uint8Array(jpeg), {
-        headers: { 'Content-Type': 'image/jpeg', 'Cache-Control': 'max-age=3600', ...MEDIA_CORS },
+      const { buffer, type } = await deriveImage(filePath, maxDim);
+      return new Response(new Uint8Array(buffer), {
+        headers: { 'Content-Type': type, 'Cache-Control': 'max-age=3600', ...MEDIA_CORS },
       });
     } catch (e) {
-      console.error(`Failed to transcode ${filePath}`, e);
+      console.error(`Failed to derive image for ${filePath}`, e);
       return new Response('Decode failed', { status: 500, headers: MEDIA_CORS });
     }
   }
@@ -734,11 +759,13 @@ app.whenReady().then(async () => {
   protocol.handle('media', handleMediaRequest);
 
   try {
-    heicCacheDir = path.join(app.getPath('userData'), 'heic-cache');
-    await fs.mkdir(heicCacheDir, { recursive: true });
-    evictHeicCache(); // background LRU sweep
+    imageCacheDir = path.join(app.getPath('userData'), 'image-cache');
+    await fs.mkdir(imageCacheDir, { recursive: true });
+    evictImageCache(); // background LRU sweep
+    // remove the pre-1.1.1 cache directory (superseded by image-cache)
+    fs.rm(path.join(app.getPath('userData'), 'heic-cache'), { recursive: true, force: true }).catch(() => { });
   } catch {
-    heicCacheDir = null; // cache disabled, transcoding still works
+    imageCacheDir = null; // cache disabled, transcoding still works
   }
 
   createWindow();

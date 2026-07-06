@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { FiFilm, FiHeart, FiSearch } from 'react-icons/fi';
-import { getFileUrl } from '../utils';
+import { getDisplayUrl } from '../utils';
 
 interface GridViewProps {
     files: MediaFile[];
@@ -59,7 +59,7 @@ export function GridView({ files, currentIndex, favorites, onSelect, onClose }: 
                         onClick={() => onSelect(index)}
                     >
                         {file.type === 'image' ? (
-                            <img src={getFileUrl(file.path)} loading="lazy" decoding="async" alt={file.name} />
+                            <img src={getDisplayUrl(file.path, 512)} loading="lazy" decoding="async" alt={file.name} />
                         ) : (
                             <div className="grid-video-tile">
                                 <FiFilm size={28} />

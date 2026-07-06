@@ -11,7 +11,7 @@ import { Toast } from './components/Toast'
 import { ZoomPan } from './components/ZoomPan'
 import { usePersistedState } from './hooks/usePersistedState'
 import { slideTransitions, TransitionStyle } from './transitions'
-import { getFileUrl } from './utils'
+import { getFileUrl, getDisplayUrl } from './utils'
 
 const mergeScans = (results: ScanResult[]): ScanResult => ({
   paths: results.flatMap(r => r.paths),
@@ -521,11 +521,13 @@ function App() {
     for (let i = 1; i <= PRELOAD_COUNT; i++) {
       const nextIndex = (currentIndex + i) % files.length;
       const file = files[nextIndex];
-      const fileUrl = getFileUrl(file.path);
 
       if (file.type === 'image') {
         const img = new Image();
-        img.src = fileUrl;
+        img.src = getDisplayUrl(file.path);
+        // decode() warms the pixel cache so the incoming slide paints on the
+        // first transition frame instead of decoding mid-wipe
+        img.decode().catch(() => { });
         newPreloads.push(img);
       }
     }
@@ -795,7 +797,8 @@ function App() {
                     // the blur pauses and seeks together with the main video
                   />
                 ) : (
-                  <img src={fileUrl} className="blurred-media" alt="" />
+                  // heavily blurred anyway — a small variant rasterizes far faster
+                  <img src={getDisplayUrl(currentFile.path, 1600)} className="blurred-media" alt="" />
                 )}
               </div>
             )}
@@ -836,7 +839,7 @@ function App() {
             ) : (
               <ZoomPan resetKey={currentFile.path} onZoomChange={setIsZoomed}>
                 <img
-                  src={fileUrl}
+                  src={getDisplayUrl(currentFile.path)}
                   className={`media-element ${isKenBurns && !isZoomed ? `ken-burns-active ${kenBurnsClass}` : ''}`}
                   alt={currentFile.name}
                   style={{

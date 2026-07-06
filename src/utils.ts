@@ -11,6 +11,21 @@ export function getFileUrl(filePath: string): string {
     return `media://local${encoded.startsWith('/') ? '' : '/'}${encoded}`;
 }
 
+const SCALABLE_IMAGE = /\.(jpe?g|png|webp|bmp|heic|heif)$/i;
+
+/**
+ * media:// URL for a display-sized variant of an image (longest side capped
+ * at maxDim, downscaled and cached by the main process). Full-resolution
+ * camera photos are enormous GPU textures — several alive at once during a
+ * slide transition causes texture thrash and visible artifacts, so the
+ * slideshow never paints originals. Non-scalable files (videos, GIFs) get
+ * their plain URL.
+ */
+export function getDisplayUrl(filePath: string, maxDim = 4096): string {
+    const base = getFileUrl(filePath);
+    return SCALABLE_IMAGE.test(filePath) ? `${base}?w=${maxDim}` : base;
+}
+
 export function formatBytes(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;
     const units = ['KB', 'MB', 'GB', 'TB'];

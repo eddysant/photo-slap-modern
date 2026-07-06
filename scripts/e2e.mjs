@@ -171,11 +171,14 @@ try {
         let forbidden = 0;
         try { forbidden = (await fetch('media://local/definitely/not/allowed.jpg')).status; } catch { forbidden = -1; }
         const ranged = await fetch(${JSON.stringify(jpgUrl)}, { headers: { Range: 'bytes=0-99' } });
+        const scaledBmp = await createImageBitmap(await (await fetch(${JSON.stringify(jpgUrl)} + '?w=512')).blob());
         return JSON.stringify({
             counter: document.querySelector('.file-info')?.textContent ?? '',
             naturalWidth: img?.naturalWidth ?? 0,
+            slideUsesDisplayVariant: (img?.src ?? '').includes('?w='),
             forbidden,
             range: { status: ranged.status, length: (await ranged.arrayBuffer()).byteLength, contentRange: ranged.headers.get('content-range') },
+            scaled: { w: scaledBmp.width, h: scaledBmp.height },
         });
     })()`).then(JSON.parse);
     check('slideshow auto-opened the fixture', base.counter === `1 / ${fixtureCount}`, base.counter);
@@ -184,6 +187,8 @@ try {
     check('byte-range requests get 206 partial content',
         base.range.status === 206 && base.range.length === 100 && /^bytes 0-99\//.test(base.range.contentRange ?? ''),
         `${base.range.status} ${base.range.contentRange}`);
+    check('?w=512 serves a downscaled variant', base.scaled.w === 512 && base.scaled.h === 384, `${base.scaled.w}x${base.scaled.h}`);
+    check('slideshow paints display-sized images', base.slideUsesDisplayVariant === true);
 
     if (heicPath) {
         console.log('HEIC transcoding');
