@@ -36,6 +36,13 @@ interface SettingsMenuProps {
     /** Target folders for the 1/2/3 quick-move shortcuts (null = unset). */
     quickMoveFolders: (string | null)[];
     onSetQuickMoveFolder: (slot: number, path: string | null) => void;
+    showSlideTimer: boolean;
+    onToggleSlideTimer: () => void;
+    favoritesOnly: boolean;
+    onToggleFavoritesOnly: () => void;
+    tagFilter: string;
+    onTagFilterChange: (tag: string) => void;
+    tagNames: string[];
     onShowInFinder: () => void;
     onFindDuplicates: () => void;
 }
@@ -88,6 +95,27 @@ export function SettingsMenu(props: SettingsMenuProps) {
 
                     <div className="setting-item">
                         <label className="checkbox-control">
+                            <input type="checkbox" checked={props.favoritesOnly} onChange={props.onToggleFavoritesOnly} />
+                            Favorites Only
+                        </label>
+                    </div>
+
+                    {props.tagNames.length > 0 && (
+                        <div className="setting-item">
+                            <div className="setting-label">Filter By Tag</div>
+                            <select
+                                className="setting-control"
+                                value={props.tagFilter}
+                                onChange={e => props.onTagFilterChange(e.target.value)}
+                            >
+                                <option value="">All Tags</option>
+                                {props.tagNames.map(tag => <option key={tag} value={tag}>{tag}</option>)}
+                            </select>
+                        </div>
+                    )}
+
+                    <div className="setting-item">
+                        <label className="checkbox-control">
                             <input type="checkbox" checked={props.isSmart} onChange={props.onToggleSmart} />
                             Smart Background
                         </label>
@@ -120,6 +148,13 @@ export function SettingsMenu(props: SettingsMenuProps) {
                         <label className="checkbox-control">
                             <input type="checkbox" checked={props.isExifEnabled} onChange={props.onToggleExif} />
                             Show EXIF Data
+                        </label>
+                    </div>
+
+                    <div className="setting-item">
+                        <label className="checkbox-control">
+                            <input type="checkbox" checked={props.showSlideTimer} onChange={props.onToggleSlideTimer} />
+                            Slide Timer Bar
                         </label>
                     </div>
 

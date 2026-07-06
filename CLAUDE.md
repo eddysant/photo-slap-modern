@@ -85,7 +85,10 @@ The **star wipe** needs the outgoing slide to stay visible while the incoming sl
 - The outgoing slide's `exit` keeps it fully visible (opacity drops only after a 0.65 s delay, once covered) and lowers `zIndex`.
 - Don't reintroduce an opacity fade on the star variant — it degrades the wipe into a crossfade (the original bug).
 
-- `components/GridView.tsx` — `G` thumbnail grid; images lazy-load, videos get placeholder tiles; click jumps to the slide.
+- `components/GridView.tsx` — `G` thumbnail grid with filename filter; images lazy-load, videos get placeholder tiles; click jumps to the slide.
+- **Favorites & tags** (`H`/`T`, `components/TagEditor.tsx`): stored in `.photo-slap.json` sidecars WITH the library, managed by `electron/libraryMeta.ts` (`library:load`/`library:save` IPC). Each path is owned by the deepest sidecar dir containing it; loads merge with shallower-wins, saves write entries back to their owning file (so unfavorites don't resurrect). Favorites/tag *edits* deliberately don't re-derive the playable list (refs, not deps) — only the filter toggles do, or a heart press would reset the slide index. Session-only filters (favoritesOnly/tagFilter) are intentionally not persisted.
+- **Slide timer bar** (`showSlideTimer`): CSS width animation keyed by `currentIndex`, duration set inline from `slideDuration`.
+- **Update check**: `checkForUpdates` in main hits the GitHub Releases API (unsigned builds can't Squirrel-update, so it opens the release page); quiet check 5s after launch in packaged builds, menu item for manual checks. Tag `v*` pushes trigger `.github/workflows/release.yml` (macOS runner → DMG → GitHub Release).
 - **Quick-move** (`1`/`2`/`3`): target folders in settings (`quickMoveFolders`), moves via `file:move`, and the moved file leaves the slideshow through the same `handleFilesDeleted` path as deletions.
 - **Resume position**: `resumePositions` in electron-store maps a joined folder-set key to the last index; Resume sets `pendingIndexRef`, consumed once the file list lands.
 - The window sets `backgroundThrottling: false` — the slideshow may be playing while the window is occluded (Send to Display), and throttled rAF also freezes framer-motion mid-transition (this broke E2E runs when the window opened behind others).
@@ -106,8 +109,7 @@ The **star wipe** needs the outgoing slide to stay visible while the incoming sl
 
 ## Improvement ideas (not yet done)
 
-1. **Pinch-to-zoom** — ZoomPan handles wheel + drag; trackpad pinch arrives as ctrl+wheel and mostly works, but true multi-touch pointer pinch is unimplemented.
-2. **Code signing & notarization** — builds are unsigned; Gatekeeper blocks them on other Macs.
-3. **HEIC cache eviction** — the disk cache grows unboundedly; an LRU sweep on startup would cap it.
-4. **Dedupe review history** — remember skipped/kept pairs so re-scans don't re-ask.
-5. **Auto-update** — electron-updater once there's a GitHub Releases pipeline.
+1. **Code signing & notarization** — builds are unsigned; Gatekeeper blocks them on other Macs, and it's what blocks true self-installing auto-update (Squirrel requires a signature).
+2. **Dedupe review history** — remember skipped/kept pairs so re-scans don't re-ask.
+3. **Tag filter in grid view** — the grid filters by filename only; tags/favorites could be filterable there too.
+4. **Sidecar conflict handling** — concurrent edits from two machines (synced folders) last-write-wins with no merge.

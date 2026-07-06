@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiSettings, FiPlay, FiPause, FiSkipBack, FiSkipForward, FiTrash2, FiVolume2, FiVolumeX, FiGrid } from 'react-icons/fi'
+import { FiSettings, FiPlay, FiPause, FiSkipBack, FiSkipForward, FiTrash2, FiVolume2, FiVolumeX, FiGrid, FiHeart } from 'react-icons/fi'
 import './App.css'
 import { DedupeModal } from './components/DedupeModal'
 import { GridView } from './components/GridView'
 import { IntroScreen } from './components/IntroScreen'
+import { TagEditor } from './components/TagEditor'
 import { SettingsMenu, MediaFilter, ControlsPosition, SortOrder } from './components/SettingsMenu'
 import { Toast } from './components/Toast'
 import { ZoomPan } from './components/ZoomPan'
@@ -30,6 +31,17 @@ function App() {
   const [currentDirs, setCurrentDirs] = useState<string[]>([])
   const [isDedupeOpen, setIsDedupeOpen] = useState(false)
   const [isGridOpen, setIsGridOpen] = useState(false)
+  const [isTagEditorOpen, setIsTagEditorOpen] = useState(false)
+
+  // Library metadata (favorites & tags) — lives in .photo-slap.json sidecar
+  // files next to the photos, not in app storage
+  const [favorites, setFavorites] = useState<Set<string>>(new Set())
+  const [fileTags, setFileTags] = useState<Record<string, string[]>>({})
+  const [tagNames, setTagNames] = useState<string[]>([])
+  // Session-only view filters (not persisted — a hidden filter across
+  // launches would look like lost photos)
+  const [favoritesOnly, setFavoritesOnly] = useState(false)
+  const [tagFilter, setTagFilter] = useState('')
   const [exifData, setExifData] = useState<ExifData | null>(null)
   const [kenBurnsClass, setKenBurnsClass] = useState('')
   // 1 = forward, -1 = backward; mirrors directional slide transitions
@@ -50,6 +62,7 @@ function App() {
   const [controlsPosition, setControlsPosition] = usePersistedState<ControlsPosition>('controlsPosition', 'bottom')
   const [sortOrder, setSortOrder] = usePersistedState<SortOrder>('sortOrder', 'name')
   const [quickMoveFolders, setQuickMoveFolders] = usePersistedState<(string | null)[]>('quickMoveFolders', [null, null, null])
+  const [showSlideTimer, setShowSlideTimer] = usePersistedState('showSlideTimer', true)
 
   // Zoom state (per-slide; ZoomPan reports in so Ken Burns can pause)
   const [isZoomed, setIsZoomed] = useState(false)
@@ -159,17 +172,91 @@ function App() {
     return () => clearTimeout(timer);
   }, [currentIndex, lastDirs, files.length]);
 
+  // Refs so favorite/tag EDITS don't re-derive the list (which would reset
+  // the slide index); the favorites/tag FILTER toggles are real deps below.
+  const favoritesRef = useRef(favorites);
+  const fileTagsRef = useRef(fileTags);
+  useEffect(() => {
+    favoritesRef.current = favorites;
+    fileTagsRef.current = fileTags;
+  }, [favorites, fileTags]);
+
   // Derive the playable list whenever the source files or any list-shaping
   // setting changes (also handles persisted settings hydrating after launch).
   useEffect(() => {
     if (allFiles.length === 0) return;
     let cancelled = false;
     (async () => {
+      let source = allFiles;
+      if (favoritesOnly) source = source.filter(f => favoritesRef.current.has(f.path));
+      if (tagFilter) source = source.filter(f => fileTagsRef.current[f.path]?.includes(tagFilter));
+      if (source.length === 0) {
+        showToast(favoritesOnly || tagFilter ? 'No files match the filters' : 'No media files');
+      }
       const dates = sortOrder !== 'name' ? await ensureDates(allFiles) : null;
-      if (!cancelled) applyFiltersAndSort(allFiles, mediaFilter, isShuffle, sortOrder, dates);
+      if (!cancelled) applyFiltersAndSort(source, mediaFilter, isShuffle, sortOrder, dates);
     })();
     return () => { cancelled = true; };
-  }, [allFiles, mediaFilter, isShuffle, sortOrder, ensureDates, applyFiltersAndSort]);
+  }, [allFiles, mediaFilter, isShuffle, sortOrder, favoritesOnly, tagFilter, ensureDates, applyFiltersAndSort, showToast]);
+
+  // Load favorites/tags from the library sidecars whenever folders change
+  useEffect(() => {
+    if (currentDirs.length === 0) return;
+    window.api.libraryLoad(currentDirs)
+      .then(meta => {
+        setFavorites(new Set(meta.favorites));
+        setFileTags(meta.tags);
+        setTagNames(meta.tagNames);
+      })
+      .catch(e => console.error('Failed to load library metadata:', e));
+  }, [currentDirs]);
+
+  // Debounced sidecar write-back
+  const librarySaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleLibrarySave = useCallback((favs: Set<string>, tags: Record<string, string[]>, names: string[]) => {
+    if (librarySaveTimer.current) clearTimeout(librarySaveTimer.current);
+    librarySaveTimer.current = setTimeout(() => {
+      window.api.librarySave(currentDirs, { favorites: [...favs], tags, tagNames: names })
+        .catch(e => console.error('Failed to save library metadata:', e));
+    }, 800);
+  }, [currentDirs]);
+
+  const toggleFavorite = useCallback(() => {
+    const file = files[currentIndex];
+    if (!file) return;
+    const next = new Set(favorites);
+    const nowFavorite = !next.has(file.path);
+    if (nowFavorite) next.add(file.path);
+    else next.delete(file.path);
+    setFavorites(next);
+    scheduleLibrarySave(next, fileTags, tagNames);
+    // Un-favoriting while the favorites filter is on removes it from view
+    if (!nowFavorite && favoritesOnly) {
+      setFiles(prev => {
+        const remaining = prev.filter(f => f.path !== file.path);
+        setCurrentIndex(ci => Math.min(ci, Math.max(0, remaining.length - 1)));
+        return remaining;
+      });
+    }
+  }, [files, currentIndex, favorites, fileTags, tagNames, favoritesOnly, scheduleLibrarySave]);
+
+  const setTagOnCurrent = useCallback((tag: string, ensureInVocabulary = false) => {
+    const file = files[currentIndex];
+    if (!file) return;
+    const current = fileTags[file.path] ?? [];
+    const nextTags = {
+      ...fileTags,
+      [file.path]: current.includes(tag) ? current.filter(t => t !== tag) : [...current, tag],
+    };
+    if (nextTags[file.path].length === 0) delete nextTags[file.path];
+    let nextNames = tagNames;
+    if (ensureInVocabulary && !tagNames.includes(tag)) {
+      nextNames = [...tagNames, tag].sort();
+      setTagNames(nextNames);
+    }
+    setFileTags(nextTags);
+    scheduleLibrarySave(favorites, nextTags, nextNames);
+  }, [files, currentIndex, fileTags, tagNames, favorites, scheduleLibrarySave]);
 
   const handleOpenDirectory = useCallback(async () => {
     try {
@@ -512,6 +599,12 @@ function App() {
         case 'g':
           setIsGridOpen(prev => !prev);
           break;
+        case 'h':
+          toggleFavorite();
+          break;
+        case 't':
+          setIsTagEditorOpen(prev => !prev);
+          break;
         case 'm':
           seekVideoBy(10);
           break;
@@ -524,6 +617,7 @@ function App() {
           quickMove(parseInt(e.key) - 1);
           break;
         case 'Escape':
+          setIsTagEditorOpen(false);
           setIsGridOpen(false);
           setIsSettingsOpen(false);
           break;
@@ -531,7 +625,7 @@ function App() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [nextSlide, prevSlide, togglePlay, deleteCurrentFile, showCurrentInFinder, seekVideoBy, quickMove]);
+  }, [nextSlide, prevSlide, togglePlay, deleteCurrentFile, showCurrentInFinder, seekVideoBy, quickMove, toggleFavorite]);
 
   // Update window title
   useEffect(() => {
@@ -550,6 +644,8 @@ function App() {
       'prev': prevSlide,
       'toggle-play': togglePlay,
       'grid': () => setIsGridOpen(prev => !prev),
+      'favorite': toggleFavorite,
+      'tags': () => setIsTagEditorOpen(prev => !prev),
       'seek-forward': () => seekVideoBy(10),
       'seek-back': () => seekVideoBy(-10),
       'reveal': showCurrentInFinder,
@@ -562,7 +658,7 @@ function App() {
       window.api.on('menu:action', (_event, name: string) => actions[name]?.()),
     ];
     return () => cleanups.forEach(c => c());
-  }, [handleOpenDirectory, showCurrentInFinder, nextSlide, prevSlide, togglePlay, seekVideoBy, deleteCurrentFile]);
+  }, [handleOpenDirectory, showCurrentInFinder, nextSlide, prevSlide, togglePlay, seekVideoBy, deleteCurrentFile, toggleFavorite]);
 
   const currentFile: MediaFile | null = files.length > 0 ? files[currentIndex] : null;
   const fileUrl = currentFile ? getFileUrl(currentFile.path) : '';
@@ -604,6 +700,13 @@ function App() {
           next[slot] = path;
           setQuickMoveFolders(next);
         }}
+        showSlideTimer={showSlideTimer}
+        onToggleSlideTimer={() => setShowSlideTimer(!showSlideTimer)}
+        favoritesOnly={favoritesOnly}
+        onToggleFavoritesOnly={() => setFavoritesOnly(prev => !prev)}
+        tagFilter={tagFilter}
+        onTagFilterChange={setTagFilter}
+        tagNames={tagNames}
         onShowInFinder={() => {
           showCurrentInFinder();
           toggleSettings();
@@ -636,6 +739,20 @@ function App() {
       <div className={`file-info ${showControls ? 'visible' : ''} ${controlsPosition === 'left' ? 'position-left' : ''}`} style={controlsPosition === 'left' ? {} : { top: '50px' }}>
         {currentIndex + 1} / {files.length}
       </div>
+
+      {favorites.has(currentFile.path) && (
+        <div className="fav-indicator" title="Favorite (H to toggle)">
+          <FiHeart />
+        </div>
+      )}
+
+      {showSlideTimer && isPlaying && currentFile.type === 'image' && (
+        <div
+          className="slide-timer"
+          key={`${currentIndex}-${slideDuration}`}
+          style={{ animationDuration: `${slideDuration}ms` }}
+        />
+      )}
 
       {isExifEnabled && exifData && (
         <div className={`exif-overlay ${controlsPosition === 'left' ? 'position-left' : ''}`}>
@@ -808,12 +925,24 @@ function App() {
         <GridView
           files={files}
           currentIndex={currentIndex}
+          favorites={favorites}
           onSelect={(i) => {
             setDirection(i >= currentIndex ? 1 : -1);
             setCurrentIndex(i);
             setIsGridOpen(false);
           }}
           onClose={() => setIsGridOpen(false)}
+        />
+      )}
+
+      {isTagEditorOpen && (
+        <TagEditor
+          fileName={currentFile.name}
+          fileTags={fileTags[currentFile.path] ?? []}
+          tagNames={tagNames}
+          onToggleTag={(tag) => setTagOnCurrent(tag)}
+          onAddTag={(tag) => setTagOnCurrent(tag, true)}
+          onClose={() => setIsTagEditorOpen(false)}
         />
       )}
         </>

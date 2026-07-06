@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener(channel, listener);
   },
   moveFile: (path: string, destDir: string) => ipcRenderer.invoke('file:move', path, destDir),
+  libraryLoad: (roots: string[]) => ipcRenderer.invoke('library:load', roots),
+  librarySave: (roots: string[], meta: unknown) => ipcRenderer.invoke('library:save', roots, meta),
   setPowerBlocked: (blocked: boolean) => ipcRenderer.invoke('power:setBlocked', blocked),
   // Dedupe
   scanDedupeExact: (dirs: string[], includeVideos: boolean) => ipcRenderer.invoke('dedupe:scan:exact', dirs, includeVideos),

@@ -23,9 +23,12 @@ By [Eddy Sant](https://github.com/eddysant), built with AI assistance.
 - **Safe media serving** — files are streamed over a custom `media://` protocol restricted to folders you've opened; Chromium web security stays fully enabled.
 - **Safe delete** — files are moved to the system Trash, never hard-deleted.
 - **Open a folder from the command line** — `photo-slap ~/Pictures/vacation` (or `PHOTO_SLAP_DIR=... npm run dev` during development).
-- **Grid view** — press `G` for a lazy-loading thumbnail grid; click any cell to jump there.
+- **Grid view** — press `G` for a lazy-loading thumbnail grid with a filename filter; click any cell to jump there.
+- **Favorites & tags** — `H` hearts a photo, `T` opens a quick-tag editor with your reusable tag vocabulary; filter the slideshow to favorites or a tag from Settings. Stored in `.photo-slap.json` sidecar files *next to your photos* (relative paths, so folders can move), not in the app — opening a parent folder picks up and merges sidecars saved in subfolders.
 - **Quick-move folders** — assign up to three target folders in Settings, then press `1`/`2`/`3` to move the current file there. Combined with `Delete`, it makes triaging a photo dump fast.
-- **Keyboard shortcuts** — `←`/`→` previous/next, `Space` play/pause, `G` grid, `F` reveal in Finder, `M`/`N` video ±10 seconds, `1`–`3` quick-move, `Delete`/`Backspace` delete, `Esc` close overlays. All of them are listed in the **Actions** menu in the menu bar.
+- **Keyboard shortcuts** — `←`/`→` previous/next, `Space` play/pause, `G` grid, `H` favorite, `T` tags, `F` reveal in Finder, `M`/`N` video ±10 seconds, `1`–`3` quick-move, `Delete`/`Backspace` delete, `Esc` close overlays. All of them are listed in the **Actions** menu in the menu bar.
+- **Slide timer bar** — a thin progress bar shows when the next slide lands (can be hidden in Settings).
+- **Updates** — the app checks GitHub Releases on launch (and via *photo-slap → Check for Updates…*) and points you at new versions. Unsigned builds can't self-install, so it opens the download page.
 - **Send to Display** — `Window → Send to Display` moves the slideshow fullscreen onto any connected screen. The display stays awake while the show plays, and playback isn't throttled when the window is covered.
 - **Fast HEIC** — transcoded iPhone photos are cached on disk, so each HEIC only pays the decode cost once.
 - **Resume where you left off** — the intro screen's Resume button reopens the last folder at the slide you were on.

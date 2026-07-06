@@ -21,6 +21,9 @@ export function ZoomPan({ resetKey, onZoomChange, children }: ZoomPanProps) {
     const state = useRef({ scale: 1, tx: 0, ty: 0 });
     const drag = useRef<{ startX: number; startY: number; tx: number; ty: number } | null>(null);
     const zoomedRef = useRef(false);
+    // Multi-touch pinch state
+    const pointers = useRef(new Map<number, { x: number; y: number }>());
+    const pinch = useRef<{ startDist: number; startScale: number; lastMid: { x: number; y: number } } | null>(null);
 
     const apply = useCallback(() => {
         const { scale, tx, ty } = state.current;
@@ -77,13 +80,53 @@ export function ZoomPan({ resetKey, onZoomChange, children }: ZoomPanProps) {
         return () => el.removeEventListener('wheel', onWheel);
     }, [zoomAt]);
 
+    const pinchGeometry = () => {
+        const [a, b] = [...pointers.current.values()];
+        return {
+            dist: Math.hypot(b.x - a.x, b.y - a.y),
+            mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
+        };
+    };
+
     const onPointerDown = (e: React.PointerEvent) => {
+        pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        try {
+            containerRef.current?.setPointerCapture(e.pointerId);
+        } catch {
+            // synthetic events (tests) have no active pointer to capture
+        }
+
+        if (pointers.current.size === 2) {
+            // Second finger down: switch from drag to pinch
+            const { dist, mid } = pinchGeometry();
+            pinch.current = { startDist: dist, startScale: state.current.scale, lastMid: mid };
+            drag.current = null;
+            return;
+        }
         if (state.current.scale <= 1) return;
-        containerRef.current?.setPointerCapture(e.pointerId);
         drag.current = { startX: e.clientX, startY: e.clientY, tx: state.current.tx, ty: state.current.ty };
     };
 
     const onPointerMove = (e: React.PointerEvent) => {
+        if (pointers.current.has(e.pointerId)) {
+            pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        }
+
+        if (pinch.current && pointers.current.size >= 2) {
+            const el = containerRef.current;
+            if (!el) return;
+            const rect = el.getBoundingClientRect();
+            const { dist, mid } = pinchGeometry();
+            // Two-finger pan: follow the midpoint drift…
+            state.current.tx += mid.x - pinch.current.lastMid.x;
+            state.current.ty += mid.y - pinch.current.lastMid.y;
+            pinch.current.lastMid = mid;
+            // …then scale around the midpoint
+            const targetScale = pinch.current.startScale * (dist / pinch.current.startDist);
+            zoomAt(mid.x - rect.left, mid.y - rect.top, targetScale);
+            return;
+        }
+
         if (!drag.current) return;
         state.current.tx = drag.current.tx + (e.clientX - drag.current.startX);
         state.current.ty = drag.current.ty + (e.clientY - drag.current.startY);
@@ -91,7 +134,11 @@ export function ZoomPan({ resetKey, onZoomChange, children }: ZoomPanProps) {
         apply();
     };
 
-    const endDrag = () => { drag.current = null; };
+    const endDrag = (e: React.PointerEvent) => {
+        pointers.current.delete(e.pointerId);
+        if (pointers.current.size < 2) pinch.current = null;
+        drag.current = null;
+    };
 
     const onDoubleClick = (e: React.MouseEvent) => {
         const el = containerRef.current;

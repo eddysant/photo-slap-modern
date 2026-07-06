@@ -23,6 +23,12 @@ interface ScanResult {
     errors: string[];
 }
 
+interface LibraryMeta {
+    favorites: string[];
+    tags: Record<string, string[]>;
+    tagNames: string[];
+}
+
 interface Window {
     api: {
         openDirectory: () => Promise<ScanResult | null>;
@@ -37,6 +43,8 @@ interface Window {
         showInFolder: (path: string) => Promise<void>;
         getExif: (path: string) => Promise<ExifData | null>;
         moveFile: (path: string, destDir: string) => Promise<{ ok: boolean; error?: string }>;
+        libraryLoad: (roots: string[]) => Promise<LibraryMeta>;
+        librarySave: (roots: string[], meta: LibraryMeta) => Promise<void>;
         setPowerBlocked: (blocked: boolean) => Promise<void>;
         scanDedupeExact: (dirs: string[], includeVideos: boolean) => Promise<{ hash: string; files: string[] }[]>;
         scanDedupeFiles: (dirs: string[], kind: 'images' | 'videos') => Promise<string[]>;

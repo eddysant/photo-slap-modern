@@ -304,23 +304,101 @@ try {
     check('wheel zooms in', zoomScale > 1.5, zoom.zoomedTransform);
     check('double-click resets zoom', /scale\(1\)/.test(zoom.resetTransform), zoom.resetTransform);
 
+    console.log('pinch zoom');
+    const pinchTransform = await cdp.evaluate(`(async () => {
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+        const zp = document.querySelector('.zoom-pan');
+        const r = zp.getBoundingClientRect();
+        const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+        const pe = (type, id, x, y) => zp.dispatchEvent(new PointerEvent(type, {
+            pointerId: id, pointerType: 'touch', isPrimary: id === 1,
+            clientX: x, clientY: y, bubbles: true,
+        }));
+        // Two fingers 80px apart spread to 320px apart = 4x pinch
+        pe('pointerdown', 1, cx - 40, cy);
+        pe('pointerdown', 2, cx + 40, cy);
+        pe('pointermove', 1, cx - 160, cy);
+        pe('pointermove', 2, cx + 160, cy);
+        pe('pointerup', 1, cx - 160, cy);
+        pe('pointerup', 2, cx + 160, cy);
+        await sleep(100);
+        const transform = document.querySelector('.zoom-pan-content').style.transform;
+        zp.dispatchEvent(new MouseEvent('dblclick', { clientX: cx, clientY: cy, bubbles: true }));
+        return transform;
+    })()`);
+    const pinchScale = parseFloat(pinchTransform.match(/scale\(([\d.]+)\)/)?.[1] ?? '1');
+    check('two-finger pinch zooms ~4x', pinchScale > 2.5 && pinchScale < 6, pinchTransform);
+
+    console.log('slide timer, favorites, tags');
+    const extras = await cdp.evaluate(`(async () => {
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+        const out = {};
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: ' ' }));
+        await sleep(300);
+        out.timerVisible = !!document.querySelector('.slide-timer');
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: ' ' }));
+        await sleep(200);
+        out.timerGoneWhenPaused = !document.querySelector('.slide-timer');
+
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'h' }));
+        await sleep(200);
+        out.heart = !!document.querySelector('.fav-indicator');
+
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 't' }));
+        await sleep(200);
+        out.tagEditor = !!document.querySelector('.tag-editor');
+        const input = document.querySelector('.tag-add-form input');
+        Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(input, 'beach');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+        await sleep(200);
+        out.chipOn = !!document.querySelector('.tag-chip.on');
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+        await sleep(1200); // wait out the sidecar save debounce
+        return JSON.stringify(out);
+    })()`).then(JSON.parse);
+    check('slide timer bar shows while playing, hides when paused', extras.timerVisible && extras.timerGoneWhenPaused);
+    check('H favorites the slide (heart indicator)', extras.heart);
+    check('tag editor adds and applies a tag', extras.tagEditor && extras.chipOn);
+    try {
+        const sidecar = JSON.parse(await fs.readFile(path.join(fixture, '.photo-slap.json'), 'utf8'));
+        check('sidecar file saved next to the photos',
+            sidecar.favorites.length === 1 && sidecar.tagNames.includes('beach'),
+            `favorites=${JSON.stringify(sidecar.favorites)} tagNames=${JSON.stringify(sidecar.tagNames)}`);
+    } catch (e) {
+        check('sidecar file saved next to the photos', false, e.message);
+    }
+
     console.log('grid view');
     const grid = await cdp.evaluate(`(async () => {
         const sleep = ms => new Promise(r => setTimeout(r, ms));
+        const setInput = (el, v) => {
+            Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(el, v);
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+        };
         window.dispatchEvent(new KeyboardEvent('keydown', { key: 'g' }));
         await sleep(400);
-        const cells = document.querySelectorAll('.grid-cell');
-        const count = cells.length;
-        cells[1]?.click(); // jump to the second file
+        const count = document.querySelectorAll('.grid-cell').length;
+
+        // Filename filter narrows the grid
+        const filter = document.querySelector('.grid-filter');
+        setInput(filter, 'b.png');
+        await sleep(300);
+        const filteredCount = document.querySelectorAll('.grid-cell').length;
+        setInput(filter, '');
+        await sleep(300);
+
+        document.querySelectorAll('.grid-cell')[1]?.click(); // jump to the second file
         await sleep(700);
         const counter = document.querySelector('.file-info')?.textContent;
         const closed = !document.querySelector('.grid-overlay');
         // return to the first slide so later assertions start from 1 / N
         window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft' }));
         await sleep(900);
-        return JSON.stringify({ count, counter, closed });
+        return JSON.stringify({ count, filteredCount, counter, closed });
     })()`).then(JSON.parse);
     check('grid shows every file', grid.count === fixtureCount, `${grid.count} cells`);
+    check('filename filter narrows the grid', grid.filteredCount === 1, `${grid.filteredCount} cell(s) for "b.png"`);
     check('clicking a cell jumps and closes the grid', grid.closed && grid.counter === `2 / ${fixtureCount}`, grid.counter);
 
     console.log('dedupe (worker + transitive groups + slideshow refresh)');

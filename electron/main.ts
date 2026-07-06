@@ -11,6 +11,7 @@ import sharp from 'sharp'
 import decodeHeic from 'heic-decode'
 import { scanDirectory } from './fileScanner'
 import { findExactDuplicates, scanFiles } from './dedupe'
+import { loadLibraryMeta, saveLibraryMeta, LibraryMeta } from './libraryMeta'
 import ExifReader from 'exifreader';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -81,6 +82,30 @@ const mimeFor = (p: string) => MIME_TYPES[path.extname(p).toLowerCase()] ?? 'app
 // Transcoded HEIC JPEGs are cached on disk (keyed by path+mtime+size) so
 // each photo only pays the WASM decode once, ever.
 let heicCacheDir: string | null = null;
+const HEIC_CACHE_MAX_BYTES = 500 * 1024 * 1024;
+
+// LRU sweep at startup: hits touch mtime, so oldest mtime = least recently used
+async function evictHeicCache() {
+  if (!heicCacheDir) return;
+  try {
+    const names = await fs.readdir(heicCacheDir);
+    const entries = await Promise.all(names.map(async (name) => {
+      const p = path.join(heicCacheDir!, name);
+      const stat = await fs.stat(p);
+      return { p, size: stat.size, mtimeMs: stat.mtimeMs };
+    }));
+    let total = entries.reduce((sum, e) => sum + e.size, 0);
+    if (total <= HEIC_CACHE_MAX_BYTES) return;
+    entries.sort((a, b) => a.mtimeMs - b.mtimeMs);
+    for (const entry of entries) {
+      if (total <= HEIC_CACHE_MAX_BYTES) break;
+      await fs.unlink(entry.p).catch(() => { });
+      total -= entry.size;
+    }
+  } catch {
+    // best effort
+  }
+}
 
 async function transcodeHeic(filePath: string): Promise<Buffer> {
   let cachePath: string | null = null;
@@ -89,7 +114,9 @@ async function transcodeHeic(filePath: string): Promise<Buffer> {
       const stat = await fs.stat(filePath);
       const key = crypto.createHash('sha1').update(`${filePath}:${stat.mtimeMs}:${stat.size}`).digest('hex');
       cachePath = path.join(heicCacheDir, `${key}.jpg`);
-      return await fs.readFile(cachePath); // cache hit
+      const cached = await fs.readFile(cachePath); // cache hit
+      fs.utimes(cachePath, new Date(), new Date()).catch(() => { }); // LRU touch
+      return cached;
     } catch {
       // cache miss — decode below
     }
@@ -220,6 +247,56 @@ if (process.env.PHOTO_SLAP_DEBUG_PORT) {
 
 let win: BrowserWindow | null = null
 
+// --------- Update check ---------
+// Unsigned macOS builds can't self-install updates (Squirrel requires a
+// code signature), so this checks the GitHub Releases API and points the
+// user at the download page instead.
+const RELEASES_API = 'https://api.github.com/repos/eddysant/photo-slap-modern/releases/latest';
+
+function isNewerVersion(latest: string, current: string): boolean {
+  const a = latest.replace(/^v/, '').split('.').map(Number);
+  const b = current.replace(/^v/, '').split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((a[i] ?? 0) > (b[i] ?? 0)) return true;
+    if ((a[i] ?? 0) < (b[i] ?? 0)) return false;
+  }
+  return false;
+}
+
+async function checkForUpdates(interactive: boolean) {
+  const current = app.getVersion();
+  try {
+    const res = await net.fetch(RELEASES_API, { headers: { Accept: 'application/vnd.github+json' } });
+    if (!res.ok) throw new Error(`GitHub API responded ${res.status}`);
+    const release = await res.json() as { tag_name: string; html_url: string };
+
+    if (isNewerVersion(release.tag_name, current)) {
+      const { response } = await dialog.showMessageBox(win!, {
+        type: 'info',
+        message: `photo-slap ${release.tag_name.replace(/^v/, '')} is available`,
+        detail: `You have ${current}. Download the new version from GitHub Releases.`,
+        buttons: ['Open Download Page', 'Later'],
+        defaultId: 0,
+      });
+      if (response === 0) shell.openExternal(release.html_url);
+    } else if (interactive) {
+      await dialog.showMessageBox(win!, {
+        type: 'info',
+        message: "You're up to date",
+        detail: `photo-slap ${current} is the latest version.`,
+      });
+    }
+  } catch (e) {
+    if (interactive) {
+      await dialog.showMessageBox(win!, {
+        type: 'warning',
+        message: 'Update check failed',
+        detail: String(e),
+      });
+    }
+  }
+}
+
 // Move the slideshow fullscreen onto a given display. This is the "cast to
 // TV" path: connect the TV via macOS Screen Mirroring (as an extended
 // display) and it shows up here. Electron cannot initiate AirPlay streaming
@@ -269,6 +346,7 @@ function buildApplicationMenu() {
         label: app.name,
         submenu: [
           { role: 'about' },
+          { label: 'Check for Updates…', click: () => checkForUpdates(true) },
           { type: 'separator' },
           { role: 'services' },
           { type: 'separator' },
@@ -318,6 +396,9 @@ function buildApplicationMenu() {
         action('Previous Slide', 'Left', 'prev'),
         action('Play / Pause Slideshow', 'Space', 'toggle-play'),
         action('Grid View', 'G', 'grid'),
+        { type: 'separator' },
+        action('Toggle Favorite', 'H', 'favorite'),
+        action('Edit Tags', 'T', 'tags'),
         { type: 'separator' },
         action('Video: Skip Forward 10s', 'M', 'seek-forward'),
         action('Video: Skip Back 10s', 'N', 'seek-back'),
@@ -527,6 +608,15 @@ ipcMain.handle('dedupe:scan:files', async (_event, dirPaths: string[], kind: 'im
   return await scanFiles(dirPaths, kind);
 });
 
+// --------- Library metadata (favorites & tags, stored with the photos) ---------
+ipcMain.handle('library:load', async (_event, roots: string[]) => {
+  return await loadLibraryMeta(roots);
+});
+
+ipcMain.handle('library:save', async (_event, roots: string[], meta: LibraryMeta) => {
+  await saveLibraryMeta(roots, meta);
+});
+
 // Basic file stats for the dedupe compare cards
 ipcMain.handle('files:getInfo', async (_event, paths: string[]) => {
   const result: Record<string, { size: number; mtimeMs: number }> = {};
@@ -646,11 +736,17 @@ app.whenReady().then(async () => {
   try {
     heicCacheDir = path.join(app.getPath('userData'), 'heic-cache');
     await fs.mkdir(heicCacheDir, { recursive: true });
+    evictHeicCache(); // background LRU sweep
   } catch {
     heicCacheDir = null; // cache disabled, transcoding still works
   }
 
   createWindow();
+
+  // Quiet update check shortly after launch (packaged builds only)
+  if (app.isPackaged) {
+    setTimeout(() => checkForUpdates(false), 5000);
+  }
 
   // Keep the "Send to Display" submenu in sync as displays (e.g. an
   // AirPlay-mirrored TV) come and go.
