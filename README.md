@@ -17,14 +17,18 @@ By [Eddy Sant](https://github.com/eddysant), built with AI assistance.
 - **Media filtering & shuffle** — photos only / videos only / both, natural filename sort, or Fisher-Yates shuffle.
 - **Video controls** — scrubber, volume, mute, click-to-pause.
 - **EXIF overlay** — camera, lens, ISO, aperture, shutter speed, and date for photos.
-- **Duplicate finder** — one strictness slider from **Exact** (byte-for-byte, SHA-256) through **Strict / Normal / Loose** perceptual matching (16×16 blockhash + Hamming distance, computed in a Web Worker), each level explained in plain language. Optionally includes videos: byte-identical at Exact, matched by a sampled frame at similarity levels (catches re-encoded copies). The side-by-side review shows filename, folder, file size, and dimensions — with the larger file/resolution highlighted — and walks through groups of any size. Deletions update the running slideshow immediately. Available straight from the start screen with its own folder picker.
+- **Duplicate finder** — one strictness slider from **Exact** (byte-for-byte, SHA-256) through **Strict / Normal / Loose** perceptual matching (16×16 blockhash + Hamming distance, computed in a Web Worker), each level explained in plain language. Optionally includes videos: byte-identical at Exact, matched by a sampled frame at similarity levels (catches re-encoded copies). Scans **all folders of the session at once**, so duplicates across folders group together. The side-by-side review shows filename, folder, file size, and dimensions — with the larger file/resolution highlighted — and walks through groups of any size. Deletions update the running slideshow immediately. Available straight from the start screen with its own folder picker.
 - **Settings everywhere** — the options panel opens from the control bar, the start screen, or the app menu (`Cmd+,`), so the slideshow can be configured before opening a folder.
 - **HEIC support** — iPhone photos are transcoded to JPEG on the fly (WASM HEVC decode + sharp encode in the main process).
 - **Safe media serving** — files are streamed over a custom `media://` protocol restricted to folders you've opened; Chromium web security stays fully enabled.
 - **Safe delete** — files are moved to the system Trash, never hard-deleted.
 - **Open a folder from the command line** — `photo-slap ~/Pictures/vacation` (or `PHOTO_SLAP_DIR=... npm run dev` during development).
-- **Keyboard shortcuts** — `←`/`→` previous/next, `Space` play/pause, `F` reveal in Finder, `M`/`N` video ±10 seconds, `Delete`/`Backspace` delete, `Esc` close settings. All of them are listed in the **Actions** menu in the menu bar.
-- **Send to Display** — `Window → Send to Display` moves the slideshow fullscreen onto any connected screen.
+- **Grid view** — press `G` for a lazy-loading thumbnail grid; click any cell to jump there.
+- **Quick-move folders** — assign up to three target folders in Settings, then press `1`/`2`/`3` to move the current file there. Combined with `Delete`, it makes triaging a photo dump fast.
+- **Keyboard shortcuts** — `←`/`→` previous/next, `Space` play/pause, `G` grid, `F` reveal in Finder, `M`/`N` video ±10 seconds, `1`–`3` quick-move, `Delete`/`Backspace` delete, `Esc` close overlays. All of them are listed in the **Actions** menu in the menu bar.
+- **Send to Display** — `Window → Send to Display` moves the slideshow fullscreen onto any connected screen. The display stays awake while the show plays, and playback isn't throttled when the window is covered.
+- **Fast HEIC** — transcoded iPhone photos are cached on disk, so each HEIC only pays the decode cost once.
+- **Resume where you left off** — the intro screen's Resume button reopens the last folder at the slide you were on.
 
 Supported formats: `.jpg` `.jpeg` `.png` `.webp` `.gif` `.bmp` `.heic` `.heif` (images), `.mp4` `.webm` `.ogg` `.gifv` (videos).
 

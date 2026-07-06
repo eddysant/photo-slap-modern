@@ -1087,6 +1087,89 @@
   will-change: transform;
 }
 
+/* Grid View */
+.grid-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.92);
+  z-index: 900;
+  overflow-y: auto;
+  padding: 48px 16px 16px;
+}
+
+.grid-container {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.grid-cell {
+  aspect-ratio: 1;
+  background: #111;
+  border: 2px solid #333;
+  padding: 0;
+  cursor: pointer;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.grid-cell:hover {
+  border-color: #fff;
+}
+
+.grid-cell.active {
+  border-color: #00aaff;
+  box-shadow: 0 0 12px rgba(0, 170, 255, 0.5);
+}
+
+.grid-cell img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.grid-video-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  color: #888;
+  font-size: 0.65rem;
+  padding: 8px;
+  word-break: break-all;
+}
+
+/* Quick-move settings rows */
+.quick-move-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.8rem;
+  color: #ccc;
+}
+
+.quick-move-key {
+  font-family: 'Silkscreen', cursive;
+  background: #000;
+  border: 2px solid #333;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.quick-move-path {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #00aaff;
+}
+
 /* Toast Notifications */
 .toast {
   position: fixed;

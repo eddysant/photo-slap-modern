@@ -10,7 +10,8 @@ const isVideoFile = (p: string) => /\.(mp4|mov|webm|mkv|ogg|gifv)$/i.test(p);
 interface DedupeModalProps {
     isOpen: boolean;
     onClose: () => void;
-    rootPath: string; // To know where to scan
+    /** All folders of the current session — duplicates group across them. */
+    rootPaths: string[];
     /** Called whenever files are moved to Trash so the slideshow can drop them. */
     onFilesDeleted?: (paths: string[]) => void;
 }
@@ -107,7 +108,7 @@ function FileMeta({ path, info, dims, otherInfo, otherDims }: {
     );
 }
 
-export function DedupeModal({ isOpen, onClose, rootPath, onFilesDeleted }: DedupeModalProps) {
+export function DedupeModal({ isOpen, onClose, rootPaths, onFilesDeleted }: DedupeModalProps) {
     const [step, setStep] = useState<'intro' | 'scanning' | 'review' | 'done'>('intro');
     const [strictness, setStrictness] = useState(0);
     const [includeVideos, setIncludeVideos] = useState(true);
@@ -129,9 +130,9 @@ export function DedupeModal({ isOpen, onClose, rootPath, onFilesDeleted }: Dedup
 
     const workerRef = useRef<Worker | null>(null);
 
-    // The folder to scan: defaults to the open slideshow folder, but can be
-    // picked here directly (the modal is reachable from the start screen).
-    const [scanRoot, setScanRoot] = useState(rootPath);
+    // The folders to scan: defaults to the whole open session, but a folder
+    // can be picked here directly (the modal is reachable from the start screen).
+    const [scanRoots, setScanRoots] = useState<string[]>(rootPaths);
 
     // Reset when opened
     useEffect(() => {
@@ -139,16 +140,22 @@ export function DedupeModal({ isOpen, onClose, rootPath, onFilesDeleted }: Dedup
             setStep('intro');
             setGroups([]);
             setProgress(0);
-            setScanRoot(rootPath);
+            setScanRoots(rootPaths);
             setFileInfos({});
             setDimensions({});
         }
-    }, [isOpen, rootPath]);
+    }, [isOpen, rootPaths]);
 
     const chooseFolder = async () => {
         const dir = await window.api.pickDirectory();
-        if (dir) setScanRoot(dir);
+        if (dir) setScanRoots([dir]);
     };
+
+    const rootsLabel = scanRoots.length === 0
+        ? 'No folder selected'
+        : scanRoots.length === 1
+            ? scanRoots[0].split(/[/\\]/).pop()
+            : `${scanRoots.length} folders`;
 
     // Kill any in-flight hashing when the modal closes/unmounts
     useEffect(() => {
@@ -245,7 +252,7 @@ export function DedupeModal({ isOpen, onClose, rootPath, onFilesDeleted }: Dedup
             const level = STRICTNESS_LEVELS[strictness];
 
             if (level.threshold === null) {
-                const result = await window.api.scanDedupeExact(scanRoot, includeVideos);
+                const result = await window.api.scanDedupeExact(scanRoots, includeVideos);
                 enterReview(result.map(g => ({ ...g, type: 'exact' as const })));
                 return;
             }
@@ -253,8 +260,8 @@ export function DedupeModal({ isOpen, onClose, rootPath, onFilesDeleted }: Dedup
             // Similarity scan: images hashed in a worker; videos (optional)
             // hashed by a sampled frame on the main thread.
             setStatusMsg('Finding files...');
-            const images = await window.api.scanDedupeFiles(scanRoot, 'images');
-            const videos = includeVideos ? await window.api.scanDedupeFiles(scanRoot, 'videos') : [];
+            const images = await window.api.scanDedupeFiles(scanRoots, 'images');
+            const videos = includeVideos ? await window.api.scanDedupeFiles(scanRoots, 'videos') : [];
             const total = images.length + videos.length;
 
             setStatusMsg(`Processing ${total} files...`);
@@ -353,8 +360,8 @@ export function DedupeModal({ isOpen, onClose, rootPath, onFilesDeleted }: Dedup
                     {step === 'intro' && (
                         <div className="step-intro">
                             <div className="dedupe-folder">
-                                <span className="dedupe-folder-name">
-                                    {scanRoot ? scanRoot.split(/[/\\]/).pop() : 'No folder selected'}
+                                <span className="dedupe-folder-name" title={scanRoots.join('\n')}>
+                                    {rootsLabel}
                                 </span>
                                 <button className="text-btn" onClick={chooseFolder}>Choose Folder…</button>
                             </div>
@@ -398,7 +405,7 @@ export function DedupeModal({ isOpen, onClose, rootPath, onFilesDeleted }: Dedup
                                 </small>
                             </div>
 
-                            <button className="balatro-button primary" onClick={startScan} disabled={!scanRoot}>
+                            <button className="balatro-button primary" onClick={startScan} disabled={scanRoots.length === 0}>
                                 START SCAN
                             </button>
                         </div>

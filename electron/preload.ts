@@ -16,9 +16,11 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on(channel, listener);
     return () => ipcRenderer.removeListener(channel, listener);
   },
+  moveFile: (path: string, destDir: string) => ipcRenderer.invoke('file:move', path, destDir),
+  setPowerBlocked: (blocked: boolean) => ipcRenderer.invoke('power:setBlocked', blocked),
   // Dedupe
-  scanDedupeExact: (dir: string, includeVideos: boolean) => ipcRenderer.invoke('dedupe:scan:exact', dir, includeVideos),
-  scanDedupeFiles: (dir: string, kind: 'images' | 'videos') => ipcRenderer.invoke('dedupe:scan:files', dir, kind),
+  scanDedupeExact: (dirs: string[], includeVideos: boolean) => ipcRenderer.invoke('dedupe:scan:exact', dirs, includeVideos),
+  scanDedupeFiles: (dirs: string[], kind: 'images' | 'videos') => ipcRenderer.invoke('dedupe:scan:files', dirs, kind),
   getFileInfo: (paths: string[]) => ipcRenderer.invoke('files:getInfo', paths),
   showInFolder: (path: string) => ipcRenderer.invoke('file:showInFolder', path),
   getExif: (path: string) => ipcRenderer.invoke('file:getExif', path),

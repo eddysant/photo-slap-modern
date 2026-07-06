@@ -165,19 +165,25 @@ try {
     }
 
     console.log('media:// protocol');
+    const jpgUrl = `media://local${path.join(fixture, 'a.jpg').split('/').map(encodeURIComponent).join('/')}`;
     const base = await cdp.evaluate(`(async () => {
         const img = document.querySelector('img.media-element');
         let forbidden = 0;
         try { forbidden = (await fetch('media://local/definitely/not/allowed.jpg')).status; } catch { forbidden = -1; }
+        const ranged = await fetch(${JSON.stringify(jpgUrl)}, { headers: { Range: 'bytes=0-99' } });
         return JSON.stringify({
             counter: document.querySelector('.file-info')?.textContent ?? '',
             naturalWidth: img?.naturalWidth ?? 0,
             forbidden,
+            range: { status: ranged.status, length: (await ranged.arrayBuffer()).byteLength, contentRange: ranged.headers.get('content-range') },
         });
     })()`).then(JSON.parse);
     check('slideshow auto-opened the fixture', base.counter === `1 / ${fixtureCount}`, base.counter);
     check('image rendered through media://', base.naturalWidth > 0, `naturalWidth=${base.naturalWidth}`);
     check('path outside allowed roots is 403', base.forbidden === 403, `status=${base.forbidden}`);
+    check('byte-range requests get 206 partial content',
+        base.range.status === 206 && base.range.length === 100 && /^bytes 0-99\//.test(base.range.contentRange ?? ''),
+        `${base.range.status} ${base.range.contentRange}`);
 
     if (heicPath) {
         console.log('HEIC transcoding');
@@ -228,7 +234,18 @@ try {
 
         // Sample the outgoing slide's translateX right after a nav keypress:
         // forward should move left (negative), backward should move right.
+        const waitIdle = async () => {
+            for (let i = 0; i < 40; i++) {
+                const els = document.querySelectorAll('.viewer-container > div');
+                if (els.length === 1) {
+                    const t = getComputedStyle(els[0]).transform;
+                    if (t === 'none' || Math.abs(new DOMMatrix(t).m41) < 1) return;
+                }
+                await sleep(100);
+            }
+        };
         const sampleExitX = async (key) => {
+            await waitIdle(); // don't dispatch mid-transition
             window.dispatchEvent(new KeyboardEvent('keydown', { key }));
             const xs = [];
             for (let i = 0; i < 6; i++) {
@@ -236,7 +253,6 @@ try {
                 const el = document.querySelector('.viewer-container > div');
                 if (el) xs.push(new DOMMatrix(getComputedStyle(el).transform).m41);
             }
-            await sleep(900); // let the full transition finish
             return xs;
         };
         const forward = await sampleExitX('ArrowRight');
@@ -287,6 +303,25 @@ try {
     const zoomScale = parseFloat(zoom.zoomedTransform.match(/scale\(([\d.]+)\)/)?.[1] ?? '1');
     check('wheel zooms in', zoomScale > 1.5, zoom.zoomedTransform);
     check('double-click resets zoom', /scale\(1\)/.test(zoom.resetTransform), zoom.resetTransform);
+
+    console.log('grid view');
+    const grid = await cdp.evaluate(`(async () => {
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'g' }));
+        await sleep(400);
+        const cells = document.querySelectorAll('.grid-cell');
+        const count = cells.length;
+        cells[1]?.click(); // jump to the second file
+        await sleep(700);
+        const counter = document.querySelector('.file-info')?.textContent;
+        const closed = !document.querySelector('.grid-overlay');
+        // return to the first slide so later assertions start from 1 / N
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft' }));
+        await sleep(900);
+        return JSON.stringify({ count, counter, closed });
+    })()`).then(JSON.parse);
+    check('grid shows every file', grid.count === fixtureCount, `${grid.count} cells`);
+    check('clicking a cell jumps and closes the grid', grid.closed && grid.counter === `2 / ${fixtureCount}`, grid.counter);
 
     console.log('dedupe (worker + transitive groups + slideshow refresh)');
     const dedupe = await cdp.evaluate(`(async () => {

@@ -1,9 +1,11 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, net, protocol, screen, Menu, MenuItemConstructorOptions } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell, net, protocol, screen, powerSaveBlocker, Menu, MenuItemConstructorOptions } from 'electron'
 
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
 import fs from 'node:fs/promises'
-import { statSync } from 'node:fs'
+import { statSync, createReadStream } from 'node:fs'
+import { Readable } from 'node:stream'
+import crypto from 'node:crypto'
 import Store from 'electron-store'
 import sharp from 'sharp'
 import decodeHeic from 'heic-decode'
@@ -68,6 +70,40 @@ function mediaUrlToPath(urlStr: string): string {
 // (plain <img>/<video> tags don't need it, the perceptual-hash worker does).
 const MEDIA_CORS = { 'Access-Control-Allow-Origin': '*' };
 
+const MIME_TYPES: Record<string, string> = {
+  '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.webm': 'video/webm',
+  '.mkv': 'video/x-matroska', '.ogg': 'video/ogg', '.gifv': 'video/mp4',
+  '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+  '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
+};
+const mimeFor = (p: string) => MIME_TYPES[path.extname(p).toLowerCase()] ?? 'application/octet-stream';
+
+// Transcoded HEIC JPEGs are cached on disk (keyed by path+mtime+size) so
+// each photo only pays the WASM decode once, ever.
+let heicCacheDir: string | null = null;
+
+async function transcodeHeic(filePath: string): Promise<Buffer> {
+  let cachePath: string | null = null;
+  if (heicCacheDir) {
+    try {
+      const stat = await fs.stat(filePath);
+      const key = crypto.createHash('sha1').update(`${filePath}:${stat.mtimeMs}:${stat.size}`).digest('hex');
+      cachePath = path.join(heicCacheDir, `${key}.jpg`);
+      return await fs.readFile(cachePath); // cache hit
+    } catch {
+      // cache miss — decode below
+    }
+  }
+
+  const buffer = await fs.readFile(filePath);
+  const { width, height, data } = await decodeHeic({ buffer });
+  const jpeg = await sharp(Buffer.from(data), { raw: { width, height, channels: 4 } })
+    .jpeg({ quality: 90 })
+    .toBuffer();
+  if (cachePath) fs.writeFile(cachePath, jpeg).catch(() => { });
+  return jpeg;
+}
+
 async function handleMediaRequest(request: Request): Promise<Response> {
   const filePath = mediaUrlToPath(request.url);
 
@@ -81,11 +117,7 @@ async function handleMediaRequest(request: Request): Promise<Response> {
   // the raw pixels to JPEG.
   if (/\.(heic|heif)$/i.test(filePath)) {
     try {
-      const buffer = await fs.readFile(filePath);
-      const { width, height, data } = await decodeHeic({ buffer });
-      const jpeg = await sharp(Buffer.from(data), { raw: { width, height, channels: 4 } })
-        .jpeg({ quality: 90 })
-        .toBuffer();
+      const jpeg = await transcodeHeic(filePath);
       return new Response(new Uint8Array(jpeg), {
         headers: { 'Content-Type': 'image/jpeg', 'Cache-Control': 'max-age=3600', ...MEDIA_CORS },
       });
@@ -95,8 +127,40 @@ async function handleMediaRequest(request: Request): Promise<Response> {
     }
   }
 
+  // Byte-range support so <video> can seek without downloading everything
+  const rangeHeader = request.headers.get('range');
+  const rangeMatch = rangeHeader && /bytes=(\d+)-(\d*)/.exec(rangeHeader);
+  if (rangeMatch) {
+    let size: number;
+    try {
+      size = (await fs.stat(filePath)).size;
+    } catch {
+      return new Response('Not Found', { status: 404, headers: MEDIA_CORS });
+    }
+    const start = Number(rangeMatch[1]);
+    const end = rangeMatch[2] ? Math.min(Number(rangeMatch[2]), size - 1) : size - 1;
+    if (start >= size || start > end) {
+      return new Response('Range Not Satisfiable', {
+        status: 416,
+        headers: { 'Content-Range': `bytes */${size}`, ...MEDIA_CORS },
+      });
+    }
+    const stream = Readable.toWeb(createReadStream(filePath, { start, end })) as unknown as ReadableStream;
+    return new Response(stream, {
+      status: 206,
+      headers: {
+        'Content-Range': `bytes ${start}-${end}/${size}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': String(end - start + 1),
+        'Content-Type': mimeFor(filePath),
+        ...MEDIA_CORS,
+      },
+    });
+  }
+
   const res = await net.fetch(pathToFileURL(filePath).toString());
   const headers = new Headers(res.headers);
+  headers.set('Accept-Ranges', 'bytes'); // invite the player to seek with ranges
   for (const [k, v] of Object.entries(MEDIA_CORS)) headers.set(k, v);
   return new Response(res.body, { status: res.status, headers });
 }
@@ -253,6 +317,7 @@ function buildApplicationMenu() {
         action('Next Slide', 'Right', 'next'),
         action('Previous Slide', 'Left', 'prev'),
         action('Play / Pause Slideshow', 'Space', 'toggle-play'),
+        action('Grid View', 'G', 'grid'),
         { type: 'separator' },
         action('Video: Skip Forward 10s', 'M', 'seek-forward'),
         action('Video: Skip Back 10s', 'N', 'seek-back'),
@@ -317,6 +382,9 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.mjs'),
       nodeIntegration: false,
       contextIsolation: true,
+      // A slideshow keeps playing while occluded (e.g. shown on a TV via
+      // Send to Display); don't let Chromium throttle timers/animations.
+      backgroundThrottling: false,
     },
     titleBarStyle: 'hiddenInset',
     vibrancy: 'under-window', // macos blur effect
@@ -400,6 +468,45 @@ ipcMain.handle('file:delete', async (_event, filePath) => {
   }
 });
 
+// Quick-move: relocate a file into one of the configured target folders
+ipcMain.handle('file:move', async (_event, filePath: string, destDir: string) => {
+  try {
+    const dest = path.join(destDir, path.basename(filePath));
+    try {
+      await fs.access(dest);
+      return { ok: false, error: 'A file with that name already exists there' };
+    } catch {
+      // destination free
+    }
+    try {
+      await fs.rename(filePath, dest);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'EXDEV') {
+        // cross-volume move
+        await fs.copyFile(filePath, dest);
+        await fs.unlink(filePath);
+      } else {
+        throw e;
+      }
+    }
+    return { ok: true };
+  } catch (e) {
+    console.error('Failed to move file', e);
+    return { ok: false, error: (e as Error).message };
+  }
+});
+
+// Keep the display awake while a slideshow or video is playing
+let powerBlockerId: number | null = null;
+ipcMain.handle('power:setBlocked', (_event, blocked: boolean) => {
+  if (blocked && powerBlockerId === null) {
+    powerBlockerId = powerSaveBlocker.start('prevent-display-sleep');
+  } else if (!blocked && powerBlockerId !== null) {
+    powerSaveBlocker.stop(powerBlockerId);
+    powerBlockerId = null;
+  }
+});
+
 ipcMain.handle('file:showInFolder', async (_event, filePath) => {
   shell.showItemInFolder(filePath);
 });
@@ -412,12 +519,12 @@ ipcMain.handle('store:set', (_event, key, value) => {
   store.set(key, value);
 });
 
-ipcMain.handle('dedupe:scan:exact', async (_event, dirPath, includeVideos: boolean = true) => {
-  return await findExactDuplicates(dirPath, includeVideos);
+ipcMain.handle('dedupe:scan:exact', async (_event, dirPaths: string[], includeVideos: boolean = true) => {
+  return await findExactDuplicates(dirPaths, includeVideos);
 });
 
-ipcMain.handle('dedupe:scan:files', async (_event, dirPath, kind: 'images' | 'videos' = 'images') => {
-  return await scanFiles(dirPath, kind);
+ipcMain.handle('dedupe:scan:files', async (_event, dirPaths: string[], kind: 'images' | 'videos' = 'images') => {
+  return await scanFiles(dirPaths, kind);
 });
 
 // Basic file stats for the dedupe compare cards
@@ -533,8 +640,16 @@ app.on('activate', () => {
   }
 })
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   protocol.handle('media', handleMediaRequest);
+
+  try {
+    heicCacheDir = path.join(app.getPath('userData'), 'heic-cache');
+    await fs.mkdir(heicCacheDir, { recursive: true });
+  } catch {
+    heicCacheDir = null; // cache disabled, transcoding still works
+  }
+
   createWindow();
 
   // Keep the "Send to Display" submenu in sync as displays (e.g. an

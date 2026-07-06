@@ -36,8 +36,10 @@ interface Window {
         setStore: (key: string, value: any) => Promise<void>;
         showInFolder: (path: string) => Promise<void>;
         getExif: (path: string) => Promise<ExifData | null>;
-        scanDedupeExact: (dir: string, includeVideos: boolean) => Promise<{ hash: string; files: string[] }[]>;
-        scanDedupeFiles: (dir: string, kind: 'images' | 'videos') => Promise<string[]>;
+        moveFile: (path: string, destDir: string) => Promise<{ ok: boolean; error?: string }>;
+        setPowerBlocked: (blocked: boolean) => Promise<void>;
+        scanDedupeExact: (dirs: string[], includeVideos: boolean) => Promise<{ hash: string; files: string[] }[]>;
+        scanDedupeFiles: (dirs: string[], kind: 'images' | 'videos') => Promise<string[]>;
         getFileInfo: (paths: string[]) => Promise<Record<string, { size: number; mtimeMs: number }>>;
         on: (channel: string, listener: (event: any, ...args: any[]) => void) => () => void;
     }

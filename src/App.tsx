@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { FiSettings, FiPlay, FiPause, FiSkipBack, FiSkipForward, FiTrash2, FiVolume2, FiVolumeX } from 'react-icons/fi'
+import { FiSettings, FiPlay, FiPause, FiSkipBack, FiSkipForward, FiTrash2, FiVolume2, FiVolumeX, FiGrid } from 'react-icons/fi'
 import './App.css'
 import { DedupeModal } from './components/DedupeModal'
+import { GridView } from './components/GridView'
 import { IntroScreen } from './components/IntroScreen'
 import { SettingsMenu, MediaFilter, ControlsPosition, SortOrder } from './components/SettingsMenu'
 import { Toast } from './components/Toast'
@@ -26,8 +27,9 @@ function App() {
   const [isPlaying, setIsPlaying] = useState(false)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
-  const [currentDir, setCurrentDir] = useState('')
+  const [currentDirs, setCurrentDirs] = useState<string[]>([])
   const [isDedupeOpen, setIsDedupeOpen] = useState(false)
+  const [isGridOpen, setIsGridOpen] = useState(false)
   const [exifData, setExifData] = useState<ExifData | null>(null)
   const [kenBurnsClass, setKenBurnsClass] = useState('')
   // 1 = forward, -1 = backward; mirrors directional slide transitions
@@ -47,6 +49,7 @@ function App() {
   const [isMuted, setIsMuted] = usePersistedState('isMuted', false)
   const [controlsPosition, setControlsPosition] = usePersistedState<ControlsPosition>('controlsPosition', 'bottom')
   const [sortOrder, setSortOrder] = usePersistedState<SortOrder>('sortOrder', 'name')
+  const [quickMoveFolders, setQuickMoveFolders] = usePersistedState<(string | null)[]>('quickMoveFolders', [null, null, null])
 
   // Zoom state (per-slide; ZoomPan reports in so Ken Burns can pause)
   const [isZoomed, setIsZoomed] = useState(false)
@@ -116,13 +119,16 @@ function App() {
     return fileDatesRef.current;
   }, [showToast]);
 
+  // Set by Resume so the slideshow reopens at the slide it was left on
+  const pendingIndexRef = useRef<number | null>(null);
+
   const ingestScanResult = useCallback((result: ScanResult) => {
     if (result.errors.length > 0) {
       showToast(`${result.errors.length} folder${result.errors.length > 1 ? 's' : ''} couldn't be read`);
     }
 
     if (result.files.length > 0) {
-      setCurrentDir(result.paths[0] ?? '');
+      setCurrentDirs(result.paths);
       fileDatesRef.current = null;
       setAllFiles(result.files); // the filter/sort effect below picks this up
       setIsPlaying(false); // Default to paused
@@ -132,6 +138,26 @@ function App() {
       showToast('No media files found in that folder');
     }
   }, [showToast]);
+
+  // Restore the pending resume position once the file list is ready
+  useEffect(() => {
+    if (files.length > 0 && pendingIndexRef.current !== null) {
+      setCurrentIndex(Math.min(pendingIndexRef.current, files.length - 1));
+      pendingIndexRef.current = null;
+    }
+  }, [files]);
+
+  // Remember the current position per folder set (debounced)
+  useEffect(() => {
+    if (files.length === 0 || lastDirs.length === 0) return;
+    const key = lastDirs.join('|');
+    const timer = setTimeout(async () => {
+      const positions = ((await window.api.getStore('resumePositions')) ?? {}) as Record<string, number>;
+      positions[key] = currentIndex;
+      window.api.setStore('resumePositions', positions);
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [currentIndex, lastDirs, files.length]);
 
   // Derive the playable list whenever the source files or any list-shaping
   // setting changes (also handles persisted settings hydrating after launch).
@@ -158,7 +184,7 @@ function App() {
     }
   }, [ingestScanResult, showToast]);
 
-  // Resume the folder(s) from the previous session
+  // Resume the folder(s) from the previous session, at the slide left off on
   const handleResume = useCallback(async () => {
     if (lastDirs.length === 0) return;
     try {
@@ -166,6 +192,8 @@ function App() {
       const results = await Promise.all(lastDirs.map(d => window.api.scanPath(d)));
       const valid = results.filter((r): r is ScanResult => r !== null);
       if (valid.length > 0) {
+        const positions = ((await window.api.getStore('resumePositions')) ?? {}) as Record<string, number>;
+        pendingIndexRef.current = positions[lastDirs.join('|')] ?? null;
         ingestScanResult(mergeScans(valid));
       } else {
         showToast("That folder doesn't exist anymore");
@@ -219,23 +247,18 @@ function App() {
     };
   }, [ingestScanResult, showToast]);
 
+  // NOTE: keep these updaters pure (no setState inside another setState
+  // updater) — StrictMode double-invokes updaters and impure ones make
+  // navigation skip slides in dev.
   const nextSlide = useCallback(() => {
     setDirection(1);
-    setFiles((currentFiles) => {
-      if (currentFiles.length === 0) return currentFiles;
-      setCurrentIndex((prev) => (prev + 1) % currentFiles.length);
-      return currentFiles;
-    });
-  }, []);
+    setCurrentIndex(prev => files.length === 0 ? prev : (prev + 1) % files.length);
+  }, [files.length]);
 
   const prevSlide = useCallback(() => {
     setDirection(-1);
-    setFiles((currentFiles) => {
-      if (currentFiles.length === 0) return currentFiles;
-      setCurrentIndex((prev) => (prev - 1 + currentFiles.length) % currentFiles.length);
-      return currentFiles;
-    });
-  }, []);
+    setCurrentIndex(prev => files.length === 0 ? prev : (prev - 1 + files.length) % files.length);
+  }, [files.length]);
 
   const togglePlay = useCallback(() => setIsPlaying(prev => !prev), []);
 
@@ -356,6 +379,32 @@ function App() {
     }
   }, [files, currentIndex]);
 
+  // Quick-move the current file into one of the configured target folders
+  const quickMove = useCallback(async (slot: number) => {
+    const file = files[currentIndex];
+    if (!file) return;
+    const destDir = quickMoveFolders[slot];
+    if (!destDir) {
+      showToast(`No quick-move folder set for ${slot + 1} — see Settings`);
+      return;
+    }
+    const result = await window.api.moveFile(file.path, destDir);
+    if (result.ok) {
+      showToast(`Moved to ${destDir.split(/[/\\]/).pop()}`);
+      handleFilesDeleted([file.path]); // drop from the slideshow lists
+    } else {
+      showToast(result.error ?? 'Move failed');
+    }
+  }, [files, currentIndex, quickMoveFolders, showToast, handleFilesDeleted]);
+
+  // Keep the display awake while a slideshow or a video is playing —
+  // matters most when the show is running fullscreen on a TV.
+  const currentIsVideo = files[currentIndex]?.type === 'video';
+  useEffect(() => {
+    const keepAwake = isPlaying || (currentIsVideo && !isUserPaused);
+    window.api.setPowerBlocked(keepAwake);
+  }, [isPlaying, currentIsVideo, isUserPaused]);
+
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newVolume = parseFloat(e.target.value);
     setVolume(newVolume);
@@ -460,20 +509,29 @@ function App() {
         case 'f':
           showCurrentInFinder();
           break;
+        case 'g':
+          setIsGridOpen(prev => !prev);
+          break;
         case 'm':
           seekVideoBy(10);
           break;
         case 'n':
           seekVideoBy(-10);
           break;
+        case '1':
+        case '2':
+        case '3':
+          quickMove(parseInt(e.key) - 1);
+          break;
         case 'Escape':
+          setIsGridOpen(false);
           setIsSettingsOpen(false);
           break;
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [nextSlide, prevSlide, togglePlay, deleteCurrentFile, showCurrentInFinder, seekVideoBy]);
+  }, [nextSlide, prevSlide, togglePlay, deleteCurrentFile, showCurrentInFinder, seekVideoBy, quickMove]);
 
   // Update window title
   useEffect(() => {
@@ -491,6 +549,7 @@ function App() {
       'next': nextSlide,
       'prev': prevSlide,
       'toggle-play': togglePlay,
+      'grid': () => setIsGridOpen(prev => !prev),
       'seek-forward': () => seekVideoBy(10),
       'seek-back': () => seekVideoBy(-10),
       'reveal': showCurrentInFinder,
@@ -539,6 +598,12 @@ function App() {
         onDurationChange={setSlideDuration}
         controlsPosition={controlsPosition}
         onControlsPositionChange={setControlsPosition}
+        quickMoveFolders={quickMoveFolders}
+        onSetQuickMoveFolder={(slot, path) => {
+          const next = [...quickMoveFolders];
+          next[slot] = path;
+          setQuickMoveFolders(next);
+        }}
         onShowInFinder={() => {
           showCurrentInFinder();
           toggleSettings();
@@ -725,6 +790,10 @@ function App() {
 
           <div style={{ width: 1, height: 24, background: 'rgba(255,255,255,0.2)', margin: '0 8px' }} />
 
+          <button className={`control-btn ${isGridOpen ? 'active' : ''}`} onClick={() => setIsGridOpen(prev => !prev)} title="Grid View (G)">
+            <FiGrid size={20} />
+          </button>
+
           <button className={`control-btn ${isSettingsOpen ? 'active' : ''}`} onClick={toggleSettings} title="Settings">
             <FiSettings size={20} />
           </button>
@@ -734,13 +803,26 @@ function App() {
           </button>
         </div>
       </div>
+
+      {isGridOpen && (
+        <GridView
+          files={files}
+          currentIndex={currentIndex}
+          onSelect={(i) => {
+            setDirection(i >= currentIndex ? 1 : -1);
+            setCurrentIndex(i);
+            setIsGridOpen(false);
+          }}
+          onClose={() => setIsGridOpen(false)}
+        />
+      )}
         </>
       )}
 
       <DedupeModal
         isOpen={isDedupeOpen}
         onClose={() => setIsDedupeOpen(false)}
-        rootPath={currentDir}
+        rootPaths={currentDirs}
         onFilesDeleted={handleFilesDeleted}
       />
 

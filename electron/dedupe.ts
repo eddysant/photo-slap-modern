@@ -16,30 +16,33 @@ export interface DuplicateGroup {
 const IMAGE_PATTERNS = ['**/*.jpg', '**/*.jpeg', '**/*.png', '**/*.webp', '**/*.gif', '**/*.heic', '**/*.heif'];
 const VIDEO_PATTERNS = ['**/*.mp4', '**/*.mov', '**/*.webm', '**/*.mkv', '**/*.ogg', '**/*.gifv'];
 
-export async function scanFiles(dir: string, kind: 'images' | 'videos' = 'images'): Promise<string[]> {
-    const searchPath = path.resolve(dir).replace(/\\/g, '/');
+const asDirs = (dirs: string | string[]) => (Array.isArray(dirs) ? dirs : [dirs]);
+
+export async function scanFiles(dirs: string | string[], kind: 'images' | 'videos' = 'images'): Promise<string[]> {
     const patterns = kind === 'videos' ? VIDEO_PATTERNS : IMAGE_PATTERNS;
 
-    const entries = await glob(patterns, {
-        cwd: searchPath,
+    const results = await Promise.all(asDirs(dirs).map(dir => glob(patterns, {
+        cwd: path.resolve(dir).replace(/\\/g, '/'),
         absolute: true,
         onlyFiles: true
-    });
+    })));
 
-    return entries;
+    return [...new Set(results.flat())];
 }
 
-export async function findExactDuplicates(dir: string, includeVideos = true): Promise<DuplicateGroup[]> {
-    const searchPath = path.resolve(dir).replace(/\\/g, '/');
+export async function findExactDuplicates(dirs: string | string[], includeVideos = true): Promise<DuplicateGroup[]> {
     const patterns = includeVideos ? [...IMAGE_PATTERNS, ...VIDEO_PATTERNS] : IMAGE_PATTERNS;
 
-    const entries = await glob(patterns, {
-        cwd: searchPath,
+    // Scan every folder into one pool so duplicates ACROSS folders group too
+    const perDir = await Promise.all(asDirs(dirs).map(dir => glob(patterns, {
+        cwd: path.resolve(dir).replace(/\\/g, '/'),
         absolute: true,
         stats: true,
         onlyFiles: true,
         objectMode: true
-    });
+    })));
+    const seen = new Set<string>();
+    const entries = perDir.flat().filter(e => !seen.has(e.path) && seen.add(e.path));
 
     // Group by size
     const sizeMap = new Map<number, string[]>();

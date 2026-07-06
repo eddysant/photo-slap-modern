@@ -33,6 +33,9 @@ interface SettingsMenuProps {
     onDurationChange: (duration: number) => void;
     controlsPosition: ControlsPosition;
     onControlsPositionChange: (position: ControlsPosition) => void;
+    /** Target folders for the 1/2/3 quick-move shortcuts (null = unset). */
+    quickMoveFolders: (string | null)[];
+    onSetQuickMoveFolder: (slot: number, path: string | null) => void;
     onShowInFinder: () => void;
     onFindDuplicates: () => void;
 }
@@ -161,6 +164,32 @@ export function SettingsMenu(props: SettingsMenuProps) {
                             <option value="bottom">Bottom Center</option>
                             <option value="left">Left Side</option>
                         </select>
+                    </div>
+
+                    <div className="setting-item">
+                        <div className="setting-label">Quick-Move Folders (Keys 1–3)</div>
+                        {props.quickMoveFolders.map((folder, i) => (
+                            <div key={i} className="quick-move-row">
+                                <span className="quick-move-key">{i + 1}</span>
+                                <span className="quick-move-path" title={folder ?? ''}>
+                                    {folder ? folder.split(/[/\\]/).pop() : '—'}
+                                </span>
+                                <button
+                                    className="text-btn"
+                                    onClick={async () => {
+                                        const dir = await window.api.pickDirectory();
+                                        if (dir) props.onSetQuickMoveFolder(i, dir);
+                                    }}
+                                >
+                                    Set
+                                </button>
+                                {folder && (
+                                    <button className="text-btn" onClick={() => props.onSetQuickMoveFolder(i, null)}>
+                                        Clear
+                                    </button>
+                                )}
+                            </div>
+                        ))}
                     </div>
 
                     {props.hasFiles && (

@@ -23,7 +23,8 @@ Local media is served through a privileged custom scheme (`protocol.handle('medi
 - URL shape: `media://local/<encoded absolute path>`, built by `src/utils.ts:getFileUrl`. The `local` host is a required placeholder: standard-scheme URLs swallow (and lowercase) the first path segment as a host if you omit it.
 - **Allowlist**: only files under directories the user opened (folder picker, CLI arg) are served; anything else gets 403. Roots accumulate in `allowedRoots`.
 - Scheme privileges include `supportFetchAPI` + `corsEnabled`, and every response carries `Access-Control-Allow-Origin: *` — without both, `fetch()` from the renderer/worker fails with "Failed to fetch" even though `<img>`/`<video>` tags work.
-- **HEIC/HEIF**: Chromium can't decode them, and prebuilt sharp binaries can't either (HEVC is patent-encumbered — sharp only ships AVIF). So `heic-decode` (WASM libheif/libde265) decodes to raw RGBA and sharp encodes JPEG. Responses are marked cacheable so preloading isn't re-transcoded.
+- **HEIC/HEIF**: Chromium can't decode them, and prebuilt sharp binaries can't either (HEVC is patent-encumbered — sharp only ships AVIF). So `heic-decode` (WASM libheif/libde265) decodes to raw RGBA and sharp encodes JPEG. Transcodes are **cached on disk** (`userData/heic-cache`, keyed by path+mtime+size) so each photo decodes once ever.
+- **Byte ranges**: `Range` requests get real 206 responses (`fs.createReadStream` + `Readable.toWeb`), and full responses advertise `Accept-Ranges: bytes`, so `<video>` seeking doesn't re-download the file.
 
 ## Launch options
 
@@ -48,12 +49,14 @@ Local media is served through a privileged custom scheme (`protocol.handle('medi
 | `files:getDates` | invoke | Date-taken per path: EXIF `DateTimeOriginal` from the first 256 KB, mtime fallback (16-way concurrent) |
 | `app:openScan` | main → renderer | Scan result pushed from a second app launch |
 | `file:delete` | invoke | Move file to Trash (`shell.trashItem`) |
+| `file:move` | invoke | Quick-move to a target folder (rename, EXDEV copy+unlink fallback; refuses to overwrite) |
+| `power:setBlocked` | invoke | `powerSaveBlocker` on/off — renderer keeps the display awake while playing |
 | `file:showInFolder` | invoke | Reveal in Finder/Explorer |
 | `file:getExif` | invoke | Read EXIF via `exifreader` → flattened `ExifData` or `null` |
 | `store:get` / `store:set` | invoke | Settings persistence (`electron-store`) |
 | `dialog:pickDirectory` | invoke | Folder picker without scanning (dedupe-from-start-screen); allowlists the dir |
-| `dedupe:scan:exact` | invoke | Exact dupes: fast-glob → group by size → SHA-256 candidates (videos optional) |
-| `dedupe:scan:files` | invoke | Lists image or video paths (perceptual hashing happens renderer-side) |
+| `dedupe:scan:exact` | invoke | Exact dupes across a *list* of roots: fast-glob → group by size → SHA-256 (videos optional) |
+| `dedupe:scan:files` | invoke | Lists image or video paths across roots (perceptual hashing happens renderer-side) |
 | `files:getInfo` | invoke | Size/mtime per path, for the dedupe compare cards |
 | `menu:open-directory`, `menu:show-in-finder`, `menu:open-settings` | main → renderer | App menu items (Cmd+O / Cmd+Shift+O / Cmd+,) forward to renderer handlers |
 | `menu:action` | main → renderer | Actions-menu items (next/prev/toggle-play/seek-forward/seek-back/reveal/delete) dispatch to the same handlers as the keyboard shortcuts |
@@ -82,9 +85,15 @@ The **star wipe** needs the outgoing slide to stay visible while the incoming sl
 - The outgoing slide's `exit` keeps it fully visible (opacity drops only after a 0.65 s delay, once covered) and lowers `zIndex`.
 - Don't reintroduce an opacity fade on the star variant — it degrades the wipe into a crossfade (the original bug).
 
+- `components/GridView.tsx` — `G` thumbnail grid; images lazy-load, videos get placeholder tiles; click jumps to the slide.
+- **Quick-move** (`1`/`2`/`3`): target folders in settings (`quickMoveFolders`), moves via `file:move`, and the moved file leaves the slideshow through the same `handleFilesDeleted` path as deletions.
+- **Resume position**: `resumePositions` in electron-store maps a joined folder-set key to the last index; Resume sets `pendingIndexRef`, consumed once the file list lands.
+- The window sets `backgroundThrottling: false` — the slideshow may be playing while the window is occluded (Send to Display), and throttled rAF also freezes framer-motion mid-transition (this broke E2E runs when the window opened behind others).
+
 ## Gotchas / conventions
 
 - `MediaFile`, `ExifData`, and `window.api` are ambient types in `src/vite-env.d.ts` — no imports needed in renderer code.
+- **Keep setState updaters pure** (no setState inside another updater): StrictMode double-invokes updaters, which made arrow-key navigation skip a slide in dev until fixed.
 - `blockhash-core` and `heic-decode` have no bundled types; minimal declarations live in `src/types/blockhash-core.d.ts` and `electron/heic-decode.d.ts`.
 - `scanDirectory` skips dotfiles, collects per-directory errors (e.g. macOS `EPERM` on `Photos Library.photoslibrary`) into `errors`, and still returns the partial scan; the renderer surfaces the count in a toast.
 - ESLint: flat config in `eslint.config.js`; `react-hooks/set-state-in-effect` is intentionally off (the slideshow resets per-slide state in effects), `no-explicit-any` off for the IPC boundary.
@@ -97,8 +106,8 @@ The **star wipe** needs the outgoing slide to stay visible while the incoming sl
 
 ## Improvement ideas (not yet done)
 
-1. **Cache HEIC transcodes on disk** — repeated slideshow passes re-decode (in-memory HTTP cache helps within a session).
-2. **Range request passthrough** in the media protocol for smoother seeking of large videos.
-3. **Multi-folder session UI** — multiple roots are supported by the scanner/protocol/resume, but the dedupe modal only scans the first (`currentDir`).
-4. **CI** — a GitHub Actions workflow running tsc/eslint/vitest (E2E needs a display, so keep it local or use a macOS runner).
-5. **Pinch-to-zoom** — ZoomPan handles wheel + drag; trackpad pinch arrives as ctrl+wheel and mostly works, but true multi-touch pointer pinch is unimplemented.
+1. **Pinch-to-zoom** — ZoomPan handles wheel + drag; trackpad pinch arrives as ctrl+wheel and mostly works, but true multi-touch pointer pinch is unimplemented.
+2. **Code signing & notarization** — builds are unsigned; Gatekeeper blocks them on other Macs.
+3. **HEIC cache eviction** — the disk cache grows unboundedly; an LRU sweep on startup would cap it.
+4. **Dedupe review history** — remember skipped/kept pairs so re-scans don't re-ask.
+5. **Auto-update** — electron-updater once there's a GitHub Releases pipeline.
