@@ -28,3 +28,10 @@ jobs:
             release/*/photo-slap-Mac-*-Installer.dmg
             release/*/photo-slap-Mac-*-Installer.dmg.blockmap
           generate_release_notes: true
+          body: |
+            > [!IMPORTANT]
+            > This build is unsigned, so macOS will claim the app is *"damaged and can't be opened."*
+            > After dragging photo-slap.app to Applications, clear the quarantine flag once:
+            > ```
+            > xattr -cr /Applications/photo-slap.app
+            > ```

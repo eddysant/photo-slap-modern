@@ -35,6 +35,20 @@ By [Eddy Sant](https://github.com/eddysant), built with AI assistance.
 
 Supported formats: `.jpg` `.jpeg` `.png` `.webp` `.gif` `.bmp` `.heic` `.heif` (images), `.mp4` `.webm` `.ogg` `.gifv` (videos).
 
+## Installing from GitHub Releases
+
+Builds are not code-signed (that requires an Apple Developer membership), so
+macOS quarantines the download and reports the app as *"damaged and can't be
+opened."* The file is fine — after dragging **photo-slap.app** to
+Applications, clear the quarantine flag once:
+
+```bash
+xattr -cr /Applications/photo-slap.app
+```
+
+It opens normally from then on. Apps you build yourself (`npm run build`)
+never get quarantined and don't need this.
+
 ## Casting to a TV (AirPlay)
 
 Electron apps can't start an AirPlay stream directly (that API is Safari-only), but the two-step equivalent works well:
