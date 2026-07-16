@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
+import QRCode from 'qrcode'
 import { FiSettings, FiPlay, FiPause, FiSkipBack, FiSkipForward, FiTrash2, FiVolume2, FiVolumeX, FiGrid, FiHeart } from 'react-icons/fi'
 import './App.css'
 import { DedupeModal } from './components/DedupeModal'
+import { FrameOverlay } from './components/FrameOverlay'
 import { GridView } from './components/GridView'
 import { IntroScreen } from './components/IntroScreen'
 import { TagEditor } from './components/TagEditor'
@@ -63,6 +65,10 @@ function App() {
   const [sortOrder, setSortOrder] = usePersistedState<SortOrder>('sortOrder', 'name')
   const [quickMoveFolders, setQuickMoveFolders] = usePersistedState<(string | null)[]>('quickMoveFolders', [null, null, null])
   const [showSlideTimer, setShowSlideTimer] = usePersistedState('showSlideTimer', true)
+  const [frameMode, setFrameMode] = usePersistedState('frameMode', false)
+  const [autoPlayOnOpen, setAutoPlayOnOpen] = usePersistedState('autoPlayOnOpen', false)
+  const [remoteEnabled, setRemoteEnabled] = usePersistedState('remoteEnabled', false)
+  const [remoteUrl, setRemoteUrl] = useState<string | null>(null)
 
   // Zoom state (per-slide; ZoomPan reports in so Ken Burns can pause)
   const [isZoomed, setIsZoomed] = useState(false)
@@ -144,13 +150,13 @@ function App() {
       setCurrentDirs(result.paths);
       fileDatesRef.current = null;
       setAllFiles(result.files); // the filter/sort effect below picks this up
-      setIsPlaying(false); // Default to paused
+      setIsPlaying(autoPlayOnOpen); // photo-frame setups want the show to start immediately
       window.api.setStore('lastDirs', result.paths);
       setLastDirs(result.paths);
     } else {
       showToast('No media files found in that folder');
     }
-  }, [showToast]);
+  }, [showToast, autoPlayOnOpen]);
 
   // Restore the pending resume position once the file list is ready
   useEffect(() => {
@@ -492,6 +498,100 @@ function App() {
     window.api.setPowerBlocked(keepAwake);
   }, [isPlaying, currentIsVideo, isUserPaused]);
 
+  // Batch operations from the grid's select mode
+  const batchFavorite = useCallback((paths: string[], favorite: boolean) => {
+    const next = new Set(favorites);
+    paths.forEach(p => favorite ? next.add(p) : next.delete(p));
+    setFavorites(next);
+    scheduleLibrarySave(next, fileTags, tagNames);
+  }, [favorites, fileTags, tagNames, scheduleLibrarySave]);
+
+  const batchTag = useCallback((paths: string[], tag: string) => {
+    const nextTags = { ...fileTags };
+    paths.forEach(p => {
+      const current = nextTags[p] ?? [];
+      if (!current.includes(tag)) nextTags[p] = [...current, tag];
+    });
+    let names = tagNames;
+    if (!names.includes(tag)) {
+      names = [...names, tag].sort();
+      setTagNames(names);
+    }
+    setFileTags(nextTags);
+    scheduleLibrarySave(favorites, nextTags, names);
+  }, [favorites, fileTags, tagNames, scheduleLibrarySave]);
+
+  const batchDelete = useCallback(async (paths: string[]) => {
+    const deleted: string[] = [];
+    for (const p of paths) {
+      if (await window.api.deleteFile(p)) deleted.push(p);
+    }
+    if (deleted.length > 0) {
+      handleFilesDeleted(deleted);
+      showToast(`Moved ${deleted.length} file${deleted.length > 1 ? 's' : ''} to Trash`);
+    }
+  }, [handleFilesDeleted, showToast]);
+
+  const batchMove = useCallback(async (paths: string[], slot: number) => {
+    const destDir = quickMoveFolders[slot];
+    if (!destDir) return;
+    const moved: string[] = [];
+    for (const p of paths) {
+      const result = await window.api.moveFile(p, destDir);
+      if (result.ok) moved.push(p);
+    }
+    if (moved.length > 0) {
+      handleFilesDeleted(moved);
+      showToast(`Moved ${moved.length} to ${destDir.split(/[/\\]/).pop()}`);
+    }
+    if (moved.length < paths.length) {
+      showToast(`${paths.length - moved.length} file(s) could not be moved`);
+    }
+  }, [quickMoveFolders, handleFilesDeleted, showToast]);
+
+  // Photo-frame overlay: fetch the current photo's date-taken lazily
+  const [frameDates, setFrameDates] = useState<Record<string, number>>({});
+  useEffect(() => {
+    const file = files[currentIndex];
+    if (!frameMode || !file || file.path in frameDates) return;
+    window.api.getDates([file.path]).then(dates => {
+      setFrameDates(prev => ({ ...prev, [file.path]: dates[file.path] ?? 0 }));
+    });
+  }, [frameMode, files, currentIndex, frameDates]);
+
+  // Phone remote: start/stop the LAN server with the setting
+  useEffect(() => {
+    let cancelled = false;
+    window.api.setRemoteEnabled(remoteEnabled)
+      .then(url => { if (!cancelled) setRemoteUrl(url); })
+      .catch(() => { if (!cancelled) setRemoteUrl(null); });
+    return () => { cancelled = true; };
+  }, [remoteEnabled]);
+
+  // …and keep it fed with playback status
+  useEffect(() => {
+    const file = files[currentIndex];
+    window.api.sendRemoteStatus({
+      name: file?.name ?? null,
+      index: file ? currentIndex + 1 : null,
+      total: files.length,
+      playing: isPlaying,
+      favorite: file ? favorites.has(file.path) : false,
+    });
+  }, [files, currentIndex, isPlaying, favorites]);
+
+  // QR code for the remote URL (shown in settings)
+  const [remoteQr, setRemoteQr] = useState<string | null>(null);
+  useEffect(() => {
+    if (!remoteUrl) {
+      setRemoteQr(null);
+      return;
+    }
+    QRCode.toDataURL(remoteUrl, { margin: 1, width: 180 })
+      .then(setRemoteQr)
+      .catch(() => setRemoteQr(null));
+  }, [remoteUrl]);
+
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newVolume = parseFloat(e.target.value);
     setVolume(newVolume);
@@ -604,6 +704,9 @@ function App() {
         case 'h':
           toggleFavorite();
           break;
+        case 'p':
+          setFrameMode(!frameMode);
+          break;
         case 't':
           setIsTagEditorOpen(prev => !prev);
           break;
@@ -627,7 +730,7 @@ function App() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [nextSlide, prevSlide, togglePlay, deleteCurrentFile, showCurrentInFinder, seekVideoBy, quickMove, toggleFavorite]);
+  }, [nextSlide, prevSlide, togglePlay, deleteCurrentFile, showCurrentInFinder, seekVideoBy, quickMove, toggleFavorite, frameMode, setFrameMode]);
 
   // Update window title
   useEffect(() => {
@@ -646,6 +749,7 @@ function App() {
       'prev': prevSlide,
       'toggle-play': togglePlay,
       'grid': () => setIsGridOpen(prev => !prev),
+      'frame': () => setFrameMode(!frameMode),
       'favorite': toggleFavorite,
       'tags': () => setIsTagEditorOpen(prev => !prev),
       'seek-forward': () => seekVideoBy(10),
@@ -660,7 +764,7 @@ function App() {
       window.api.on('menu:action', (_event, name: string) => actions[name]?.()),
     ];
     return () => cleanups.forEach(c => c());
-  }, [handleOpenDirectory, showCurrentInFinder, nextSlide, prevSlide, togglePlay, seekVideoBy, deleteCurrentFile, toggleFavorite]);
+  }, [handleOpenDirectory, showCurrentInFinder, nextSlide, prevSlide, togglePlay, seekVideoBy, deleteCurrentFile, toggleFavorite, frameMode, setFrameMode]);
 
   const currentFile: MediaFile | null = files.length > 0 ? files[currentIndex] : null;
   const fileUrl = currentFile ? getFileUrl(currentFile.path) : '';
@@ -704,6 +808,14 @@ function App() {
         }}
         showSlideTimer={showSlideTimer}
         onToggleSlideTimer={() => setShowSlideTimer(!showSlideTimer)}
+        frameMode={frameMode}
+        onToggleFrameMode={() => setFrameMode(!frameMode)}
+        autoPlayOnOpen={autoPlayOnOpen}
+        onToggleAutoPlayOnOpen={() => setAutoPlayOnOpen(!autoPlayOnOpen)}
+        remoteEnabled={remoteEnabled}
+        onToggleRemote={() => setRemoteEnabled(!remoteEnabled)}
+        remoteUrl={remoteUrl}
+        remoteQr={remoteQr}
         favoritesOnly={favoritesOnly}
         onToggleFavoritesOnly={() => setFavoritesOnly(prev => !prev)}
         tagFilter={tagFilter}
@@ -753,6 +865,15 @@ function App() {
           className="slide-timer"
           key={`${currentIndex}-${slideDuration}`}
           style={{ animationDuration: `${slideDuration}ms` }}
+        />
+      )}
+
+      {frameMode && (
+        <FrameOverlay
+          fileName={currentFile.name}
+          dateTaken={frameDates[currentFile.path]}
+          tags={fileTags[currentFile.path] ?? []}
+          favorite={favorites.has(currentFile.path)}
         />
       )}
 
@@ -929,12 +1050,19 @@ function App() {
           files={files}
           currentIndex={currentIndex}
           favorites={favorites}
+          fileTags={fileTags}
+          tagNames={tagNames}
+          quickMoveFolders={quickMoveFolders}
           onSelect={(i) => {
             setDirection(i >= currentIndex ? 1 : -1);
             setCurrentIndex(i);
             setIsGridOpen(false);
           }}
           onClose={() => setIsGridOpen(false)}
+          onBatchFavorite={batchFavorite}
+          onBatchTag={batchTag}
+          onBatchDelete={batchDelete}
+          onBatchMove={batchMove}
         />
       )}
 

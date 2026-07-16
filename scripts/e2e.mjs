@@ -406,6 +406,86 @@ try {
     check('filename filter narrows the grid', grid.filteredCount === 1, `${grid.filteredCount} cell(s) for "b.png"`);
     check('clicking a cell jumps and closes the grid', grid.closed && grid.counter === `2 / ${fixtureCount}`, grid.counter);
 
+    console.log('grid batch operations + filters');
+    const gridBatch = await cdp.evaluate(`(async () => {
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'g' }));
+        await sleep(400);
+        const heartsBefore = document.querySelectorAll('.grid-heart').length;
+        // select two cells and batch-favorite them
+        document.querySelector('.grid-select-toggle').click();
+        await sleep(150);
+        const cells = document.querySelectorAll('.grid-cell');
+        cells[1].click();
+        cells[2].click();
+        await sleep(150);
+        const selCount = document.querySelector('.grid-batch-count')?.textContent ?? '';
+        document.querySelector('.batch-fav').click();
+        await sleep(300);
+        const heartsAfter = document.querySelectorAll('.grid-heart').length;
+        // favorites-only filter
+        document.querySelector('.grid-select-toggle').click();
+        await sleep(100);
+        [...document.querySelectorAll('.grid-chip')].find(b => b.textContent.includes('Favs')).click();
+        await sleep(200);
+        const favCells = document.querySelectorAll('.grid-cell').length;
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'g' }));
+        await sleep(1200); // let the sidecar save debounce flush
+        return JSON.stringify({ heartsBefore, selCount, heartsAfter, favCells });
+    })()`).then(JSON.parse);
+    check('batch select shows a count', gridBatch.selCount === '2 selected', gridBatch.selCount);
+    check('batch favorite hearts the selection',
+        gridBatch.heartsAfter === gridBatch.heartsBefore + 2, `${gridBatch.heartsBefore} -> ${gridBatch.heartsAfter}`);
+    check('grid favorites-only filter narrows to favorites',
+        gridBatch.favCells === gridBatch.heartsAfter, `${gridBatch.favCells} cells`);
+
+    console.log('photo frame');
+    const frame = await cdp.evaluate(`(async () => {
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'p' }));
+        await sleep(500);
+        const clock = document.querySelector('.frame-clock')?.textContent ?? '';
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'p' }));
+        await sleep(200);
+        const gone = !document.querySelector('.frame-overlay');
+        return JSON.stringify({ clock, gone });
+    })()`).then(JSON.parse);
+    check('photo-frame overlay shows a clock', /\d{1,2}:\d{2}/.test(frame.clock), frame.clock);
+    check('P toggles the overlay off', frame.gone);
+
+    console.log('phone remote');
+    const remote = await cdp.evaluate(`(async () => {
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+        document.querySelector('button[title="Settings"]').click();
+        await sleep(400);
+        const label = [...document.querySelectorAll('.checkbox-control')].find(l => l.textContent.includes('Phone Remote'));
+        label.querySelector('input').click();
+        for (let i = 0; i < 25 && !document.querySelector('.remote-url'); i++) await sleep(200);
+        const url = document.querySelector('.remote-url')?.textContent ?? '';
+        const qr = !!document.querySelector('.remote-qr');
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+        await sleep(300);
+        return JSON.stringify({ url, qr });
+    })()`).then(JSON.parse);
+    check('remote URL displayed with token', /^http:\/\/.+\?t=[0-9a-f]+$/.test(remote.url), remote.url);
+    check('remote QR code rendered', remote.qr === true);
+    if (remote.url.startsWith('http')) {
+        const remoteBase = new URL(remote.url);
+        const token = remoteBase.searchParams.get('t');
+        const statusUrl = `${remoteBase.origin}/api/status?t=${token}`;
+        const status = await (await fetch(statusUrl)).json();
+        check('remote status reports the current file', typeof status.name === 'string' && status.total > 0, JSON.stringify(status));
+        await fetch(`${remoteBase.origin}/api/action?t=${token}`, { method: 'POST', body: JSON.stringify({ action: 'next' }) });
+        await sleep(1300);
+        const after = await (await fetch(statusUrl)).json();
+        check('remote "next" advances the slideshow', after.index === status.index + 1, `${status.index} -> ${after.index}`);
+        const unauth = await fetch(`${remoteBase.origin}/api/status`);
+        check('remote rejects requests without the token', unauth.status === 403, String(unauth.status));
+        // back to the first slide so the dedupe assertions start from 1 / N
+        await cdp.evaluate(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft' }))`);
+        await sleep(1200);
+    }
+
     console.log('dedupe (worker + transitive groups + slideshow refresh)');
     const dedupe = await cdp.evaluate(`(async () => {
         const sleep = ms => new Promise(r => setTimeout(r, ms));

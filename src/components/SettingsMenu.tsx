@@ -38,6 +38,14 @@ interface SettingsMenuProps {
     onSetQuickMoveFolder: (slot: number, path: string | null) => void;
     showSlideTimer: boolean;
     onToggleSlideTimer: () => void;
+    frameMode: boolean;
+    onToggleFrameMode: () => void;
+    autoPlayOnOpen: boolean;
+    onToggleAutoPlayOnOpen: () => void;
+    remoteEnabled: boolean;
+    onToggleRemote: () => void;
+    remoteUrl: string | null;
+    remoteQr: string | null;
     favoritesOnly: boolean;
     onToggleFavoritesOnly: () => void;
     tagFilter: string;
@@ -156,6 +164,34 @@ export function SettingsMenu(props: SettingsMenuProps) {
                             <input type="checkbox" checked={props.showSlideTimer} onChange={props.onToggleSlideTimer} />
                             Slide Timer Bar
                         </label>
+                    </div>
+
+                    <div className="setting-item">
+                        <label className="checkbox-control">
+                            <input type="checkbox" checked={props.frameMode} onChange={props.onToggleFrameMode} />
+                            Photo Frame Overlay
+                        </label>
+                    </div>
+
+                    <div className="setting-item">
+                        <label className="checkbox-control">
+                            <input type="checkbox" checked={props.autoPlayOnOpen} onChange={props.onToggleAutoPlayOnOpen} />
+                            Auto-Play On Open
+                        </label>
+                    </div>
+
+                    <div className="setting-item">
+                        <label className="checkbox-control">
+                            <input type="checkbox" checked={props.remoteEnabled} onChange={props.onToggleRemote} />
+                            Phone Remote (LAN)
+                        </label>
+                        {props.remoteEnabled && props.remoteUrl && (
+                            <div className="remote-info">
+                                {props.remoteQr && <img className="remote-qr" src={props.remoteQr} alt="Remote control QR code" />}
+                                <div className="remote-url" title={props.remoteUrl}>{props.remoteUrl}</div>
+                                <small>Scan with your phone (same Wi-Fi network)</small>
+                            </div>
+                        )}
                     </div>
 
                     <div className="setting-item">

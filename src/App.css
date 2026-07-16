@@ -1104,7 +1104,7 @@
 }
 
 .grid-cell {
-  aspect-ratio: 1;
+  /* height is set inline by the virtualized layout */
   background: #111;
   border: 2px solid #333;
   padding: 0;
@@ -1113,6 +1113,101 @@
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.grid-cell.selected {
+  border-color: #00ff88;
+  box-shadow: inset 0 0 0 2px #00ff88;
+}
+
+.grid-checkbox {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  width: 20px;
+  height: 20px;
+  background: rgba(0, 0, 0, 0.75);
+  border: 2px solid #fff;
+  color: #00ff88;
+  font-size: 13px;
+  line-height: 16px;
+  text-align: center;
+}
+
+/* Grid toolbar chips + batch bar */
+.grid-chip {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-family: 'Silkscreen', cursive;
+  font-size: 0.65rem;
+  padding: 7px 10px;
+  background: #000;
+  border: 2px solid #333;
+  color: #888;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.grid-chip.on {
+  border-color: #00aaff;
+  color: #00aaff;
+}
+
+.grid-tag-select {
+  font-family: 'Silkscreen', cursive;
+  font-size: 0.65rem;
+  padding: 7px;
+  background: #000;
+  border: 2px solid #333;
+  color: #fff;
+  max-width: 130px;
+}
+
+.grid-batch-bar {
+  position: sticky;
+  top: 48px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding: 8px 4px 12px;
+  background: rgba(0, 0, 0, 0.92);
+  z-index: 5;
+  border-bottom: 1px solid #333;
+  margin-bottom: 8px;
+}
+
+.grid-batch-count {
+  font-family: 'Silkscreen', cursive;
+  font-size: 0.7rem;
+  color: #00ff88;
+}
+
+.grid-batch-bar .text-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.grid-batch-tag {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.grid-batch-tag input {
+  width: 110px;
+  font-family: 'Silkscreen', cursive;
+  font-size: 0.7rem;
+  padding: 5px 8px;
+  background: #000;
+  border: 2px solid #333;
+  color: #fff;
+  outline: none;
+}
+
+.batch-delete {
+  color: #ff004c;
 }
 
 .grid-cell:hover {
@@ -1340,6 +1435,76 @@
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+/* Photo-frame overlay */
+.frame-overlay {
+  position: absolute;
+  bottom: 28px;
+  left: 28px;
+  z-index: 45;
+  pointer-events: none;
+  color: #fff;
+  text-shadow: 2px 2px 6px rgba(0, 0, 0, 0.9);
+  font-family: 'Silkscreen', cursive;
+}
+
+.frame-clock {
+  font-size: 3.2rem;
+  line-height: 1;
+}
+
+.frame-date {
+  font-size: 1rem;
+  color: rgba(255, 255, 255, 0.85);
+  margin-top: 6px;
+}
+
+.frame-photo-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  font-size: 0.7rem;
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.frame-heart {
+  color: #ff004c;
+  fill: #ff004c;
+}
+
+.frame-tags {
+  color: #00aaff;
+}
+
+/* Phone remote (settings panel) */
+.remote-info {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.remote-qr {
+  width: 160px;
+  height: 160px;
+  border: 4px solid #fff;
+  image-rendering: pixelated;
+}
+
+.remote-url {
+  font-size: 0.7rem;
+  color: #00aaff;
+  word-break: break-all;
+  text-align: center;
+}
+
+.remote-info small {
+  font-size: 0.65rem;
+  color: #777;
+  text-transform: none;
 }
 
 /* Toast Notifications */

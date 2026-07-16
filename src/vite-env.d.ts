@@ -45,6 +45,11 @@ interface Window {
         moveFile: (path: string, destDir: string) => Promise<{ ok: boolean; error?: string }>;
         libraryLoad: (roots: string[]) => Promise<LibraryMeta>;
         librarySave: (roots: string[], meta: LibraryMeta) => Promise<void>;
+        setRemoteEnabled: (enabled: boolean) => Promise<string | null>;
+        sendRemoteStatus: (status: {
+            name: string | null; index: number | null; total: number;
+            playing: boolean; favorite: boolean;
+        }) => void;
         setPowerBlocked: (blocked: boolean) => Promise<void>;
         scanDedupeExact: (dirs: string[], includeVideos: boolean) => Promise<{ hash: string; files: string[] }[]>;
         scanDedupeFiles: (dirs: string[], kind: 'images' | 'videos') => Promise<string[]>;

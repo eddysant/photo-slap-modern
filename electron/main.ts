@@ -12,6 +12,7 @@ import decodeHeic from 'heic-decode'
 import { scanDirectory } from './fileScanner'
 import { findExactDuplicates, scanFiles } from './dedupe'
 import { loadLibraryMeta, saveLibraryMeta, LibraryMeta } from './libraryMeta'
+import { startRemoteServer, stopRemoteServer, getRemoteUrl, RemoteStatus } from './remoteServer'
 import ExifReader from 'exifreader';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -421,6 +422,7 @@ function buildApplicationMenu() {
         action('Previous Slide', 'Left', 'prev'),
         action('Play / Pause Slideshow', 'Space', 'toggle-play'),
         action('Grid View', 'G', 'grid'),
+        action('Photo Frame Overlay', 'P', 'frame'),
         { type: 'separator' },
         action('Toggle Favorite', 'H', 'favorite'),
         action('Edit Tags', 'T', 'tags'),
@@ -601,6 +603,31 @@ ipcMain.handle('file:move', async (_event, filePath: string, destDir: string) =>
     return { ok: false, error: (e as Error).message };
   }
 });
+
+// --------- Phone remote ---------
+let remoteStatus: RemoteStatus = { name: null, index: null, total: 0, playing: false, favorite: false };
+
+ipcMain.on('remote:status', (_event, status: RemoteStatus) => {
+  remoteStatus = status;
+});
+
+ipcMain.handle('remote:setEnabled', async (_event, enabled: boolean) => {
+  if (!enabled) {
+    stopRemoteServer();
+    return null;
+  }
+  try {
+    return await startRemoteServer(
+      () => remoteStatus,
+      (action) => win?.webContents.send('menu:action', action),
+    );
+  } catch (e) {
+    console.error('Failed to start remote server', e);
+    return null;
+  }
+});
+
+ipcMain.handle('remote:getUrl', () => getRemoteUrl());
 
 // Keep the display awake while a slideshow or video is playing
 let powerBlockerId: number | null = null;

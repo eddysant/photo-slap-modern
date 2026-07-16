@@ -60,9 +60,7 @@ Local media is served through a privileged custom scheme (`protocol.handle('medi
 | `dedupe:scan:files` | invoke | Lists image or video paths across roots (perceptual hashing happens renderer-side) |
 | `files:getInfo` | invoke | Size/mtime per path, for the dedupe compare cards |
 | `menu:open-directory`, `menu:show-in-finder`, `menu:open-settings` | main → renderer | App menu items (Cmd+O / Cmd+Shift+O / Cmd+,) forward to renderer handlers |
-| `menu:action` | main → renderer | Actions-menu items AND phone-remote actions (next/prev/toggle-play/grid/frame/favorite/tags/seek/reveal/delete) dispatch to the same handlers as the keyboard shortcuts |
-| `remote:setEnabled` | invoke | Start/stop the LAN remote server; returns the tokenized URL |
-| `remote:status` | renderer → main | Playback status pushed for the remote page's polling |
+| `menu:action` | main → renderer | Actions-menu items (next/prev/toggle-play/seek-forward/seek-back/reveal/delete) dispatch to the same handlers as the keyboard shortcuts |
 
 ## Renderer structure
 
@@ -88,9 +86,7 @@ The **star wipe** needs the outgoing slide to stay visible while the incoming sl
 - The outgoing slide's `exit` keeps it fully visible (opacity drops only after a 0.65 s delay, once covered) and lowers `zIndex`.
 - Don't reintroduce an opacity fade on the star variant — it degrades the wipe into a crossfade (the original bug).
 
-- `components/GridView.tsx` — `G` thumbnail grid with filename/favorites/tag filters and a **select mode** for batch favorite/tag/move/delete (handlers live in App: `batchFavorite`/`batchTag`/`batchDelete`/`batchMove`). Rendering is **hand-rolled windowing**: fixed square cells, explicit `grid-template-columns`, spacer rows (`grid-column: 1/-1`) above/below the visible slice, range computed from scrollTop + ResizeObserver-measured viewport.
-- **Photo-frame mode** (`P`, `components/FrameOverlay.tsx`): ambient clock/date overlay plus the photo's date-taken (fetched lazily per slide via `files:getDates`) and tags. `autoPlayOnOpen` setting makes ingest start playing immediately — together they make a login-item photo frame.
-- **Phone remote** (`electron/remoteServer.ts`): token-guarded HTTP server on an OS-assigned port, LAN interface. Serves an inline mobile page; `POST /api/action` forwards prev/next/toggle-play/favorite through the SAME `menu:action` channel as the Actions menu; `GET /api/status` returns state the renderer pushes over `remote:status`. Settings toggle (`remoteEnabled`) shows the URL + QR (qrcode lib, rendered in App). Token rotates per server start; only the four whitelisted actions are reachable.
+- `components/GridView.tsx` — `G` thumbnail grid with filename filter; images lazy-load, videos get placeholder tiles; click jumps to the slide.
 - **Favorites & tags** (`H`/`T`, `components/TagEditor.tsx`): stored in `.photo-slap.json` sidecars WITH the library, managed by `electron/libraryMeta.ts` (`library:load`/`library:save` IPC). Each path is owned by the deepest sidecar dir containing it; loads merge with shallower-wins, saves write entries back to their owning file (so unfavorites don't resurrect). Favorites/tag *edits* deliberately don't re-derive the playable list (refs, not deps) — only the filter toggles do, or a heart press would reset the slide index. Session-only filters (favoritesOnly/tagFilter) are intentionally not persisted.
 - **Slide timer bar** (`showSlideTimer`): CSS width animation keyed by `currentIndex`, duration set inline from `slideDuration`.
 - **Update check**: `checkForUpdates` in main hits the GitHub Releases API (unsigned builds can't Squirrel-update, so it opens the release page); quiet check 5s after launch in packaged builds, menu item for manual checks. Tag `v*` pushes trigger `.github/workflows/release.yml` (macOS runner → DMG → GitHub Release).
