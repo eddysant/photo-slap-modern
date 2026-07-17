@@ -1,7 +1,7 @@
-export function hammingDistance(a: string, b: string): number {
+export function hammingDistance(a: string, b: string, bailAbove = Infinity): number {
     let dist = 0;
     for (let i = 0; i < a.length; i++) {
-        if (a[i] !== b[i]) dist++;
+        if (a[i] !== b[i] && ++dist > bailAbove) return dist; // early exit for the O(n²) grouping pass
     }
     return dist;
 }
@@ -25,7 +25,7 @@ export function groupSimilar(
 
     for (let i = 0; i < hashes.length; i++) {
         for (let j = i + 1; j < hashes.length; j++) {
-            if (hammingDistance(hashes[i].hash, hashes[j].hash) <= threshold) union(i, j);
+            if (hammingDistance(hashes[i].hash, hashes[j].hash, threshold) <= threshold) union(i, j);
         }
     }
 

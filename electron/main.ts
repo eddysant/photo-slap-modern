@@ -111,6 +111,28 @@ const isHeic = (p: string) => /\.(heic|heif)$/i.test(p);
 // Formats safe to downscale server-side (GIFs would lose animation)
 const isScalableImage = (p: string) => /\.(jpe?g|png|webp|bmp|heic|heif)$/i.test(p);
 
+// Decoding originals is expensive (a 48MP JPEG is ~0.3s, HEIC more).
+// Scrolling a fresh grid can request hundreds of thumbnails at once, so
+// derivations are capped to a small concurrency (the rest queue) and
+// identical in-flight requests are coalesced into one job.
+const DERIVE_CONCURRENCY = 4;
+let deriveActive = 0;
+const deriveQueue: (() => void)[] = [];
+const deriveInFlight = new Map<string, Promise<{ buffer: Buffer; type: string }>>();
+
+async function withDeriveSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (deriveActive >= DERIVE_CONCURRENCY) {
+    await new Promise<void>(resolve => deriveQueue.push(resolve));
+  }
+  deriveActive++;
+  try {
+    return await fn();
+  } finally {
+    deriveActive--;
+    deriveQueue.shift()?.();
+  }
+}
+
 /**
  * HEIC transcode and/or downscale to `maxDim` (longest side), disk-cached.
  * Downscaling exists because full-resolution camera photos (often 48MP)
@@ -120,6 +142,8 @@ const isScalableImage = (p: string) => /\.(jpe?g|png|webp|bmp|heic|heif)$/i.test
  */
 async function deriveImage(filePath: string, maxDim: number | null): Promise<{ buffer: Buffer; type: string }> {
   const asPng = /\.png$/i.test(filePath); // keep alpha for PNGs
+  const type = asPng ? 'image/png' : 'image/jpeg';
+
   let cachePath: string | null = null;
   if (imageCacheDir) {
     try {
@@ -128,32 +152,41 @@ async function deriveImage(filePath: string, maxDim: number | null): Promise<{ b
         .update(`${filePath}:${stat.mtimeMs}:${stat.size}:${maxDim ?? 'full'}`)
         .digest('hex');
       cachePath = path.join(imageCacheDir, `${key}.${asPng ? 'png' : 'jpg'}`);
-      const cached = await fs.readFile(cachePath); // cache hit
+      const cached = await fs.readFile(cachePath); // cache hit — no slot needed
       fs.utimes(cachePath, new Date(), new Date()).catch(() => { }); // LRU touch
-      return { buffer: cached, type: asPng ? 'image/png' : 'image/jpeg' };
+      return { buffer: cached, type };
     } catch {
       // cache miss — derive below
     }
   }
 
-  let pipeline: ReturnType<typeof sharp>;
-  if (isHeic(filePath)) {
-    // heic-decode (WASM libheif) does the HEVC decode — prebuilt sharp
-    // binaries can't, HEVC being patent-encumbered
-    const { width, height, data } = await decodeHeic({ buffer: await fs.readFile(filePath) });
-    pipeline = sharp(Buffer.from(data), { raw: { width, height, channels: 4 } });
-  } else {
-    pipeline = sharp(filePath).rotate(); // bake EXIF orientation
-  }
-  if (maxDim) {
-    pipeline = pipeline.resize(maxDim, maxDim, { fit: 'inside', withoutEnlargement: true });
-  }
-  const buffer = asPng
-    ? await pipeline.png().toBuffer()
-    : await pipeline.jpeg({ quality: 90 }).toBuffer();
+  const inFlightKey = `${filePath}:${maxDim ?? 'full'}`;
+  const existing = deriveInFlight.get(inFlightKey);
+  if (existing) return existing;
 
-  if (cachePath) fs.writeFile(cachePath, buffer).catch(() => { });
-  return { buffer, type: asPng ? 'image/png' : 'image/jpeg' };
+  const job = withDeriveSlot(async () => {
+    let pipeline: ReturnType<typeof sharp>;
+    if (isHeic(filePath)) {
+      // heic-decode (WASM libheif) does the HEVC decode — prebuilt sharp
+      // binaries can't, HEVC being patent-encumbered
+      const { width, height, data } = await decodeHeic({ buffer: await fs.readFile(filePath) });
+      pipeline = sharp(Buffer.from(data), { raw: { width, height, channels: 4 } });
+    } else {
+      pipeline = sharp(filePath).rotate(); // bake EXIF orientation
+    }
+    if (maxDim) {
+      pipeline = pipeline.resize(maxDim, maxDim, { fit: 'inside', withoutEnlargement: true });
+    }
+    const buffer = asPng
+      ? await pipeline.png().toBuffer()
+      : await pipeline.jpeg({ quality: 90 }).toBuffer();
+
+    if (cachePath) fs.writeFile(cachePath, buffer).catch(() => { });
+    return { buffer, type };
+  }).finally(() => deriveInFlight.delete(inFlightKey));
+
+  deriveInFlight.set(inFlightKey, job);
+  return job;
 }
 
 async function handleMediaRequest(request: Request): Promise<Response> {
@@ -605,11 +638,55 @@ ipcMain.handle('file:move', async (_event, filePath: string, destDir: string) =>
 });
 
 // --------- Phone remote ---------
-let remoteStatus: RemoteStatus = { name: null, index: null, total: 0, playing: false, favorite: false };
+let remoteStatus: RemoteStatus = {
+  name: null, index: null, total: 0, playing: false, favorite: false, path: null, root: null,
+};
 
 ipcMain.on('remote:status', (_event, status: RemoteStatus) => {
   remoteStatus = status;
 });
+
+const UPLOAD_EXTENSIONS = new Set([
+  '.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.heif',
+  '.mp4', '.mov', '.webm',
+]);
+
+async function saveGuestUpload(name: string, data: Buffer): Promise<{ ok: boolean; error?: string }> {
+  const root = remoteStatus.root;
+  if (!root || !isAllowedPath(path.normalize(root))) {
+    return { ok: false, error: 'Open a folder in photo-slap first' };
+  }
+
+  const safeName = path.basename(name).replace(/[^\w.\- ]+/g, '_');
+  const ext = path.extname(safeName).toLowerCase();
+  if (!UPLOAD_EXTENSIONS.has(ext)) {
+    return { ok: false, error: 'Unsupported file type' };
+  }
+
+  const guestsDir = path.join(root, 'guests');
+  await fs.mkdir(guestsDir, { recursive: true });
+
+  // never overwrite: suffix until the name is free
+  const stem = safeName.slice(0, -ext.length);
+  let dest = path.join(guestsDir, safeName);
+  for (let n = 1; ; n++) {
+    try {
+      await fs.access(dest);
+      dest = path.join(guestsDir, `${stem}-${n}${ext}`);
+    } catch {
+      break;
+    }
+  }
+
+  await fs.writeFile(dest, data);
+  const isVideo = /\.(mp4|mov|webm)$/i.test(ext);
+  win?.webContents.send('remote:uploaded', {
+    name: path.basename(dest),
+    path: dest,
+    type: isVideo ? 'video' : 'image',
+  });
+  return { ok: true };
+}
 
 ipcMain.handle('remote:setEnabled', async (_event, enabled: boolean) => {
   if (!enabled) {
@@ -617,10 +694,22 @@ ipcMain.handle('remote:setEnabled', async (_event, enabled: boolean) => {
     return null;
   }
   try {
-    return await startRemoteServer(
-      () => remoteStatus,
-      (action) => win?.webContents.send('menu:action', action),
-    );
+    return await startRemoteServer({
+      getStatus: () => remoteStatus,
+      dispatchAction: (action) => win?.webContents.send('menu:action', action),
+      sendReaction: (emoji) => win?.webContents.send('remote:reaction', emoji),
+      getThumb: async () => {
+        // No client input: serves the current slide only
+        const current = remoteStatus.path;
+        if (!current || !isAllowedPath(path.normalize(current)) || !isScalableImage(current)) return null;
+        try {
+          return await deriveImage(current, 512);
+        } catch {
+          return null;
+        }
+      },
+      saveUpload: saveGuestUpload,
+    });
   } catch (e) {
     console.error('Failed to start remote server', e);
     return null;

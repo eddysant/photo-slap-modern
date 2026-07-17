@@ -21,6 +21,10 @@ const mergeScans = (results: ScanResult[]): ScanResult => ({
   errors: results.flatMap(r => r.errors),
 })
 
+// A reused Collator is ~20x faster than per-call localeCompare(…, options),
+// which matters when sorting libraries with tens of thousands of files.
+const nameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
+
 const KEN_BURNS_ANIMATIONS = ['kb-pan-left', 'kb-pan-right', 'kb-pan-up', 'kb-pan-down', 'kb-zoom-in', 'kb-zoom-out'];
 
 function App() {
@@ -105,7 +109,7 @@ function App() {
     }
 
     // Natural name sort first — it's also the tiebreaker for equal dates
-    const sorted = [...filtered].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+    const sorted = [...filtered].sort((a, b) => nameCollator.compare(a.name, b.name));
 
     if (sort !== 'name' && dates) {
       sorted.sort((a, b) => {
@@ -140,6 +144,9 @@ function App() {
 
   // Set by Resume so the slideshow reopens at the slide it was left on
   const pendingIndexRef = useRef<number | null>(null);
+  // Set when the list is about to be re-derived but the current slide
+  // should stay put (e.g. a guest upload appends a file)
+  const pendingPathRef = useRef<string | null>(null);
 
   const ingestScanResult = useCallback((result: ScanResult) => {
     if (result.errors.length > 0) {
@@ -158,9 +165,18 @@ function App() {
     }
   }, [showToast, autoPlayOnOpen]);
 
-  // Restore the pending resume position once the file list is ready
+  // Restore the pending position (by path, else index) once the list is ready
   useEffect(() => {
-    if (files.length > 0 && pendingIndexRef.current !== null) {
+    if (files.length === 0) return;
+    if (pendingPathRef.current !== null) {
+      const idx = files.findIndex(f => f.path === pendingPathRef.current);
+      pendingPathRef.current = null;
+      if (idx >= 0) {
+        setCurrentIndex(idx);
+        return;
+      }
+    }
+    if (pendingIndexRef.current !== null) {
       setCurrentIndex(Math.min(pendingIndexRef.current, files.length - 1));
       pendingIndexRef.current = null;
     }
@@ -568,7 +584,8 @@ function App() {
     return () => { cancelled = true; };
   }, [remoteEnabled]);
 
-  // …and keep it fed with playback status
+  // …and keep it fed with playback status (path/root stay in the main
+  // process for the thumbnail and upload endpoints — never sent to phones)
   useEffect(() => {
     const file = files[currentIndex];
     window.api.sendRemoteStatus({
@@ -577,8 +594,32 @@ function App() {
       total: files.length,
       playing: isPlaying,
       favorite: file ? favorites.has(file.path) : false,
+      path: file?.path ?? null,
+      root: currentDirs[0] ?? null,
     });
-  }, [files, currentIndex, isPlaying, favorites]);
+  }, [files, currentIndex, isPlaying, favorites, currentDirs]);
+
+  // Guest uploads join the running show; keep the current slide in place
+  // (the re-derive would otherwise reset to slide 1)
+  useEffect(() => {
+    return window.api.on('remote:uploaded', (_event, file: MediaFile) => {
+      pendingPathRef.current = files[currentIndex]?.path ?? null;
+      setAllFiles(prev => prev.some(f => f.path === file.path) ? prev : [...prev, file]);
+      showToast(`📸 ${file.name} joined the show`);
+    });
+  }, [files, currentIndex, showToast]);
+
+  // Emoji reactions from phones float up over the show
+  const [reactions, setReactions] = useState<{ id: number; emoji: string; x: number }[]>([]);
+  useEffect(() => {
+    return window.api.on('remote:reaction', (_event, emoji: string) => {
+      const id = Date.now() + Math.random();
+      setReactions(prev => [...prev.slice(-30), { id, emoji, x: 8 + Math.random() * 84 }]);
+      setTimeout(() => {
+        setReactions(prev => prev.filter(r => r.id !== id));
+      }, 3000);
+    });
+  }, []);
 
   // QR code for the remote URL (shown in settings)
   const [remoteQr, setRemoteQr] = useState<string | null>(null);
@@ -1087,6 +1128,14 @@ function App() {
       />
 
       <Toast message={toast} />
+
+      {reactions.length > 0 && (
+        <div className="reactions-layer">
+          {reactions.map(r => (
+            <span key={r.id} className="reaction-float" style={{ left: `${r.x}%` }}>{r.emoji}</span>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

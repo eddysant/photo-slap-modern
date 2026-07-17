@@ -469,9 +469,11 @@ try {
     })()`).then(JSON.parse);
     check('remote URL displayed with token', /^http:\/\/.+\?t=[0-9a-f]+$/.test(remote.url), remote.url);
     check('remote QR code rendered', remote.qr === true);
+    let remoteApi = null;
     if (remote.url.startsWith('http')) {
         const remoteBase = new URL(remote.url);
         const token = remoteBase.searchParams.get('t');
+        remoteApi = { origin: remoteBase.origin, token };
         const statusUrl = `${remoteBase.origin}/api/status?t=${token}`;
         const status = await (await fetch(statusUrl)).json();
         check('remote status reports the current file', typeof status.name === 'string' && status.total > 0, JSON.stringify(status));
@@ -481,6 +483,17 @@ try {
         check('remote "next" advances the slideshow', after.index === status.index + 1, `${status.index} -> ${after.index}`);
         const unauth = await fetch(`${remoteBase.origin}/api/status`);
         check('remote rejects requests without the token', unauth.status === 403, String(unauth.status));
+
+        const thumb = await fetch(`${remoteBase.origin}/api/thumb?t=${token}`);
+        check('remote thumbnail serves the current slide',
+            thumb.status === 200 && (thumb.headers.get('content-type') ?? '').startsWith('image/'),
+            `${thumb.status} ${thumb.headers.get('content-type')}`);
+
+        await fetch(`${remoteBase.origin}/api/react?t=${token}`, { method: 'POST', body: JSON.stringify({ emoji: '🎉' }) });
+        await sleep(500);
+        const floating = await cdp.evaluate(`document.querySelectorAll('.reaction-float').length`);
+        check('reaction floats over the show', floating >= 1, `${floating} floating`);
+
         // back to the first slide so the dedupe assertions start from 1 / N
         await cdp.evaluate(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft' }))`);
         await sleep(1200);
@@ -525,6 +538,24 @@ try {
     const expectedDeletes = hasVideos ? 3 : 2; // 2 from the image trio + 1 from the video pair
     check(`slideshow dropped the ${expectedDeletes} deleted files`,
         dedupe.after === `1 / ${fixtureCount - expectedDeletes}`, `${dedupe.before} -> ${dedupe.after}`);
+
+    if (remoteApi) {
+        console.log('guest uploads');
+        const remaining = fixtureCount - expectedDeletes;
+        const uploadBytes = await fs.readFile(path.join(fixture, 'a-copy.jpg'));
+        const up = await fetch(`${remoteApi.origin}/api/upload?t=${remoteApi.token}&name=${encodeURIComponent('guest photo!.jpg')}`,
+            { method: 'POST', body: uploadBytes });
+        check('guest upload accepted', up.status === 200, String(up.status));
+        await sleep(800);
+        const guestFiles = await fs.readdir(path.join(fixture, 'guests')).catch(() => []);
+        check('upload saved under guests/ with sanitized name',
+            guestFiles.length === 1 && /^guest photo_\.jpg$/.test(guestFiles[0]), JSON.stringify(guestFiles));
+        const counter = await cdp.evaluate(`document.querySelector('.file-info')?.textContent ?? ''`);
+        check('uploaded photo joined the running show', counter.endsWith(`/ ${remaining + 1}`), counter);
+        const badType = await fetch(`${remoteApi.origin}/api/upload?t=${remoteApi.token}&name=evil.exe`,
+            { method: 'POST', body: Buffer.from('x') });
+        check('unsupported upload type rejected', badType.status === 400, String(badType.status));
+    }
 } catch (e) {
     failures++;
     console.error('✗ E2E aborted:', e.message);

@@ -49,6 +49,7 @@ interface Window {
         sendRemoteStatus: (status: {
             name: string | null; index: number | null; total: number;
             playing: boolean; favorite: boolean;
+            path: string | null; root: string | null;
         }) => void;
         setPowerBlocked: (blocked: boolean) => Promise<void>;
         scanDedupeExact: (dirs: string[], includeVideos: boolean) => Promise<{ hash: string; files: string[] }[]>;

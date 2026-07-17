@@ -1507,6 +1507,29 @@
   text-transform: none;
 }
 
+/* Guest reactions floating over the show */
+.reactions-layer {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1500;
+  overflow: hidden;
+}
+
+.reaction-float {
+  position: absolute;
+  bottom: -50px;
+  font-size: 44px;
+  animation: reaction-rise 3s ease-out forwards;
+  filter: drop-shadow(2px 2px 4px rgba(0, 0, 0, 0.6));
+}
+
+@keyframes reaction-rise {
+  0% { transform: translateY(0) scale(0.7) rotate(-8deg); opacity: 0; }
+  15% { opacity: 1; }
+  100% { transform: translateY(-70vh) scale(1.25) rotate(8deg); opacity: 0; }
+}
+
 /* Toast Notifications */
 .toast {
   position: fixed;

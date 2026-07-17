@@ -1,8 +1,10 @@
 import { bmvbhash } from 'blockhash-core';
-import { getFileUrl } from '../utils';
+import { getDisplayUrl } from '../utils';
 
-// Perceptual hashing off the main thread: fetch each image over media://,
-// decode, downscale to 16x16 on an OffscreenCanvas, and blockhash it.
+// Perceptual hashing off the main thread: fetch a 256px variant of each
+// image over media:// (the hash only needs 16x16 — decoding full-resolution
+// originals made big-library scans ~30x slower), decode, downscale on an
+// OffscreenCanvas, and blockhash it.
 
 export interface PHashRequest {
     paths: string[];
@@ -29,7 +31,7 @@ self.onmessage = async (e: MessageEvent<PHashRequest>) => {
     let done = 0;
     for (const filePath of paths) {
         try {
-            const res = await fetch(getFileUrl(filePath));
+            const res = await fetch(getDisplayUrl(filePath, 256));
             if (res.ok) {
                 const bitmap = await createImageBitmap(await res.blob());
                 ctx.drawImage(bitmap, 0, 0, 16, 16);
