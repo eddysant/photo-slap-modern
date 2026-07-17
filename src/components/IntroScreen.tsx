@@ -12,28 +12,28 @@ interface IntroScreenProps {
 
 export function IntroScreen({ isLoading, onOpenDirectory, lastDirName, onResume, onOpenSettings, onFindDuplicates }: IntroScreenProps) {
     return (
-        <div className="balatro-container">
+        <div className="intro-container">
             <div className="crt-overlay" />
 
             <button className="control-btn intro-settings-btn" onClick={onOpenSettings} title="Settings">
                 <FiSettings size={22} />
             </button>
 
-            <div className="balatro-title">
+            <div className="intro-title">
                 PHOTO<br />SLAP
             </div>
 
-            <button className="balatro-button" onClick={onOpenDirectory} disabled={isLoading}>
+            <button className="retro-button" onClick={onOpenDirectory} disabled={isLoading}>
                 {isLoading ? 'SCANNING...' : 'OPEN FOLDER'}
             </button>
 
             {lastDirName && (
-                <button className="balatro-button resume-button" onClick={onResume} disabled={isLoading}>
+                <button className="retro-button resume-button" onClick={onResume} disabled={isLoading}>
                     RESUME "{lastDirName}"
                 </button>
             )}
 
-            <button className="balatro-button resume-button" onClick={onFindDuplicates} disabled={isLoading}>
+            <button className="retro-button resume-button" onClick={onFindDuplicates} disabled={isLoading}>
                 <FiLayers style={{ marginRight: 8 }} /> FIND DUPLICATES
             </button>
 

@@ -405,7 +405,7 @@ export function DedupeModal({ isOpen, onClose, rootPaths, onFilesDeleted }: Dedu
                                 </small>
                             </div>
 
-                            <button className="balatro-button primary" onClick={startScan} disabled={scanRoots.length === 0}>
+                            <button className="retro-button primary" onClick={startScan} disabled={scanRoots.length === 0}>
                                 START SCAN
                             </button>
                         </div>
@@ -481,7 +481,7 @@ export function DedupeModal({ isOpen, onClose, rootPaths, onFilesDeleted }: Dedu
                         <div className="step-done">
                             <FiCheck size={64} color="#00ff00" />
                             <h3>{statusMsg}</h3>
-                            <button className="balatro-button" onClick={onClose}>CLOSE</button>
+                            <button className="retro-button" onClick={onClose}>CLOSE</button>
                         </div>
                     )}
                 </div>

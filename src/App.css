@@ -8,8 +8,8 @@
   background: var(--bg-primary);
 }
 
-/* Balatro-style Intro */
-.balatro-container {
+/* Retro pixel intro */
+.intro-container {
   position: absolute;
   top: 0;
   left: 0;
@@ -25,7 +25,7 @@
 }
 
 /* Moving background effect */
-.balatro-container::before {
+.intro-container::before {
   content: '';
   position: absolute;
   top: -50%;
@@ -62,7 +62,7 @@
   z-index: 10;
 }
 
-.balatro-title {
+.intro-title {
   font-size: 6rem;
   color: #fff;
   text-transform: uppercase;
@@ -89,7 +89,7 @@
   }
 }
 
-.balatro-button {
+.retro-button {
   background: #e6e6e6;
   color: #1a1a1a;
   font-family: 'Silkscreen', cursive;
@@ -109,7 +109,7 @@
   gap: 1rem;
 }
 
-.balatro-button:hover {
+.retro-button:hover {
   transform: translate(-2px, -2px) scale(1.02);
   box-shadow:
     12px 12px 0px rgba(0, 0, 0, 0.6),
@@ -117,14 +117,14 @@
   background: #fff;
 }
 
-.balatro-button:active {
+.retro-button:active {
   transform: translate(4px, 4px);
   box-shadow:
     0px 0px 0px rgba(0, 0, 0, 0.6),
     inset 4px 4px 0px rgba(255, 255, 255, 0.5);
 }
 
-.balatro-button:disabled {
+.retro-button:disabled {
   opacity: 0.7;
   cursor: wait;
 }
@@ -450,7 +450,7 @@
   padding: 16px 8px;
 }
 
-/* Pause Overlay - Balatro Style */
+/* Pause Overlay */
 .pause-overlay {
   position: absolute;
   top: 50%;
@@ -473,7 +473,7 @@
 }
 
 
-/* Settings Menu - Balatro Style */
+/* Settings Menu */
 .settings-menu {
   position: absolute;
   top: 0;

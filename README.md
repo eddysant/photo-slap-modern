@@ -1,6 +1,6 @@
 # photo-slap
 
-A retro, Balatro-inspired photo & video slideshow app for the desktop, built with Electron, React, and TypeScript.
+A photo & video slideshow app with a retro pixel look for the desktop, built with Electron, React, and TypeScript.
 
 By [Eddy Sant](https://github.com/eddysant), built with AI assistance.
 

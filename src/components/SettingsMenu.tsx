@@ -266,7 +266,7 @@ export function SettingsMenu(props: SettingsMenuProps) {
                     {props.hasFiles && (
                         <div className="setting-item">
                             <button
-                                className="balatro-button"
+                                className="retro-button"
                                 style={{ width: '100%', fontSize: '14px', padding: '10px' }}
                                 onClick={props.onShowInFinder}
                             >
@@ -277,7 +277,7 @@ export function SettingsMenu(props: SettingsMenuProps) {
 
                     <div className="setting-item">
                         <button
-                            className="balatro-button"
+                            className="retro-button"
                             style={{ width: '100%', fontSize: '14px', padding: '10px' }}
                             onClick={props.onFindDuplicates}
                         >
