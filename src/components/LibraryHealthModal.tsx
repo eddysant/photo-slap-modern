@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { FiActivity, FiArchive, FiDownload, FiFolder, FiTool, FiX } from 'react-icons/fi';
+import { QuarantineManager } from './QuarantineManager';
 
 interface LibraryHealthModalProps {
     isOpen: boolean;
@@ -8,6 +9,7 @@ interface LibraryHealthModalProps {
     onReport: (report: LibraryHealthReport) => void;
     onFilesMoved: (paths: string[]) => void;
     onMetadataRemoved: (paths: string[]) => void;
+    onFilesRestored: (paths: string[]) => void;
 }
 
 const CATEGORY_LABELS: Record<LibraryHealthCategory, string> = {
@@ -18,13 +20,16 @@ const CATEGORY_LABELS: Record<LibraryHealthCategory, string> = {
     'orphan-sidecar': 'Orphaned sidecar entry',
 };
 
-export function LibraryHealthModal({ isOpen, roots, onClose, onReport, onFilesMoved, onMetadataRemoved }: LibraryHealthModalProps) {
+export function LibraryHealthModal({ isOpen, roots, onClose, onReport, onFilesMoved, onMetadataRemoved, onFilesRestored }: LibraryHealthModalProps) {
     const [report, setReport] = useState<LibraryHealthReport | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [activeCategory, setActiveCategory] = useState<LibraryHealthCategory | 'all'>('all');
     const [scanRevision, setScanRevision] = useState(0);
     const [isRepairing, setIsRepairing] = useState(false);
     const [notice, setNotice] = useState<string | null>(null);
+    const [showQuarantine, setShowQuarantine] = useState(false);
+
+    useEffect(() => { if (!isOpen) setShowQuarantine(false); }, [isOpen]);
 
     useEffect(() => {
         if (!isOpen || roots.length === 0) return;
@@ -88,9 +93,20 @@ export function LibraryHealthModal({ isOpen, roots, onClose, onReport, onFilesMo
         <div className="health-overlay" role="dialog" aria-modal="true" aria-label="Library health">
             <div className="health-modal">
                 <header className="health-header">
-                    <div><FiActivity /><span>Library Health</span></div>
+                    <div>{showQuarantine ? <FiArchive /> : <FiActivity />}<span>{showQuarantine ? 'Quarantine Manager' : 'Library Health'}</span></div>
                     <button className="control-btn" onClick={onClose} aria-label="Close library health"><FiX size={22} /></button>
                 </header>
+                {showQuarantine ? (
+                    <QuarantineManager
+                        roots={roots}
+                        onBack={() => setShowQuarantine(false)}
+                        onRestored={paths => {
+                            onFilesRestored(paths);
+                            setScanRevision(value => value + 1);
+                        }}
+                    />
+                ) : (
+                    <>
                 {!report && !error && <div className="health-loading"><div className="loading-spinner" /><p>Inspecting media and sidecars…</p></div>}
                 {error && <div className="health-loading"><p>{error}</p></div>}
                 {report && (
@@ -112,6 +128,7 @@ export function LibraryHealthModal({ isOpen, roots, onClose, onReport, onFilesMo
                                 <FiTool /> Remove orphan entries
                             </button>
                             <button className="retro-button compact" disabled={isRepairing} onClick={exportCsv}><FiDownload /> Export CSV</button>
+                            <button className="retro-button compact" disabled={isRepairing} onClick={() => setShowQuarantine(true)}><FiArchive /> Manage quarantine</button>
                             {notice && <span className="health-notice">{notice}</span>}
                         </div>
                         <div className="health-issues">
@@ -127,6 +144,8 @@ export function LibraryHealthModal({ isOpen, roots, onClose, onReport, onFilesMo
                                 </div>
                             ))}
                         </div>
+                    </>
+                )}
                     </>
                 )}
             </div>

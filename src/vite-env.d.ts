@@ -54,6 +54,19 @@ interface QuarantinedFile {
     destination: string;
 }
 
+interface QuarantineEntry {
+    root: string;
+    originalPath: string;
+    quarantinePath: string;
+    size: number;
+    quarantinedAt: string | null;
+}
+
+interface RestoredQuarantineFile {
+    quarantinePath: string;
+    restoredPath: string;
+}
+
 interface Window {
     api: {
         openDirectory: () => Promise<ScanResult | null>;
@@ -77,6 +90,10 @@ interface Window {
             paths?: string[],
         ) => Promise<{ removed: string[]; quarantined: QuarantinedFile[] }>;
         exportLibraryHealth: (report: LibraryHealthReport) => Promise<string | null>;
+        listQuarantine: (roots: string[]) => Promise<QuarantineEntry[]>;
+        restoreQuarantine: (roots: string[], paths: string[]) => Promise<RestoredQuarantineFile[]>;
+        deleteQuarantine: (roots: string[], paths: string[]) => Promise<string[]>;
+        exportQuarantine: (roots: string[]) => Promise<string | null>;
         setRemoteEnabled: (enabled: boolean) => Promise<string | null>;
         sendRemoteStatus: (status: {
             name: string | null; index: number | null; total: number;

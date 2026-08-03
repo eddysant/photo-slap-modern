@@ -518,6 +518,18 @@ function App() {
     setCullingDecisions(previous => Object.fromEntries(Object.entries(previous).filter(([filePath]) => !paths.has(filePath))));
   }, []);
 
+  const handleFilesRestored = useCallback(async (restored: string[]) => {
+    if (restored.length === 0 || currentDirs.length === 0) return;
+    pendingPathRef.current = files[currentIndex]?.path ?? null;
+    const results = await Promise.all(currentDirs.map(dir => window.api.scanPath(dir)));
+    const valid = results.filter((result): result is ScanResult => result !== null);
+    if (valid.length > 0) {
+      fileDatesRef.current = null;
+      setAllFiles(mergeScans(valid).files);
+      showToast(`${restored.length} file${restored.length === 1 ? '' : 's'} restored and re-scanned`);
+    }
+  }, [currentDirs, files, currentIndex, showToast]);
+
   const toggleSettings = () => setIsSettingsOpen(prev => !prev);
 
   // Video Scrubber Logic
@@ -1325,6 +1337,7 @@ function App() {
         onReport={setHealthReport}
         onFilesMoved={handleFilesDeleted}
         onMetadataRemoved={handleMetadataRemoved}
+        onFilesRestored={handleFilesRestored}
       />
 
       <Toast message={toast} />

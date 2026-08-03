@@ -12,7 +12,10 @@ import decodeHeic from 'heic-decode'
 import { scanDirectory } from './fileScanner'
 import { findExactDuplicates, scanFiles } from './dedupe'
 import { loadLibraryMeta, saveLibraryMeta, removeOrphanedLibraryMeta, LibraryMeta } from './libraryMeta'
-import { scanLibraryHealth, quarantineCorruptFiles, healthReportToCsv, LibraryHealthReport } from './libraryHealth'
+import {
+  scanLibraryHealth, quarantineCorruptFiles, healthReportToCsv, LibraryHealthReport,
+  listQuarantinedFiles, restoreQuarantinedFiles, permanentlyDeleteQuarantinedFiles, quarantineEntriesToCsv,
+} from './libraryHealth'
 import { startRemoteServer, stopRemoteServer, getRemoteUrl, RemoteStatus } from './remoteServer'
 import ExifReader from 'exifreader';
 
@@ -766,8 +769,7 @@ ipcMain.handle('library:health', async (_event, roots: string[]) => {
 });
 
 ipcMain.handle('library:health:repair', async (_event, roots: string[], action: 'remove-orphans' | 'quarantine-corrupt', paths: string[] = []) => {
-  const safeRoots = roots.map(root => path.resolve(root)).filter(root => isAllowedPath(root));
-  if (safeRoots.length !== roots.length) throw new Error('Library root is not allowlisted');
+  const safeRoots = allowlistedLibraryRoots(roots);
   if (action === 'remove-orphans') {
     return { removed: await removeOrphanedLibraryMeta(safeRoots), quarantined: [] };
   }
@@ -788,6 +790,37 @@ ipcMain.handle('library:health:export', async (_event, report: LibraryHealthRepo
   });
   if (result.canceled || !result.filePath) return null;
   await fs.writeFile(result.filePath, healthReportToCsv(report), 'utf8');
+  return result.filePath;
+});
+
+function allowlistedLibraryRoots(roots: string[]) {
+  const safeRoots = roots.map(root => path.resolve(root)).filter(root => isAllowedPath(root));
+  if (safeRoots.length !== roots.length) throw new Error('Library root is not allowlisted');
+  return safeRoots;
+}
+
+ipcMain.handle('quarantine:list', async (_event, roots: string[]) => {
+  return await listQuarantinedFiles(allowlistedLibraryRoots(roots));
+});
+
+ipcMain.handle('quarantine:restore', async (_event, roots: string[], paths: string[]) => {
+  return await restoreQuarantinedFiles(allowlistedLibraryRoots(roots), paths);
+});
+
+ipcMain.handle('quarantine:delete', async (_event, roots: string[], paths: string[]) => {
+  return await permanentlyDeleteQuarantinedFiles(allowlistedLibraryRoots(roots), paths);
+});
+
+ipcMain.handle('quarantine:export', async (_event, roots: string[]) => {
+  if (!win) return null;
+  const entries = await listQuarantinedFiles(allowlistedLibraryRoots(roots));
+  const result = await dialog.showSaveDialog(win, {
+    title: 'Export Quarantine Manifest',
+    defaultPath: `photo-slap-quarantine-${new Date().toISOString().slice(0, 10)}.csv`,
+    filters: [{ name: 'CSV Manifest', extensions: ['csv'] }],
+  });
+  if (result.canceled || !result.filePath) return null;
+  await fs.writeFile(result.filePath, quarantineEntriesToCsv(entries), 'utf8');
   return result.filePath;
 });
 

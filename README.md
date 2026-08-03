@@ -32,7 +32,7 @@ By [Eddy Sant](https://github.com/eddysant), built with AI assistance.
 - **Built for big libraries** — display-sized image serving with a capped derivation queue, virtualized grid, and collator-based sorting: a 5,000-photo library opens in about a second and the grid stays at ~50 DOM nodes regardless of library size.
 - **Favorites, tags, ratings & decisions** — `H` hearts a photo, `T` opens a quick-tag editor, while the grid and culling bar handle ratings and Keep/Reject decisions. Stored in `.photo-slap.json` sidecar files *next to your photos* (relative paths, so folders can move), not in the app — opening a parent folder picks up and merges sidecars saved in subfolders.
 - **Quick-move folders** — assign up to three target folders in Settings, then press `1`/`2`/`3` to move the current file there. Combined with `Delete`, it makes triaging a photo dump fast.
-- **Library health scan & repairs** — checks opened or selected libraries for corrupt/unreadable media, suspiciously tiny images (under 320 px or 10 KB), unsupported media formats, photos without embedded capture dates, and sidecar entries that point to missing files. Results are filterable, exportable as CSV, and can repair orphan entries or move corrupt files into a hidden `.photo-slap-quarantine` folder while preserving their relative paths.
+- **Library health scan, repairs & quarantine manager** — checks opened or selected libraries for corrupt/unreadable media, suspiciously tiny images (under 320 px or 10 KB), unsupported media formats, photos without embedded capture dates, and sidecar entries that point to missing files. Results are filterable and exportable as CSV. Corrupt files move into a hidden `.photo-slap-quarantine` folder with a recovery manifest; the manager can inspect, safely restore, reveal, permanently delete, or export those entries. Restores never overwrite an existing file and automatically refresh the library and health scan.
 - **Keyboard shortcuts** — `←`/`→` previous/next, `Space` play/pause, `G` grid, `P` photo frame, `H` favorite, `T` tags, `K`/`Enter` culling keep, `X` culling reject, `F` reveal in Finder, `M`/`N` video ±10 seconds, `1`–`3` quick-move, `Delete`/`Backspace` delete, `Esc` close overlays. All of them are listed in the **Actions** menu in the menu bar.
 - **Slide timer bar** — a thin progress bar shows when the next slide lands (can be hidden in Settings).
 - **Updates** — the app checks GitHub Releases on launch (and via *photo-slap → Check for Updates…*) and points you at new versions. Unsigned builds can't self-install, so it opens the download page.
@@ -99,7 +99,7 @@ electron/            Main & preload process code (bundled to dist-electron/)
   main.ts            Window, menu, media:// protocol (allowlist + HEIC transcode), IPC
   preload.ts         contextBridge → exposes window.api to the renderer
   fileScanner.ts     Recursive media-file directory scanner
-  libraryHealth.ts   Decode/header/date/sidecar library diagnostics
+  libraryHealth.ts   Library diagnostics, repair, quarantine manifest, restore/delete/export
   dedupe.ts          Exact-duplicate detection (size grouping + SHA-256)
 src/                 React renderer
   App.tsx            Slideshow state and viewer

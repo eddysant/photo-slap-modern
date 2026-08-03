@@ -1289,6 +1289,26 @@
 .health-badge.missing-date { background: #176485; }
 .health-badge.orphan-sidecar { background: #6e4f39; }
 
+/* Recoverable corrupt-file quarantine */
+.quarantine-manager { min-height: 0; flex: 1; display: flex; flex-direction: column; }
+.quarantine-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 12px 14px; background: #101010; border-bottom: 2px solid #333; }
+.quarantine-toolbar .retro-button { width: auto; min-height: 42px; }
+.quarantine-toolbar .retro-button.danger { color: #ff4775; border-color: #7a243e; }
+.quarantine-toolbar button:disabled { opacity: 0.35; cursor: default; box-shadow: none; }
+.quarantine-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; padding: 10px 16px; color: #888; background: #181818; border-bottom: 1px solid #333; font-size: 0.58rem; }
+.quarantine-summary label { display: flex; align-items: center; gap: 8px; color: #ddd; }
+.quarantine-summary input, .quarantine-row > input { width: 18px; height: 18px; accent-color: #00aaff; }
+.quarantine-summary strong { flex: 1; min-width: 260px; color: #00aaff; font-weight: normal; line-height: 1.4; }
+.quarantine-list { min-height: 0; flex: 1; overflow-y: auto; padding: 8px 14px 18px; }
+.quarantine-row { display: flex; align-items: center; gap: 13px; padding: 13px 9px; border-bottom: 1px solid #333; }
+.quarantine-row.selected { background: rgba(0, 170, 255, 0.08); box-shadow: inset 3px 0 #00aaff; }
+.quarantine-copy { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 5px; }
+.quarantine-copy strong { overflow: hidden; color: #fff; text-overflow: ellipsis; white-space: nowrap; font-size: 0.72rem; }
+.quarantine-copy span, .quarantine-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quarantine-copy span { color: #aaa; font: 0.68rem system-ui, sans-serif; }
+.quarantine-copy small { color: #666; font: 0.57rem system-ui, sans-serif; }
+.quarantine-row-actions { display: flex; gap: 6px; }
+
 @media (max-width: 720px) {
   .settings-grid, .toggle-grid, .tool-grid { grid-template-columns: 1fr; }
   .health-summary { grid-template-columns: repeat(3, 1fr); }
@@ -1296,6 +1316,9 @@
   .culling-action { font-size: 0; }
   .culling-action svg, .culling-action kbd { font-size: 0.6rem; }
   .culling-rating { display: none; }
+  .quarantine-toolbar .retro-button { flex: 1 1 45%; }
+  .quarantine-row { align-items: flex-start; }
+  .quarantine-row-actions { flex-direction: column; }
 }
 
 /* Zoom & Pan */
