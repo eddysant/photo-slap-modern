@@ -15,6 +15,8 @@ interface SettingsMenuProps {
     onMediaFilterChange: (filter: MediaFilter) => void;
     isShuffle: boolean;
     onToggleShuffle: () => void;
+    shuffleProgress: { viewed: number; total: number };
+    onResetShuffle: () => void;
     isSmart: boolean;
     onToggleSmart: () => void;
     isSmartVideoEnabled: boolean;
@@ -112,6 +114,12 @@ export function SettingsMenu(props: SettingsMenuProps) {
                             <Toggle checked={props.isShuffle} onChange={props.onToggleShuffle}>No-repeat shuffle</Toggle>
                             <Toggle checked={props.favoritesOnly} onChange={props.onToggleFavoritesOnly}>Favorites only</Toggle>
                         </div>
+                        {props.isShuffle && (
+                            <div className="shuffle-setting-progress">
+                                <div><span>{props.shuffleProgress.viewed} of {props.shuffleProgress.total} viewed this cycle</span><button className="text-btn" onClick={props.onResetShuffle}>Reset history</button></div>
+                                <progress max={Math.max(1, props.shuffleProgress.total)} value={props.shuffleProgress.viewed} />
+                            </div>
+                        )}
                         {props.tagNames.length > 0 && (
                             <label className="setting-item"><span className="setting-label">Tag filter</span>
                                 <select className="setting-control" value={props.tagFilter} onChange={e => props.onTagFilterChange(e.target.value)}>
@@ -168,7 +176,7 @@ export function SettingsMenu(props: SettingsMenuProps) {
                     <section className="settings-section">
                         <div className="settings-section-title">Review workflow</div>
                         <Toggle checked={props.cullingMode} onChange={props.onToggleCullingMode}>Photo culling mode</Toggle>
-                        <p className="settings-help">Culling pauses playback and shows Keep (K/Enter), Favorite (H), Reject (X), and quick-move controls.</p>
+                        <p className="settings-help">Culling pauses playback and records Keep (K/Enter) or Reject (X) decisions without deleting files. Assign 1–5 star ratings from the review bar.</p>
                         <div className="setting-item">
                             <span className="setting-label">Quick-move folders · keys 1–3</span>
                             {props.quickMoveFolders.map((folder, i) => (

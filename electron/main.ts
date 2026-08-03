@@ -11,8 +11,8 @@ import sharp from 'sharp'
 import decodeHeic from 'heic-decode'
 import { scanDirectory } from './fileScanner'
 import { findExactDuplicates, scanFiles } from './dedupe'
-import { loadLibraryMeta, saveLibraryMeta, LibraryMeta } from './libraryMeta'
-import { scanLibraryHealth } from './libraryHealth'
+import { loadLibraryMeta, saveLibraryMeta, removeOrphanedLibraryMeta, LibraryMeta } from './libraryMeta'
+import { scanLibraryHealth, quarantineCorruptFiles, healthReportToCsv, LibraryHealthReport } from './libraryHealth'
 import { startRemoteServer, stopRemoteServer, getRemoteUrl, RemoteStatus } from './remoteServer'
 import ExifReader from 'exifreader';
 
@@ -763,6 +763,32 @@ ipcMain.handle('library:save', async (_event, roots: string[], meta: LibraryMeta
 
 ipcMain.handle('library:health', async (_event, roots: string[]) => {
   return await scanLibraryHealth(roots);
+});
+
+ipcMain.handle('library:health:repair', async (_event, roots: string[], action: 'remove-orphans' | 'quarantine-corrupt', paths: string[] = []) => {
+  const safeRoots = roots.map(root => path.resolve(root)).filter(root => isAllowedPath(root));
+  if (safeRoots.length !== roots.length) throw new Error('Library root is not allowlisted');
+  if (action === 'remove-orphans') {
+    return { removed: await removeOrphanedLibraryMeta(safeRoots), quarantined: [] };
+  }
+  if (action === 'quarantine-corrupt') {
+    const quarantined = await quarantineCorruptFiles(safeRoots, paths);
+    const removed = quarantined.length > 0 ? await removeOrphanedLibraryMeta(safeRoots) : [];
+    return { removed, quarantined };
+  }
+  throw new Error('Unknown health repair action');
+});
+
+ipcMain.handle('library:health:export', async (_event, report: LibraryHealthReport) => {
+  if (!win) return null;
+  const result = await dialog.showSaveDialog(win, {
+    title: 'Export Library Health Report',
+    defaultPath: `photo-slap-health-${new Date().toISOString().slice(0, 10)}.csv`,
+    filters: [{ name: 'CSV Report', extensions: ['csv'] }],
+  });
+  if (result.canceled || !result.filePath) return null;
+  await fs.writeFile(result.filePath, healthReportToCsv(report), 'utf8');
+  return result.filePath;
 });
 
 // Basic file stats for the dedupe compare cards

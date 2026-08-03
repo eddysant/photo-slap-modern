@@ -1,7 +1,7 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import QRCode from 'qrcode'
-import { FiSettings, FiPlay, FiPause, FiSkipBack, FiSkipForward, FiTrash2, FiVolume2, FiVolumeX, FiGrid, FiHeart, FiCheck, FiFolder } from 'react-icons/fi'
+import { FiSettings, FiPlay, FiPause, FiSkipBack, FiSkipForward, FiTrash2, FiVolume2, FiVolumeX, FiGrid, FiHeart, FiCheck, FiFolder, FiX } from 'react-icons/fi'
 import './App.css'
 import { DedupeModal } from './components/DedupeModal'
 import { FrameOverlay } from './components/FrameOverlay'
@@ -17,7 +17,8 @@ import { slideTransitions, TransitionStyle } from './transitions'
 import { getFileUrl, getDisplayUrl } from './utils'
 import { cullingActionForKey } from './culling'
 import { SETTINGS_PRESETS, type SettingsPresetName } from './settingsPresets'
-import { makeShuffleHistoryKey, orderForNoRepeatShuffle, recordViewed, type ShuffleHistory } from './shuffleHistory'
+import { getShuffleProgress, makeShuffleHistoryKey, orderForNoRepeatShuffle, recordViewed, type ShuffleHistory } from './shuffleHistory'
+import { healthIssuesByPath } from './gridFilters'
 
 const mergeScans = (results: ScanResult[]): ScanResult => ({
   paths: results.flatMap(r => r.paths),
@@ -45,11 +46,14 @@ function App() {
   const [isHealthOpen, setIsHealthOpen] = useState(false)
   const [healthRoots, setHealthRoots] = useState<string[]>([])
 
-  // Library metadata (favorites & tags) — lives in .photo-slap.json sidecar
+  // Library metadata — lives in .photo-slap.json sidecars
   // files next to the photos, not in app storage
   const [favorites, setFavorites] = useState<Set<string>>(new Set())
   const [fileTags, setFileTags] = useState<Record<string, string[]>>({})
   const [tagNames, setTagNames] = useState<string[]>([])
+  const [ratings, setRatings] = useState<Record<string, number>>({})
+  const [cullingDecisions, setCullingDecisions] = useState<Record<string, CullingDecision>>({})
+  const [healthReport, setHealthReport] = useState<LibraryHealthReport | null>(null)
   // Session-only view filters (not persisted — a hidden filter across
   // launches would look like lost photos)
   const [favoritesOnly, setFavoritesOnly] = useState(false)
@@ -86,6 +90,7 @@ function App() {
   // app restart without modifying the user's photo folders.
   const shuffleHistoryRef = useRef<ShuffleHistory>({})
   const [shuffleHistoryReady, setShuffleHistoryReady] = useState(false)
+  const [shuffleProgress, setShuffleProgress] = useState({ viewed: 0, total: 0 })
   useEffect(() => {
     window.api.getStore('shuffleHistory')
       .then(value => { if (value && typeof value === 'object') shuffleHistoryRef.current = value as ShuffleHistory; })
@@ -147,9 +152,12 @@ function App() {
       const previousHistory = shuffleHistoryRef.current[shuffleKey] ?? [];
       const ordered = orderForNoRepeatShuffle(sorted, previousHistory);
       sorted.splice(0, sorted.length, ...ordered.items);
+      setShuffleProgress(getShuffleProgress(sorted, ordered.viewedPaths));
       if (ordered.cycleReset || ordered.viewedPaths.length !== previousHistory.length) {
         persistShuffleHistory({ ...shuffleHistoryRef.current, [shuffleKey]: ordered.viewedPaths });
       }
+    } else {
+      setShuffleProgress({ viewed: 0, total: sorted.length });
     }
 
     setFiles(sorted);
@@ -180,6 +188,7 @@ function App() {
 
     if (result.files.length > 0) {
       setCurrentDirs(result.paths);
+      setHealthReport(null);
       fileDatesRef.current = null;
       setAllFiles(result.files); // the filter/sort effect below picks this up
       setIsPlaying(autoPlayOnOpen); // photo-frame setups want the show to start immediately
@@ -256,9 +265,10 @@ function App() {
     const key = makeShuffleHistoryKey(currentDirs, mediaFilter);
     const next = recordViewed(shuffleHistoryRef.current, key, file.path);
     if (next !== shuffleHistoryRef.current) persistShuffleHistory(next);
+    setShuffleProgress(getShuffleProgress(files, next[key] ?? []));
   }, [files, currentIndex, isShuffle, shuffleHistoryReady, currentDirs, mediaFilter, persistShuffleHistory]);
 
-  // Load favorites/tags from the library sidecars whenever folders change
+  // Load metadata from the library sidecars whenever folders change
   useEffect(() => {
     if (currentDirs.length === 0) return;
     window.api.libraryLoad(currentDirs)
@@ -266,16 +276,24 @@ function App() {
         setFavorites(new Set(meta.favorites));
         setFileTags(meta.tags);
         setTagNames(meta.tagNames);
+        setRatings(meta.ratings);
+        setCullingDecisions(meta.culling);
       })
       .catch(e => console.error('Failed to load library metadata:', e));
   }, [currentDirs]);
 
   // Debounced sidecar write-back
   const librarySaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const scheduleLibrarySave = useCallback((favs: Set<string>, tags: Record<string, string[]>, names: string[]) => {
+  const scheduleLibrarySave = useCallback((
+    favs: Set<string>,
+    tags: Record<string, string[]>,
+    names: string[],
+    nextRatings: Record<string, number>,
+    culling: Record<string, CullingDecision>,
+  ) => {
     if (librarySaveTimer.current) clearTimeout(librarySaveTimer.current);
     librarySaveTimer.current = setTimeout(() => {
-      window.api.librarySave(currentDirs, { favorites: [...favs], tags, tagNames: names })
+      window.api.librarySave(currentDirs, { favorites: [...favs], tags, tagNames: names, ratings: nextRatings, culling })
         .catch(e => console.error('Failed to save library metadata:', e));
     }, 800);
   }, [currentDirs]);
@@ -288,16 +306,14 @@ function App() {
     if (nowFavorite) next.add(file.path);
     else next.delete(file.path);
     setFavorites(next);
-    scheduleLibrarySave(next, fileTags, tagNames);
+    scheduleLibrarySave(next, fileTags, tagNames, ratings, cullingDecisions);
     // Un-favoriting while the favorites filter is on removes it from view
     if (!nowFavorite && favoritesOnly) {
-      setFiles(prev => {
-        const remaining = prev.filter(f => f.path !== file.path);
-        setCurrentIndex(ci => Math.min(ci, Math.max(0, remaining.length - 1)));
-        return remaining;
-      });
+      const remaining = files.filter(f => f.path !== file.path);
+      setFiles(remaining);
+      setCurrentIndex(ci => Math.min(ci, Math.max(0, remaining.length - 1)));
     }
-  }, [files, currentIndex, favorites, fileTags, tagNames, favoritesOnly, scheduleLibrarySave]);
+  }, [files, currentIndex, favorites, fileTags, tagNames, ratings, cullingDecisions, favoritesOnly, scheduleLibrarySave]);
 
   const setTagOnCurrent = useCallback((tag: string, ensureInVocabulary = false) => {
     const file = files[currentIndex];
@@ -314,8 +330,8 @@ function App() {
       setTagNames(nextNames);
     }
     setFileTags(nextTags);
-    scheduleLibrarySave(favorites, nextTags, nextNames);
-  }, [files, currentIndex, fileTags, tagNames, favorites, scheduleLibrarySave]);
+    scheduleLibrarySave(favorites, nextTags, nextNames, ratings, cullingDecisions);
+  }, [files, currentIndex, fileTags, tagNames, favorites, ratings, cullingDecisions, scheduleLibrarySave]);
 
   const handleOpenDirectory = useCallback(async () => {
     try {
@@ -402,6 +418,7 @@ function App() {
     if (isShuffle && currentIndex === files.length - 1) {
       const key = makeShuffleHistoryKey(currentDirs, mediaFilter);
       persistShuffleHistory({ ...shuffleHistoryRef.current, [key]: [] });
+      setShuffleProgress({ viewed: 0, total: files.length });
       setFiles(orderForNoRepeatShuffle(files, []).items);
       setCurrentIndex(0);
       return;
@@ -420,6 +437,17 @@ function App() {
 
   // List-shaping settings just persist; the effect above re-derives the list
   const toggleShuffle = () => setIsShuffle(!isShuffle);
+  const resetShuffleHistory = useCallback(() => {
+    if (currentDirs.length === 0) return;
+    const key = makeShuffleHistoryKey(currentDirs, mediaFilter);
+    persistShuffleHistory({ ...shuffleHistoryRef.current, [key]: [] });
+    setShuffleProgress({ viewed: 0, total: files.length });
+    if (isShuffle) {
+      setFiles(orderForNoRepeatShuffle(files, []).items);
+      setCurrentIndex(0);
+    }
+    showToast('Shuffle history reset');
+  }, [currentDirs, mediaFilter, files, isShuffle, persistShuffleHistory, showToast]);
   const handleMediaFilterChange = (newFilter: MediaFilter) => setMediaFilter(newFilter);
 
   useEffect(() => {
@@ -457,6 +485,7 @@ function App() {
     }
     setHealthRoots(roots);
     setIsSettingsOpen(false);
+    setIsGridOpen(false);
     setIsHealthOpen(true);
   }, [currentDirs]);
 
@@ -466,13 +495,9 @@ function App() {
     const success = await window.api.deleteFile(fileToDelete.path);
     if (success) {
       setAllFiles(prev => prev.filter(f => f.path !== fileToDelete.path));
-      setFiles(prev => {
-        const newFiles = prev.filter((_, i) => i !== currentIndex);
-        if (currentIndex >= newFiles.length) {
-          setCurrentIndex(Math.max(0, newFiles.length - 1));
-        }
-        return newFiles;
-      });
+      const newFiles = files.filter((_, i) => i !== currentIndex);
+      setFiles(newFiles);
+      setCurrentIndex(Math.min(currentIndex, Math.max(0, newFiles.length - 1)));
     }
   }, [files, currentIndex]);
 
@@ -480,11 +505,17 @@ function App() {
   const handleFilesDeleted = useCallback((deleted: string[]) => {
     const del = new Set(deleted);
     setAllFiles(prev => prev.filter(f => !del.has(f.path)));
-    setFiles(prev => {
-      const newFiles = prev.filter(f => !del.has(f.path));
-      setCurrentIndex(ci => Math.min(ci, Math.max(0, newFiles.length - 1)));
-      return newFiles;
-    });
+    const newFiles = files.filter(f => !del.has(f.path));
+    setFiles(newFiles);
+    setCurrentIndex(ci => Math.min(ci, Math.max(0, newFiles.length - 1)));
+  }, [files]);
+
+  const handleMetadataRemoved = useCallback((removed: string[]) => {
+    const paths = new Set(removed);
+    setFavorites(previous => new Set([...previous].filter(filePath => !paths.has(filePath))));
+    setFileTags(previous => Object.fromEntries(Object.entries(previous).filter(([filePath]) => !paths.has(filePath))));
+    setRatings(previous => Object.fromEntries(Object.entries(previous).filter(([filePath]) => !paths.has(filePath))));
+    setCullingDecisions(previous => Object.fromEntries(Object.entries(previous).filter(([filePath]) => !paths.has(filePath))));
   }, []);
 
   const toggleSettings = () => setIsSettingsOpen(prev => !prev);
@@ -604,8 +635,8 @@ function App() {
     const next = new Set(favorites);
     paths.forEach(p => favorite ? next.add(p) : next.delete(p));
     setFavorites(next);
-    scheduleLibrarySave(next, fileTags, tagNames);
-  }, [favorites, fileTags, tagNames, scheduleLibrarySave]);
+    scheduleLibrarySave(next, fileTags, tagNames, ratings, cullingDecisions);
+  }, [favorites, fileTags, tagNames, ratings, cullingDecisions, scheduleLibrarySave]);
 
   const batchTag = useCallback((paths: string[], tag: string) => {
     const nextTags = { ...fileTags };
@@ -619,8 +650,29 @@ function App() {
       setTagNames(names);
     }
     setFileTags(nextTags);
-    scheduleLibrarySave(favorites, nextTags, names);
-  }, [favorites, fileTags, tagNames, scheduleLibrarySave]);
+    scheduleLibrarySave(favorites, nextTags, names, ratings, cullingDecisions);
+  }, [favorites, fileTags, tagNames, ratings, cullingDecisions, scheduleLibrarySave]);
+
+  const batchRating = useCallback((paths: string[], rating: number | null) => {
+    const next = { ...ratings };
+    paths.forEach(path => rating === null ? delete next[path] : next[path] = rating);
+    setRatings(next);
+    scheduleLibrarySave(favorites, fileTags, tagNames, next, cullingDecisions);
+  }, [ratings, favorites, fileTags, tagNames, cullingDecisions, scheduleLibrarySave]);
+
+  const batchCulling = useCallback((paths: string[], decision: CullingDecision | null) => {
+    const next = { ...cullingDecisions };
+    paths.forEach(path => decision === null ? delete next[path] : next[path] = decision);
+    setCullingDecisions(next);
+    scheduleLibrarySave(favorites, fileTags, tagNames, ratings, next);
+  }, [cullingDecisions, favorites, fileTags, tagNames, ratings, scheduleLibrarySave]);
+
+  const markCurrentCulling = useCallback((decision: CullingDecision) => {
+    const file = files[currentIndex];
+    if (!file) return;
+    batchCulling([file.path], decision);
+    nextSlide();
+  }, [files, currentIndex, batchCulling, nextSlide]);
 
   const batchDelete = useCallback(async (paths: string[]) => {
     const deleted: string[] = [];
@@ -810,12 +862,12 @@ function App() {
         const action = cullingActionForKey(e.key);
         if (action === 'keep') {
           e.preventDefault();
-          nextSlide();
+          markCurrentCulling('keep');
           return;
         }
         if (action === 'reject') {
           e.preventDefault();
-          deleteCurrentFile();
+          markCurrentCulling('reject');
           return;
         }
       }
@@ -871,7 +923,7 @@ function App() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [nextSlide, prevSlide, togglePlay, deleteCurrentFile, showCurrentInFinder, seekVideoBy, quickMove, toggleFavorite, frameMode, setFrameMode, cullingMode]);
+  }, [nextSlide, prevSlide, togglePlay, deleteCurrentFile, showCurrentInFinder, seekVideoBy, quickMove, toggleFavorite, frameMode, setFrameMode, cullingMode, markCurrentCulling]);
 
   // Update window title
   useEffect(() => {
@@ -910,6 +962,7 @@ function App() {
   const currentFile: MediaFile | null = files.length > 0 ? files[currentIndex] : null;
   const fileUrl = currentFile ? getFileUrl(currentFile.path) : '';
   const currentTransition = slideTransitions[transitionStyle];
+  const healthIssues = useMemo(() => healthIssuesByPath(healthReport), [healthReport]);
 
   // Settings, dedupe, and toasts are available in both states — you can
   // configure the slideshow or hunt duplicates before opening a folder.
@@ -923,6 +976,8 @@ function App() {
         onMediaFilterChange={handleMediaFilterChange}
         isShuffle={isShuffle}
         onToggleShuffle={toggleShuffle}
+        shuffleProgress={shuffleProgress}
+        onResetShuffle={resetShuffleHistory}
         isSmart={isSmart}
         onToggleSmart={() => setIsSmart(!isSmart)}
         isSmartVideoEnabled={isSmartVideoEnabled}
@@ -1005,6 +1060,7 @@ function App() {
 
       <div className={`file-info ${showControls ? 'visible' : ''} ${controlsPosition === 'left' ? 'position-left' : ''}`} style={controlsPosition === 'left' ? {} : { top: '50px' }}>
         {currentIndex + 1} / {files.length}
+        {isShuffle && <span className="shuffle-cycle-label"> · cycle {shuffleProgress.viewed}/{shuffleProgress.total}</span>}
       </div>
 
       {favorites.has(currentFile.path) && (
@@ -1024,12 +1080,17 @@ function App() {
       {cullingMode && (
         <div className="culling-bar" aria-label="Photo culling controls">
           <div className="culling-title"><strong>CULLING</strong><span>{currentIndex + 1} of {files.length}</span></div>
-          <button className="culling-action keep" onClick={nextSlide}><FiCheck /> Keep & Next <kbd>K</kbd></button>
+          <button className={`culling-action keep ${cullingDecisions[currentFile.path] === 'keep' ? 'active' : ''}`} onClick={() => markCurrentCulling('keep')}><FiCheck /> Keep & Next <kbd>K</kbd></button>
           <button className={`culling-action ${favorites.has(currentFile.path) ? 'active' : ''}`} onClick={toggleFavorite}><FiHeart /> Favorite <kbd>H</kbd></button>
+          <div className="culling-rating" aria-label="Star rating">
+            {[1, 2, 3, 4, 5].map(rating => (
+              <button key={rating} className={ratings[currentFile.path] === rating ? 'active' : ''} onClick={() => batchRating([currentFile.path], ratings[currentFile.path] === rating ? null : rating)} aria-label={`${rating} star rating`}>★</button>
+            ))}
+          </div>
           {quickMoveFolders.map((folder, i) => folder && (
             <button key={i} className="culling-action" onClick={() => quickMove(i)} title={folder}><FiFolder /> Move <kbd>{i + 1}</kbd></button>
           ))}
-          <button className="culling-action reject" onClick={deleteCurrentFile}><FiTrash2 /> Reject <kbd>X</kbd></button>
+          <button className={`culling-action reject ${cullingDecisions[currentFile.path] === 'reject' ? 'active' : ''}`} onClick={() => markCurrentCulling('reject')}><FiX /> Reject & Next <kbd>X</kbd></button>
         </div>
       )}
 
@@ -1217,6 +1278,9 @@ function App() {
           favorites={favorites}
           fileTags={fileTags}
           tagNames={tagNames}
+          ratings={ratings}
+          cullingDecisions={cullingDecisions}
+          healthIssues={healthReport ? healthIssues : null}
           quickMoveFolders={quickMoveFolders}
           onSelect={(i) => {
             setDirection(i >= currentIndex ? 1 : -1);
@@ -1226,8 +1290,11 @@ function App() {
           onClose={() => setIsGridOpen(false)}
           onBatchFavorite={batchFavorite}
           onBatchTag={batchTag}
+          onBatchRating={batchRating}
+          onBatchCulling={batchCulling}
           onBatchDelete={batchDelete}
           onBatchMove={batchMove}
+          onScanHealth={openHealthScan}
         />
       )}
 
@@ -1255,6 +1322,9 @@ function App() {
         isOpen={isHealthOpen}
         roots={healthRoots}
         onClose={() => setIsHealthOpen(false)}
+        onReport={setHealthReport}
+        onFilesMoved={handleFilesDeleted}
+        onMetadataRemoved={handleMetadataRemoved}
       />
 
       <Toast message={toast} />

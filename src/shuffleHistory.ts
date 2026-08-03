@@ -37,3 +37,8 @@ export function recordViewed(history: ShuffleHistory, key: string, path: string)
     return { ...history, [key]: [...current, path] };
 }
 
+export function getShuffleProgress<T extends { path: string }>(items: T[], viewedPaths: string[]): { viewed: number; total: number } {
+    const eligible = new Set(items.map(item => item.path));
+    const viewed = new Set(viewedPaths.filter(path => eligible.has(path)));
+    return { viewed: viewed.size, total: eligible.size };
+}

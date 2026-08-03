@@ -27,9 +27,14 @@ interface LibraryMeta {
     favorites: string[];
     tags: Record<string, string[]>;
     tagNames: string[];
+    ratings: Record<string, number>;
+    culling: Record<string, CullingDecision>;
 }
 
+type CullingDecision = 'keep' | 'reject';
+
 type LibraryHealthCategory = 'corrupt' | 'tiny' | 'unsupported' | 'missing-date' | 'orphan-sidecar';
+type LibraryHealthRepairAction = 'remove-orphans' | 'quarantine-corrupt';
 
 interface LibraryHealthIssue {
     category: LibraryHealthCategory;
@@ -42,6 +47,11 @@ interface LibraryHealthReport {
     scannedFiles: number;
     issues: LibraryHealthIssue[];
     summary: Record<LibraryHealthCategory, number>;
+}
+
+interface QuarantinedFile {
+    source: string;
+    destination: string;
 }
 
 interface Window {
@@ -61,6 +71,12 @@ interface Window {
         libraryLoad: (roots: string[]) => Promise<LibraryMeta>;
         librarySave: (roots: string[], meta: LibraryMeta) => Promise<void>;
         scanLibraryHealth: (roots: string[]) => Promise<LibraryHealthReport>;
+        repairLibraryHealth: (
+            roots: string[],
+            action: 'remove-orphans' | 'quarantine-corrupt',
+            paths?: string[],
+        ) => Promise<{ removed: string[]; quarantined: QuarantinedFile[] }>;
+        exportLibraryHealth: (report: LibraryHealthReport) => Promise<string | null>;
         setRemoteEnabled: (enabled: boolean) => Promise<string | null>;
         sendRemoteStatus: (status: {
             name: string | null; index: number | null; total: number;

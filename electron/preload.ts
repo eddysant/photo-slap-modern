@@ -20,6 +20,8 @@ contextBridge.exposeInMainWorld('api', {
   libraryLoad: (roots: string[]) => ipcRenderer.invoke('library:load', roots),
   librarySave: (roots: string[], meta: unknown) => ipcRenderer.invoke('library:save', roots, meta),
   scanLibraryHealth: (roots: string[]) => ipcRenderer.invoke('library:health', roots),
+  repairLibraryHealth: (roots: string[], action: 'remove-orphans' | 'quarantine-corrupt', paths?: string[]) => ipcRenderer.invoke('library:health:repair', roots, action, paths),
+  exportLibraryHealth: (report: unknown) => ipcRenderer.invoke('library:health:export', report),
   setRemoteEnabled: (enabled: boolean) => ipcRenderer.invoke('remote:setEnabled', enabled),
   sendRemoteStatus: (status: unknown) => ipcRenderer.send('remote:status', status),
   setPowerBlocked: (blocked: boolean) => ipcRenderer.invoke('power:setBlocked', blocked),

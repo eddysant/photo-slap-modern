@@ -22,6 +22,11 @@ export interface LibraryHealthReport {
     summary: Record<LibraryHealthCategory, number>;
 }
 
+export interface QuarantinedFile {
+    source: string;
+    destination: string;
+}
+
 const UNSUPPORTED_MEDIA_EXTENSIONS = new Set([
     '.avif', '.jfif', '.jxl', '.svg', '.tif', '.tiff',
     '.3gp', '.avi', '.m2ts', '.m4v', '.mkv', '.mov', '.mts', '.wmv',
@@ -151,7 +156,12 @@ export async function scanLibraryHealth(roots: string[]): Promise<LibraryHealthR
     await Promise.all(Array.from({ length: Math.min(8, Math.max(1, supported.length)) }, inspectWorker));
 
     const meta = await loadLibraryMeta(normalizedRoots);
-    const sidecarPaths = new Set([...meta.favorites, ...Object.keys(meta.tags)]);
+    const sidecarPaths = new Set([
+        ...meta.favorites,
+        ...Object.keys(meta.tags),
+        ...Object.keys(meta.ratings),
+        ...Object.keys(meta.culling),
+    ]);
     await Promise.all([...sidecarPaths].map(async filePath => {
         try {
             await fs.access(filePath);
@@ -166,3 +176,57 @@ export async function scanLibraryHealth(roots: string[]): Promise<LibraryHealthR
     return { roots: normalizedRoots, scannedFiles: supported.length, issues, summary };
 }
 
+const isUnder = (root: string, filePath: string) => filePath === root || filePath.startsWith(root + path.sep);
+
+async function unusedDestination(requested: string): Promise<string> {
+    const parsed = path.parse(requested);
+    let candidate = requested;
+    for (let suffix = 2; ; suffix++) {
+        try {
+            await fs.access(candidate);
+            candidate = path.join(parsed.dir, `${parsed.name}-${suffix}${parsed.ext}`);
+        } catch {
+            return candidate;
+        }
+    }
+}
+
+/** Move selected files into a hidden quarantine folder within their library root. */
+export async function quarantineCorruptFiles(roots: string[], filePaths: string[]): Promise<QuarantinedFile[]> {
+    const normalizedRoots = [...new Set(roots.map(root => path.resolve(root)))].sort((a, b) => b.length - a.length);
+    const results: QuarantinedFile[] = [];
+    for (const requested of [...new Set(filePaths)]) {
+        const source = path.resolve(requested);
+        const root = normalizedRoots.find(candidate => isUnder(candidate, source));
+        if (!root || source.includes(`${path.sep}.photo-slap-quarantine${path.sep}`)) continue;
+        let stat;
+        try {
+            stat = await fs.stat(source);
+        } catch {
+            continue;
+        }
+        if (!stat.isFile()) continue;
+        const relative = path.relative(root, source);
+        const destination = await unusedDestination(path.join(root, '.photo-slap-quarantine', relative));
+        await fs.mkdir(path.dirname(destination), { recursive: true });
+        try {
+            await fs.rename(source, destination);
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error;
+            await fs.copyFile(source, destination);
+            await fs.unlink(source);
+        }
+        results.push({ source, destination });
+    }
+    return results;
+}
+
+const csvCell = (value: string | number) => `"${String(value).replace(/"/g, '""')}"`;
+
+export function healthReportToCsv(report: LibraryHealthReport): string {
+    const lines = [
+        ['category', 'path', 'detail'].map(csvCell).join(','),
+        ...report.issues.map(issue => [issue.category, issue.path, issue.detail].map(csvCell).join(',')),
+    ];
+    return `${lines.join('\n')}\n`;
+}

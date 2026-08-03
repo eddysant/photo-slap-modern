@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { makeShuffleHistoryKey, orderForNoRepeatShuffle, recordViewed } from '../src/shuffleHistory';
+import { getShuffleProgress, makeShuffleHistoryKey, orderForNoRepeatShuffle, recordViewed } from '../src/shuffleHistory';
 
 const files = ['a', 'b', 'c', 'd'].map(path => ({ path }));
 
@@ -25,5 +25,9 @@ describe('no-repeat shuffle', () => {
         expect(recordViewed(once, key, 'a')).toBe(once);
         expect(once[key]).toEqual(['a']);
     });
-});
 
+    it('reports unique eligible progress and ignores stale history', () => {
+        expect(getShuffleProgress(files, ['a', 'a', 'c', 'missing'])).toEqual({ viewed: 2, total: 4 });
+        expect(getShuffleProgress(files, [])).toEqual({ viewed: 0, total: 4 });
+    });
+});

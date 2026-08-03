@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import sharp from 'sharp';
-import { scanLibraryHealth } from '../electron/libraryHealth';
+import { healthReportToCsv, quarantineCorruptFiles, scanLibraryHealth } from '../electron/libraryHealth';
 import { SIDECAR_NAME } from '../electron/libraryMeta';
 
 describe('library health scan', () => {
@@ -36,5 +36,23 @@ describe('library health scan', () => {
         expect(report.issues.some(i => i.category === 'missing-date' && i.path.endsWith('tiny.png'))).toBe(true);
         expect(report.summary['orphan-sidecar']).toBe(2);
     });
-});
 
+    it('moves corrupt files into a hidden quarantine tree', async () => {
+        const broken = path.join(root, 'broken.jpg');
+        const result = await quarantineCorruptFiles([root], [broken]);
+        expect(result).toHaveLength(1);
+        expect(result[0].destination).toContain(`${path.sep}.photo-slap-quarantine${path.sep}`);
+        await expect(fs.access(broken)).rejects.toThrow();
+        await expect(fs.access(result[0].destination)).resolves.toBeUndefined();
+    });
+
+    it('exports a CSV with safely quoted cells', () => {
+        const csv = healthReportToCsv({
+            roots: ['/lib'], scannedFiles: 1,
+            issues: [{ category: 'corrupt', path: '/lib/a,b.jpg', detail: 'Could not read "header"' }],
+            summary: { corrupt: 1, tiny: 0, unsupported: 0, 'missing-date': 0, 'orphan-sidecar': 0 },
+        });
+        expect(csv).toContain('"/lib/a,b.jpg"');
+        expect(csv).toContain('"Could not read ""header"""');
+    });
+});

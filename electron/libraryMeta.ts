@@ -16,6 +16,8 @@ import glob from 'fast-glob';
 
 export const SIDECAR_NAME = '.photo-slap.json';
 
+export type CullingDecision = 'keep' | 'reject';
+
 export interface LibraryMeta {
     /** Absolute paths of favorited files. */
     favorites: string[];
@@ -23,6 +25,10 @@ export interface LibraryMeta {
     tags: Record<string, string[]>;
     /** The tag vocabulary (quick-pick list), shared across the library. */
     tagNames: string[];
+    /** Absolute path → 1–5 star rating. */
+    ratings: Record<string, number>;
+    /** Absolute path → culling decision; absent means unreviewed. */
+    culling: Record<string, CullingDecision>;
 }
 
 interface SidecarData {
@@ -30,6 +36,8 @@ interface SidecarData {
     favorites?: string[];
     tags?: Record<string, string[]>;
     tagNames?: string[];
+    ratings?: Record<string, number>;
+    culling?: Record<string, CullingDecision>;
 }
 
 export interface Sidecar {
@@ -45,6 +53,8 @@ export function mergeSidecars(sidecars: Sidecar[]): LibraryMeta {
     const favoriteByPath = new Map<string, boolean>();
     const tags: Record<string, string[]> = {};
     const tagNames = new Set<string>();
+    const ratings: Record<string, number> = {};
+    const culling: Record<string, CullingDecision> = {};
 
     for (const { dir, data } of sorted) {
         for (const rel of data.favorites ?? []) {
@@ -54,12 +64,20 @@ export function mergeSidecars(sidecars: Sidecar[]): LibraryMeta {
             tags[path.resolve(dir, rel)] = fileTags;
         }
         for (const name of data.tagNames ?? []) tagNames.add(name);
+        for (const [rel, rating] of Object.entries(data.ratings ?? {})) {
+            if (Number.isInteger(rating) && rating >= 1 && rating <= 5) ratings[path.resolve(dir, rel)] = rating;
+        }
+        for (const [rel, decision] of Object.entries(data.culling ?? {})) {
+            if (decision === 'keep' || decision === 'reject') culling[path.resolve(dir, rel)] = decision;
+        }
     }
 
     return {
         favorites: [...favoriteByPath.keys()].sort(),
         tags,
         tagNames: [...tagNames].sort(),
+        ratings,
+        culling,
     };
 }
 
@@ -104,9 +122,14 @@ export async function saveLibraryMeta(roots: string[], meta: LibraryMeta): Promi
             .sort((a, b) => b.length - a.length);
         const ownerOf = (p: string) => dirs.find(d => isUnder(d, p)) ?? resolvedRoot;
 
-        const buckets = new Map<string, { favorites: string[]; tags: Record<string, string[]> }>();
+        const buckets = new Map<string, {
+            favorites: string[];
+            tags: Record<string, string[]>;
+            ratings: Record<string, number>;
+            culling: Record<string, CullingDecision>;
+        }>();
         const bucketFor = (dir: string) => {
-            if (!buckets.has(dir)) buckets.set(dir, { favorites: [], tags: {} });
+            if (!buckets.has(dir)) buckets.set(dir, { favorites: [], tags: {}, ratings: {}, culling: {} });
             return buckets.get(dir)!;
         };
 
@@ -120,11 +143,24 @@ export async function saveLibraryMeta(roots: string[], meta: LibraryMeta): Promi
             const dir = ownerOf(filePath);
             bucketFor(dir).tags[path.relative(dir, filePath)] = fileTags;
         }
+        for (const [filePath, rating] of Object.entries(meta.ratings ?? {})) {
+            if (!isUnder(resolvedRoot, filePath) || !Number.isInteger(rating) || rating < 1 || rating > 5) continue;
+            const dir = ownerOf(filePath);
+            bucketFor(dir).ratings[path.relative(dir, filePath)] = rating;
+        }
+        for (const [filePath, decision] of Object.entries(meta.culling ?? {})) {
+            if (!isUnder(resolvedRoot, filePath) || (decision !== 'keep' && decision !== 'reject')) continue;
+            const dir = ownerOf(filePath);
+            bucketFor(dir).culling[path.relative(dir, filePath)] = decision;
+        }
 
         const existingDirs = new Set(existingFiles.map(f => path.dirname(f)));
         for (const dir of dirs) {
             const bucket = buckets.get(dir);
-            const hasContent = !!bucket && (bucket.favorites.length > 0 || Object.keys(bucket.tags).length > 0);
+            const hasContent = !!bucket && (
+                bucket.favorites.length > 0 || Object.keys(bucket.tags).length > 0 ||
+                Object.keys(bucket.ratings).length > 0 || Object.keys(bucket.culling).length > 0
+            );
             // Don't litter folders with empty sidecars; but rewrite existing
             // ones even when emptied so unfavorites/untags actually persist.
             if (!hasContent && !existingDirs.has(dir)) continue;
@@ -134,8 +170,45 @@ export async function saveLibraryMeta(roots: string[], meta: LibraryMeta): Promi
                 favorites: (bucket?.favorites ?? []).sort(),
                 tags: bucket?.tags ?? {},
                 tagNames: [...meta.tagNames].sort(),
+                ratings: bucket?.ratings ?? {},
+                culling: bucket?.culling ?? {},
             };
             await fs.writeFile(path.join(dir, SIDECAR_NAME), JSON.stringify(data, null, 2));
         }
     }
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+    try {
+        await fs.access(filePath);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+/** Remove every metadata entry whose target no longer exists. */
+export async function removeOrphanedLibraryMeta(roots: string[]): Promise<string[]> {
+    const meta = await loadLibraryMeta(roots);
+    const referenced = new Set([
+        ...meta.favorites,
+        ...Object.keys(meta.tags),
+        ...Object.keys(meta.ratings),
+        ...Object.keys(meta.culling),
+    ]);
+    const existing = new Set<string>();
+    await Promise.all([...referenced].map(async filePath => {
+        if (await pathExists(filePath)) existing.add(filePath);
+    }));
+    const removed = [...referenced].filter(filePath => !existing.has(filePath)).sort();
+    if (removed.length === 0) return removed;
+
+    await saveLibraryMeta(roots, {
+        favorites: meta.favorites.filter(filePath => existing.has(filePath)),
+        tags: Object.fromEntries(Object.entries(meta.tags).filter(([filePath]) => existing.has(filePath))),
+        tagNames: meta.tagNames,
+        ratings: Object.fromEntries(Object.entries(meta.ratings).filter(([filePath]) => existing.has(filePath))),
+        culling: Object.fromEntries(Object.entries(meta.culling).filter(([filePath]) => existing.has(filePath))),
+    });
+    return removed;
 }

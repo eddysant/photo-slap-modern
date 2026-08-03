@@ -14,7 +14,7 @@ By [Eddy Sant](https://github.com/eddysant), built with AI assistance.
 - **Transitions** — Fade, Slide, Zoom, Flip, and a classic **Star Wipe** (the new slide is revealed through a growing star over the old one). Directional transitions mirror when you navigate backwards.
 - **Ken Burns effect** — slow random pan/zoom on photos.
 - **Smart Background** — blurred, darkened copy of the current media fills the letterbox area (optionally for videos too).
-- **Media filtering & no-repeat shuffle** — photos only / videos only / both, natural filename sort, or a shuffle that remembers viewed media per library and filter across app restarts. Nothing repeats until the active set completes a full cycle.
+- **Media filtering & no-repeat shuffle** — photos only / videos only / both, natural filename sort, or a shuffle that remembers viewed media per library and filter across app restarts. Nothing repeats until the active set completes a full cycle; the viewer and Options panel show cycle progress, with an explicit reset control.
 - **Video controls** — scrubber, volume, mute, click-to-pause.
 - **EXIF overlay** — camera, lens, ISO, aperture, shutter speed, and date for photos.
 - **Duplicate finder** — one strictness slider from **Exact** (byte-for-byte, SHA-256) through **Strict / Normal / Loose** perceptual matching (16×16 blockhash + Hamming distance, computed in a Web Worker), each level explained in plain language. Optionally includes videos: byte-identical at Exact, matched by a sampled frame at similarity levels (catches re-encoded copies). Scans **all folders of the session at once**, so duplicates across folders group together. The side-by-side review shows filename, folder, file size, and dimensions — with the larger file/resolution highlighted — and walks through groups of any size. Deletions update the running slideshow immediately. Available straight from the start screen with its own folder picker.
@@ -24,15 +24,15 @@ By [Eddy Sant](https://github.com/eddysant), built with AI assistance.
 - **Safe media serving** — files are streamed over a custom `media://` protocol restricted to folders you've opened; Chromium web security stays fully enabled.
 - **Safe delete** — files are moved to the system Trash, never hard-deleted.
 - **Open a folder from the command line** — `photo-slap ~/Pictures/vacation` (or `PHOTO_SLAP_DIR=... npm run dev` during development).
-- **Grid view** — press `G` for a virtualized thumbnail grid (smooth even with tens of thousands of photos) with filename, favorites, and tag filters. Click a cell to jump there, or flip on **Select** mode to batch favorite/tag/move/delete.
+- **Grid view** — press `G` for a virtualized thumbnail grid (smooth even with tens of thousands of photos). Filename, tag, favorite, health, 1–5 star rating, and culling-decision filters compose simultaneously. Select mode can batch-update favorites, tags, ratings, decisions, moves, or deletion.
 - **Photo-frame mode** — press `P` for an ambient overlay with a clock, date, and the photo's capture date and tags. Pair with **Auto-Play On Open** and Send to Display to turn a spare screen into a photo frame.
-- **Photo culling mode** — a paused, photos-only review workspace with an always-visible action bar. Press `K` or `Enter` to keep and advance, `H` to favorite, `X` to move a reject to Trash, or `1`–`3` to file it into a quick-move folder.
+- **Photo culling mode** — a paused, photos-only review workspace with an always-visible action bar. Press `K` or `Enter` to record Keep, `X` to record Reject, assign a 1–5 star rating, `H` to favorite, or `1`–`3` to file it into a quick-move folder. Keep/Reject decisions are non-destructive and persist in the library sidecar; Trash remains a separate action.
 - **Phone remote** — enable *Phone Remote (LAN)* in Settings and scan the QR code: your phone shows a live thumbnail of the current slide (swipe it to navigate) with play/favorite controls. Token-guarded, works anywhere on your Wi-Fi — perfect while casting to a TV.
 - **Party mode** — anyone who scans the QR can tap emoji **reactions** that float up over the show, and **upload their own photos** straight from their phone browser; uploads land in a `guests/` folder inside your library and join the running slideshow immediately. Uploads are extension-whitelisted, size-capped, and never overwrite existing files.
 - **Built for big libraries** — display-sized image serving with a capped derivation queue, virtualized grid, and collator-based sorting: a 5,000-photo library opens in about a second and the grid stays at ~50 DOM nodes regardless of library size.
-- **Favorites & tags** — `H` hearts a photo, `T` opens a quick-tag editor with your reusable tag vocabulary; filter the slideshow to favorites or a tag from Settings. Stored in `.photo-slap.json` sidecar files *next to your photos* (relative paths, so folders can move), not in the app — opening a parent folder picks up and merges sidecars saved in subfolders.
+- **Favorites, tags, ratings & decisions** — `H` hearts a photo, `T` opens a quick-tag editor, while the grid and culling bar handle ratings and Keep/Reject decisions. Stored in `.photo-slap.json` sidecar files *next to your photos* (relative paths, so folders can move), not in the app — opening a parent folder picks up and merges sidecars saved in subfolders.
 - **Quick-move folders** — assign up to three target folders in Settings, then press `1`/`2`/`3` to move the current file there. Combined with `Delete`, it makes triaging a photo dump fast.
-- **Library health scan** — checks opened or selected libraries for corrupt/unreadable media, suspiciously tiny images (under 320 px or 10 KB), unsupported media formats, photos without embedded capture dates, and sidecar favorites/tags that point to missing files. Results are filterable and can be revealed in Finder/Explorer.
+- **Library health scan & repairs** — checks opened or selected libraries for corrupt/unreadable media, suspiciously tiny images (under 320 px or 10 KB), unsupported media formats, photos without embedded capture dates, and sidecar entries that point to missing files. Results are filterable, exportable as CSV, and can repair orphan entries or move corrupt files into a hidden `.photo-slap-quarantine` folder while preserving their relative paths.
 - **Keyboard shortcuts** — `←`/`→` previous/next, `Space` play/pause, `G` grid, `P` photo frame, `H` favorite, `T` tags, `K`/`Enter` culling keep, `X` culling reject, `F` reveal in Finder, `M`/`N` video ±10 seconds, `1`–`3` quick-move, `Delete`/`Backspace` delete, `Esc` close overlays. All of them are listed in the **Actions** menu in the menu bar.
 - **Slide timer bar** — a thin progress bar shows when the next slide lands (can be hidden in Settings).
 - **Updates** — the app checks GitHub Releases on launch (and via *photo-slap → Check for Updates…*) and points you at new versions. Unsigned builds can't self-install, so it opens the download page.
@@ -41,6 +41,15 @@ By [Eddy Sant](https://github.com/eddysant), built with AI assistance.
 - **Resume where you left off** — the intro screen's Resume button reopens the last folder at the slide you were on.
 
 Supported formats: `.jpg` `.jpeg` `.png` `.webp` `.gif` `.bmp` `.heic` `.heif` (images), `.mp4` `.webm` `.ogg` `.gifv` (videos).
+
+## Installing with Homebrew
+
+```bash
+brew tap eddysant/tap
+brew install --cask photo-slap
+```
+
+The Cask is published from [eddysant/homebrew-tap](https://github.com/eddysant/homebrew-tap) and follows the latest GitHub Release. The current macOS package supports Apple Silicon.
 
 ## Installing from GitHub Releases
 

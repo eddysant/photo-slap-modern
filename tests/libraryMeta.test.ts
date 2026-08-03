@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { mergeSidecars, loadLibraryMeta, saveLibraryMeta, SIDECAR_NAME } from '../electron/libraryMeta';
+import { mergeSidecars, loadLibraryMeta, removeOrphanedLibraryMeta, saveLibraryMeta, SIDECAR_NAME } from '../electron/libraryMeta';
 
 describe('mergeSidecars', () => {
     it('resolves relative paths against each sidecar directory', () => {
@@ -27,6 +27,14 @@ describe('mergeSidecars', () => {
         ]);
         expect(meta.tagNames).toEqual(['beach', 'family']);
     });
+
+    it('merges valid ratings and culling decisions', () => {
+        const meta = mergeSidecars([
+            { dir: '/lib', data: { version: 1, ratings: { 'a.jpg': 5, 'bad.jpg': 7 }, culling: { 'a.jpg': 'keep', 'b.jpg': 'reject' } } },
+        ]);
+        expect(meta.ratings).toEqual({ [path.resolve('/lib/a.jpg')]: 5 });
+        expect(meta.culling).toEqual({ [path.resolve('/lib/a.jpg')]: 'keep', [path.resolve('/lib/b.jpg')]: 'reject' });
+    });
 });
 
 describe('save/load round trip', () => {
@@ -48,6 +56,8 @@ describe('save/load round trip', () => {
             favorites: [path.join(root, 'a.jpg')],
             tags: { [path.join(root, 'sub', 'b.jpg')]: ['beach'] },
             tagNames: ['beach'],
+            ratings: { [path.join(root, 'a.jpg')]: 4 },
+            culling: { [path.join(root, 'sub', 'b.jpg')]: 'keep' as const },
         };
         await saveLibraryMeta([root], meta);
 
@@ -55,6 +65,8 @@ describe('save/load round trip', () => {
         expect(loaded.favorites).toEqual([path.join(root, 'a.jpg')]);
         expect(loaded.tags[path.join(root, 'sub', 'b.jpg')]).toEqual(['beach']);
         expect(loaded.tagNames).toEqual(['beach']);
+        expect(loaded.ratings[path.join(root, 'a.jpg')]).toBe(4);
+        expect(loaded.culling[path.join(root, 'sub', 'b.jpg')]).toBe('keep');
     });
 
     it('opening a parent picks up a sidecar saved in a subfolder', async () => {
@@ -63,6 +75,7 @@ describe('save/load round trip', () => {
             favorites: [path.join(root, 'sub', 'b.jpg')],
             tags: {},
             tagNames: ['old-tag'],
+            ratings: {}, culling: {},
         });
 
         const loaded = await loadLibraryMeta([root]);
@@ -76,6 +89,7 @@ describe('save/load round trip', () => {
             favorites: [path.join(root, 'sub', 'b.jpg')],
             tags: {},
             tagNames: [],
+            ratings: {}, culling: {},
         });
 
         // Open the parent, unfavorite b, favorite a
@@ -83,6 +97,7 @@ describe('save/load round trip', () => {
             favorites: [path.join(root, 'a.jpg')],
             tags: {},
             tagNames: [],
+            ratings: {}, culling: {},
         });
 
         const loaded = await loadLibraryMeta([root]);
@@ -94,7 +109,18 @@ describe('save/load round trip', () => {
     });
 
     it('does not litter folders that have nothing to record', async () => {
-        await saveLibraryMeta([root], { favorites: [], tags: {}, tagNames: [] });
+        await saveLibraryMeta([root], { favorites: [], tags: {}, tagNames: [], ratings: {}, culling: {} });
         await expect(fs.access(path.join(root, SIDECAR_NAME))).rejects.toThrow();
+    });
+
+    it('removes orphaned entries from every metadata collection', async () => {
+        const missing = path.join(root, 'gone.jpg');
+        await saveLibraryMeta([root], {
+            favorites: [missing], tags: { [missing]: ['gone'] }, tagNames: ['gone'],
+            ratings: { [missing]: 1 }, culling: { [missing]: 'reject' },
+        });
+        expect(await removeOrphanedLibraryMeta([root])).toEqual([missing]);
+        const loaded = await loadLibraryMeta([root]);
+        expect(loaded).toEqual({ favorites: [], tags: {}, tagNames: ['gone'], ratings: {}, culling: {} });
     });
 });
