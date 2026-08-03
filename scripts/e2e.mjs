@@ -204,6 +204,18 @@ try {
 
     console.log('star wipe');
     const wipe = await cdp.evaluate(`(async () => {
+        // The settings drawer is now sectioned and animated. Open it once and
+        // wait for the persisted transition control to confirm hydration.
+        document.querySelector('button[title="Settings"]').click();
+        let configured = false;
+        for (let i = 0; i < 20; i++) {
+            const select = [...document.querySelectorAll('select')]
+                .find(s => [...s.options].some(o => o.value === 'star'));
+            if (select?.value === 'star') { configured = true; break; }
+            await new Promise(r => setTimeout(r, 100));
+        }
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+        await new Promise(r => setTimeout(r, 400));
         // Warm-up transition: the very first slide mounted under the default
         // transition (settings hydrate async), so it has no star clip yet.
         window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' }));
@@ -215,9 +227,10 @@ try {
             const slides = document.querySelectorAll('.viewer-container > div');
             samples.push({ mounted: slides.length, clips: [...slides].map(el => getComputedStyle(el).clipPath) });
         }
-        return JSON.stringify(samples);
+        return JSON.stringify({ configured, samples });
     })()`).then(JSON.parse);
-    const midWipe = wipe.filter(s => s.mounted === 2);
+    check('star transition setting hydrated', wipe.configured);
+    const midWipe = wipe.samples.filter(s => s.mounted === 2);
     const incoming = midWipe.map(s => s.clips[1]).filter(c => c?.startsWith('polygon'));
     check('both slides mounted during the wipe', midWipe.length >= 5, `${midWipe.length}/9 samples`);
     check('incoming clip-path interpolates', new Set(incoming).size >= 4, `${new Set(incoming).size} distinct shapes`);
@@ -255,8 +268,8 @@ try {
             const xs = [];
             for (let i = 0; i < 6; i++) {
                 await sleep(45);
-                const el = document.querySelector('.viewer-container > div');
-                if (el) xs.push(new DOMMatrix(getComputedStyle(el).transform).m41);
+                const els = document.querySelectorAll('.viewer-container > div');
+                for (const el of els) xs.push(new DOMMatrix(getComputedStyle(el).transform).m41);
             }
             return xs;
         };
@@ -458,7 +471,7 @@ try {
         const sleep = ms => new Promise(r => setTimeout(r, ms));
         document.querySelector('button[title="Settings"]').click();
         await sleep(400);
-        const label = [...document.querySelectorAll('.checkbox-control')].find(l => l.textContent.includes('Phone Remote'));
+        const label = [...document.querySelectorAll('.checkbox-control')].find(l => l.textContent.toLowerCase().includes('phone remote'));
         label.querySelector('input').click();
         for (let i = 0; i < 25 && !document.querySelector('.remote-url'); i++) await sleep(200);
         const url = document.querySelector('.remote-url')?.textContent ?? '';
@@ -502,7 +515,8 @@ try {
     console.log('dedupe (worker + transitive groups + slideshow refresh)');
     const dedupe = await cdp.evaluate(`(async () => {
         const sleep = ms => new Promise(r => setTimeout(r, ms));
-        const btnByText = txt => [...document.querySelectorAll('button')].find(b => b.textContent.includes(txt));
+        const btnByText = txt => [...document.querySelectorAll('button')]
+            .find(b => b.textContent.toUpperCase().includes(txt.toUpperCase()));
         const before = document.querySelector('.file-info')?.textContent;
         document.querySelector('button[title="Settings"]').click();
         await sleep(500);

@@ -12,6 +12,7 @@ import decodeHeic from 'heic-decode'
 import { scanDirectory } from './fileScanner'
 import { findExactDuplicates, scanFiles } from './dedupe'
 import { loadLibraryMeta, saveLibraryMeta, LibraryMeta } from './libraryMeta'
+import { scanLibraryHealth } from './libraryHealth'
 import { startRemoteServer, stopRemoteServer, getRemoteUrl, RemoteStatus } from './remoteServer'
 import ExifReader from 'exifreader';
 
@@ -459,6 +460,8 @@ function buildApplicationMenu() {
         { type: 'separator' },
         action('Toggle Favorite', 'H', 'favorite'),
         action('Edit Tags', 'T', 'tags'),
+        action('Culling: Keep & Next', 'K', 'next'),
+        action('Culling: Reject to Trash', 'X', 'delete'),
         { type: 'separator' },
         action('Video: Skip Forward 10s', 'M', 'seek-forward'),
         action('Video: Skip Back 10s', 'N', 'seek-back'),
@@ -756,6 +759,10 @@ ipcMain.handle('library:load', async (_event, roots: string[]) => {
 
 ipcMain.handle('library:save', async (_event, roots: string[], meta: LibraryMeta) => {
   await saveLibraryMeta(roots, meta);
+});
+
+ipcMain.handle('library:health', async (_event, roots: string[]) => {
+  return await scanLibraryHealth(roots);
 });
 
 // Basic file stats for the dedupe compare cards

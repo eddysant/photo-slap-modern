@@ -1,0 +1,76 @@
+import { useEffect, useMemo, useState } from 'react';
+import { FiActivity, FiFolder, FiX } from 'react-icons/fi';
+
+interface LibraryHealthModalProps {
+    isOpen: boolean;
+    roots: string[];
+    onClose: () => void;
+}
+
+const CATEGORY_LABELS: Record<LibraryHealthCategory, string> = {
+    corrupt: 'Corrupt / unreadable',
+    tiny: 'Suspiciously tiny',
+    unsupported: 'Unsupported media',
+    'missing-date': 'Missing capture date',
+    'orphan-sidecar': 'Orphaned sidecar entry',
+};
+
+export function LibraryHealthModal({ isOpen, roots, onClose }: LibraryHealthModalProps) {
+    const [report, setReport] = useState<LibraryHealthReport | null>(null);
+    const [error, setError] = useState<string | null>(null);
+    const [activeCategory, setActiveCategory] = useState<LibraryHealthCategory | 'all'>('all');
+
+    useEffect(() => {
+        if (!isOpen || roots.length === 0) return;
+        let cancelled = false;
+        setReport(null);
+        setError(null);
+        setActiveCategory('all');
+        window.api.scanLibraryHealth(roots)
+            .then(result => { if (!cancelled) setReport(result); })
+            .catch(() => { if (!cancelled) setError('The library health scan could not be completed.'); });
+        return () => { cancelled = true; };
+    }, [isOpen, roots]);
+
+    const shown = useMemo(() => report?.issues.filter(issue => activeCategory === 'all' || issue.category === activeCategory) ?? [], [report, activeCategory]);
+    if (!isOpen) return null;
+
+    return (
+        <div className="health-overlay" role="dialog" aria-modal="true" aria-label="Library health">
+            <div className="health-modal">
+                <header className="health-header">
+                    <div><FiActivity /><span>Library Health</span></div>
+                    <button className="control-btn" onClick={onClose} aria-label="Close library health"><FiX size={22} /></button>
+                </header>
+                {!report && !error && <div className="health-loading"><div className="loading-spinner" /><p>Inspecting media and sidecars…</p></div>}
+                {error && <div className="health-loading"><p>{error}</p></div>}
+                {report && (
+                    <>
+                        <div className="health-summary">
+                            <button className={activeCategory === 'all' ? 'active' : ''} onClick={() => setActiveCategory('all')}><strong>{report.issues.length}</strong><span>All issues</span></button>
+                            {(Object.keys(CATEGORY_LABELS) as LibraryHealthCategory[]).map(category => (
+                                <button key={category} className={activeCategory === category ? 'active' : ''} onClick={() => setActiveCategory(category)}>
+                                    <strong>{report.summary[category]}</strong><span>{CATEGORY_LABELS[category]}</span>
+                                </button>
+                            ))}
+                        </div>
+                        <div className="health-scan-note">Scanned {report.scannedFiles} supported media file{report.scannedFiles === 1 ? '' : 's'} in {report.roots.length} root{report.roots.length === 1 ? '' : 's'}.</div>
+                        <div className="health-issues">
+                            {shown.length === 0 ? <div className="health-clear">No issues in this category.</div> : shown.map((issue, i) => (
+                                <div className="health-issue" key={`${issue.category}-${issue.path}-${i}`}>
+                                    <div className="health-issue-copy">
+                                        <span className={`health-badge ${issue.category}`}>{CATEGORY_LABELS[issue.category]}</span>
+                                        <strong title={issue.path}>{issue.path.split(/[/\\]/).pop()}</strong>
+                                        <small title={issue.path}>{issue.path}</small>
+                                        <p>{issue.detail}</p>
+                                    </div>
+                                    <button className="control-btn" onClick={() => window.api.showInFolder(issue.path)} title="Show in folder"><FiFolder /></button>
+                                </div>
+                            ))}
+                        </div>
+                    </>
+                )}
+            </div>
+        </div>
+    );
+}

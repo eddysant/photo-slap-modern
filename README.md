@@ -14,23 +14,26 @@ By [Eddy Sant](https://github.com/eddysant), built with AI assistance.
 - **Transitions** — Fade, Slide, Zoom, Flip, and a classic **Star Wipe** (the new slide is revealed through a growing star over the old one). Directional transitions mirror when you navigate backwards.
 - **Ken Burns effect** — slow random pan/zoom on photos.
 - **Smart Background** — blurred, darkened copy of the current media fills the letterbox area (optionally for videos too).
-- **Media filtering & shuffle** — photos only / videos only / both, natural filename sort, or Fisher-Yates shuffle.
+- **Media filtering & no-repeat shuffle** — photos only / videos only / both, natural filename sort, or a shuffle that remembers viewed media per library and filter across app restarts. Nothing repeats until the active set completes a full cycle.
 - **Video controls** — scrubber, volume, mute, click-to-pause.
 - **EXIF overlay** — camera, lens, ISO, aperture, shutter speed, and date for photos.
 - **Duplicate finder** — one strictness slider from **Exact** (byte-for-byte, SHA-256) through **Strict / Normal / Loose** perceptual matching (16×16 blockhash + Hamming distance, computed in a Web Worker), each level explained in plain language. Optionally includes videos: byte-identical at Exact, matched by a sampled frame at similarity levels (catches re-encoded copies). Scans **all folders of the session at once**, so duplicates across folders group together. The side-by-side review shows filename, folder, file size, and dimensions — with the larger file/resolution highlighted — and walks through groups of any size. Deletions update the running slideshow immediately. Available straight from the start screen with its own folder picker.
-- **Settings everywhere** — the options panel opens from the control bar, the start screen, or the app menu (`Cmd+,`), so the slideshow can be configured before opening a folder.
+- **Named settings presets** — one click configures the app for **Photo Frame**, **Party**, **Culling**, or **TV** use. Presets are starting points; every setting remains independently adjustable.
+- **Settings everywhere** — the wider, sectioned options panel groups library order, presentation, playback, review, and library tools. It opens from the control bar, start screen, or app menu (`Cmd+,`).
 - **HEIC support** — iPhone photos are transcoded to JPEG on the fly (WASM HEVC decode + sharp encode in the main process).
 - **Safe media serving** — files are streamed over a custom `media://` protocol restricted to folders you've opened; Chromium web security stays fully enabled.
 - **Safe delete** — files are moved to the system Trash, never hard-deleted.
 - **Open a folder from the command line** — `photo-slap ~/Pictures/vacation` (or `PHOTO_SLAP_DIR=... npm run dev` during development).
 - **Grid view** — press `G` for a virtualized thumbnail grid (smooth even with tens of thousands of photos) with filename, favorites, and tag filters. Click a cell to jump there, or flip on **Select** mode to batch favorite/tag/move/delete.
 - **Photo-frame mode** — press `P` for an ambient overlay with a clock, date, and the photo's capture date and tags. Pair with **Auto-Play On Open** and Send to Display to turn a spare screen into a photo frame.
+- **Photo culling mode** — a paused, photos-only review workspace with an always-visible action bar. Press `K` or `Enter` to keep and advance, `H` to favorite, `X` to move a reject to Trash, or `1`–`3` to file it into a quick-move folder.
 - **Phone remote** — enable *Phone Remote (LAN)* in Settings and scan the QR code: your phone shows a live thumbnail of the current slide (swipe it to navigate) with play/favorite controls. Token-guarded, works anywhere on your Wi-Fi — perfect while casting to a TV.
 - **Party mode** — anyone who scans the QR can tap emoji **reactions** that float up over the show, and **upload their own photos** straight from their phone browser; uploads land in a `guests/` folder inside your library and join the running slideshow immediately. Uploads are extension-whitelisted, size-capped, and never overwrite existing files.
 - **Built for big libraries** — display-sized image serving with a capped derivation queue, virtualized grid, and collator-based sorting: a 5,000-photo library opens in about a second and the grid stays at ~50 DOM nodes regardless of library size.
 - **Favorites & tags** — `H` hearts a photo, `T` opens a quick-tag editor with your reusable tag vocabulary; filter the slideshow to favorites or a tag from Settings. Stored in `.photo-slap.json` sidecar files *next to your photos* (relative paths, so folders can move), not in the app — opening a parent folder picks up and merges sidecars saved in subfolders.
 - **Quick-move folders** — assign up to three target folders in Settings, then press `1`/`2`/`3` to move the current file there. Combined with `Delete`, it makes triaging a photo dump fast.
-- **Keyboard shortcuts** — `←`/`→` previous/next, `Space` play/pause, `G` grid, `P` photo frame, `H` favorite, `T` tags, `F` reveal in Finder, `M`/`N` video ±10 seconds, `1`–`3` quick-move, `Delete`/`Backspace` delete, `Esc` close overlays. All of them are listed in the **Actions** menu in the menu bar.
+- **Library health scan** — checks opened or selected libraries for corrupt/unreadable media, suspiciously tiny images (under 320 px or 10 KB), unsupported media formats, photos without embedded capture dates, and sidecar favorites/tags that point to missing files. Results are filterable and can be revealed in Finder/Explorer.
+- **Keyboard shortcuts** — `←`/`→` previous/next, `Space` play/pause, `G` grid, `P` photo frame, `H` favorite, `T` tags, `K`/`Enter` culling keep, `X` culling reject, `F` reveal in Finder, `M`/`N` video ±10 seconds, `1`–`3` quick-move, `Delete`/`Backspace` delete, `Esc` close overlays. All of them are listed in the **Actions** menu in the menu bar.
 - **Slide timer bar** — a thin progress bar shows when the next slide lands (can be hidden in Settings).
 - **Updates** — the app checks GitHub Releases on launch (and via *photo-slap → Check for Updates…*) and points you at new versions. Unsigned builds can't self-install, so it opens the download page.
 - **Send to Display** — `Window → Send to Display` moves the slideshow fullscreen onto any connected screen. The display stays awake while the show plays, and playback isn't throttled when the window is covered.
@@ -87,13 +90,16 @@ electron/            Main & preload process code (bundled to dist-electron/)
   main.ts            Window, menu, media:// protocol (allowlist + HEIC transcode), IPC
   preload.ts         contextBridge → exposes window.api to the renderer
   fileScanner.ts     Recursive media-file directory scanner
+  libraryHealth.ts   Decode/header/date/sidecar library diagnostics
   dedupe.ts          Exact-duplicate detection (size grouping + SHA-256)
 src/                 React renderer
   App.tsx            Slideshow state and viewer
-  components/        SettingsMenu, DedupeModal, IntroScreen, Toast, ZoomPan
+  components/        SettingsMenu, LibraryHealthModal, DedupeModal, IntroScreen, Toast, ZoomPan
   workers/phashWorker.ts   Perceptual hashing off the main thread
   hooks/usePersistedState.ts   useState + electron-store persistence
   transitions.ts     Slide transition variants (incl. the star wipe)
+  settingsPresets.ts Named workflow preset definitions
+  shuffleHistory.ts  Persistent no-repeat shuffle cycle helpers
   similarity.ts      Transitive perceptual-hash grouping (union-find)
   utils.ts           media:// URL encoding helper
   vite-env.d.ts      MediaFile / ExifData / window.api type declarations
@@ -105,4 +111,4 @@ See [CLAUDE.md](CLAUDE.md) for a deeper architecture walkthrough, IPC channel re
 
 ## Settings persistence
 
-All settings (shuffle, transition, slide duration, smart background, volume, controls position, …) persist across launches via [`electron-store`](https://github.com/sindresorhus/electron-store) in the main process, accessed over the `store:get` / `store:set` IPC channels.
+All settings (shuffle, culling mode, transition, slide duration, smart background, volume, controls position, …) persist across launches via [`electron-store`](https://github.com/sindresorhus/electron-store) in the main process, accessed over the `store:get` / `store:set` IPC channels. No-repeat shuffle history uses the same store and is scoped by the sorted library roots plus the active media filter.

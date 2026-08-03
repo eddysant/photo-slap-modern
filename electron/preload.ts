@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('api', {
   moveFile: (path: string, destDir: string) => ipcRenderer.invoke('file:move', path, destDir),
   libraryLoad: (roots: string[]) => ipcRenderer.invoke('library:load', roots),
   librarySave: (roots: string[], meta: unknown) => ipcRenderer.invoke('library:save', roots, meta),
+  scanLibraryHealth: (roots: string[]) => ipcRenderer.invoke('library:health', roots),
   setRemoteEnabled: (enabled: boolean) => ipcRenderer.invoke('remote:setEnabled', enabled),
   sendRemoteStatus: (status: unknown) => ipcRenderer.send('remote:status', status),
   setPowerBlocked: (blocked: boolean) => ipcRenderer.invoke('power:setBlocked', blocked),

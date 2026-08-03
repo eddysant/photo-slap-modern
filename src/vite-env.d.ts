@@ -29,6 +29,21 @@ interface LibraryMeta {
     tagNames: string[];
 }
 
+type LibraryHealthCategory = 'corrupt' | 'tiny' | 'unsupported' | 'missing-date' | 'orphan-sidecar';
+
+interface LibraryHealthIssue {
+    category: LibraryHealthCategory;
+    path: string;
+    detail: string;
+}
+
+interface LibraryHealthReport {
+    roots: string[];
+    scannedFiles: number;
+    issues: LibraryHealthIssue[];
+    summary: Record<LibraryHealthCategory, number>;
+}
+
 interface Window {
     api: {
         openDirectory: () => Promise<ScanResult | null>;
@@ -45,6 +60,7 @@ interface Window {
         moveFile: (path: string, destDir: string) => Promise<{ ok: boolean; error?: string }>;
         libraryLoad: (roots: string[]) => Promise<LibraryMeta>;
         librarySave: (roots: string[], meta: LibraryMeta) => Promise<void>;
+        scanLibraryHealth: (roots: string[]) => Promise<LibraryHealthReport>;
         setRemoteEnabled: (enabled: boolean) => Promise<string | null>;
         sendRemoteStatus: (status: {
             name: string | null; index: number | null; total: number;

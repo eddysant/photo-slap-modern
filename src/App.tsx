@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import QRCode from 'qrcode'
-import { FiSettings, FiPlay, FiPause, FiSkipBack, FiSkipForward, FiTrash2, FiVolume2, FiVolumeX, FiGrid, FiHeart } from 'react-icons/fi'
+import { FiSettings, FiPlay, FiPause, FiSkipBack, FiSkipForward, FiTrash2, FiVolume2, FiVolumeX, FiGrid, FiHeart, FiCheck, FiFolder } from 'react-icons/fi'
 import './App.css'
 import { DedupeModal } from './components/DedupeModal'
 import { FrameOverlay } from './components/FrameOverlay'
 import { GridView } from './components/GridView'
 import { IntroScreen } from './components/IntroScreen'
+import { LibraryHealthModal } from './components/LibraryHealthModal'
 import { TagEditor } from './components/TagEditor'
 import { SettingsMenu, MediaFilter, ControlsPosition, SortOrder } from './components/SettingsMenu'
 import { Toast } from './components/Toast'
@@ -14,6 +15,9 @@ import { ZoomPan } from './components/ZoomPan'
 import { usePersistedState } from './hooks/usePersistedState'
 import { slideTransitions, TransitionStyle } from './transitions'
 import { getFileUrl, getDisplayUrl } from './utils'
+import { cullingActionForKey } from './culling'
+import { SETTINGS_PRESETS, type SettingsPresetName } from './settingsPresets'
+import { makeShuffleHistoryKey, orderForNoRepeatShuffle, recordViewed, type ShuffleHistory } from './shuffleHistory'
 
 const mergeScans = (results: ScanResult[]): ScanResult => ({
   paths: results.flatMap(r => r.paths),
@@ -38,6 +42,8 @@ function App() {
   const [isDedupeOpen, setIsDedupeOpen] = useState(false)
   const [isGridOpen, setIsGridOpen] = useState(false)
   const [isTagEditorOpen, setIsTagEditorOpen] = useState(false)
+  const [isHealthOpen, setIsHealthOpen] = useState(false)
+  const [healthRoots, setHealthRoots] = useState<string[]>([])
 
   // Library metadata (favorites & tags) — lives in .photo-slap.json sidecar
   // files next to the photos, not in app storage
@@ -72,7 +78,24 @@ function App() {
   const [frameMode, setFrameMode] = usePersistedState('frameMode', false)
   const [autoPlayOnOpen, setAutoPlayOnOpen] = usePersistedState('autoPlayOnOpen', false)
   const [remoteEnabled, setRemoteEnabled] = usePersistedState('remoteEnabled', false)
+  const [cullingMode, setCullingMode] = usePersistedState('cullingMode', false)
   const [remoteUrl, setRemoteUrl] = useState<string | null>(null)
+
+  // Shuffle history is keyed by library roots + media filter. It deliberately
+  // lives in app storage (not the library sidecar) so viewed state survives an
+  // app restart without modifying the user's photo folders.
+  const shuffleHistoryRef = useRef<ShuffleHistory>({})
+  const [shuffleHistoryReady, setShuffleHistoryReady] = useState(false)
+  useEffect(() => {
+    window.api.getStore('shuffleHistory')
+      .then(value => { if (value && typeof value === 'object') shuffleHistoryRef.current = value as ShuffleHistory; })
+      .finally(() => setShuffleHistoryReady(true));
+  }, []);
+
+  const persistShuffleHistory = useCallback((history: ShuffleHistory) => {
+    shuffleHistoryRef.current = history;
+    window.api.setStore('shuffleHistory', history);
+  }, []);
 
   // Zoom state (per-slide; ZoomPan reports in so Ken Burns can pause)
   const [isZoomed, setIsZoomed] = useState(false)
@@ -100,6 +123,7 @@ function App() {
     isShuffled: boolean,
     sort: SortOrder,
     dates: Record<string, number> | null,
+    shuffleKey: string,
   ) => {
     let filtered = unfiltered;
     if (currentFilter === 'photos') {
@@ -120,16 +144,17 @@ function App() {
     }
 
     if (isShuffled) {
-      // Fisher-Yates shuffle
-      for (let i = sorted.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [sorted[i], sorted[j]] = [sorted[j], sorted[i]];
+      const previousHistory = shuffleHistoryRef.current[shuffleKey] ?? [];
+      const ordered = orderForNoRepeatShuffle(sorted, previousHistory);
+      sorted.splice(0, sorted.length, ...ordered.items);
+      if (ordered.cycleReset || ordered.viewedPaths.length !== previousHistory.length) {
+        persistShuffleHistory({ ...shuffleHistoryRef.current, [shuffleKey]: ordered.viewedPaths });
       }
     }
 
     setFiles(sorted);
     setCurrentIndex(0);
-  }, []);
+  }, [persistShuffleHistory]);
 
   // Date-taken lookup, fetched lazily the first time a date sort is used
   // and cached until a different folder is opened.
@@ -207,6 +232,7 @@ function App() {
   // setting changes (also handles persisted settings hydrating after launch).
   useEffect(() => {
     if (allFiles.length === 0) return;
+    if (isShuffle && !shuffleHistoryReady) return;
     let cancelled = false;
     (async () => {
       let source = allFiles;
@@ -216,10 +242,21 @@ function App() {
         showToast(favoritesOnly || tagFilter ? 'No files match the filters' : 'No media files');
       }
       const dates = sortOrder !== 'name' ? await ensureDates(allFiles) : null;
-      if (!cancelled) applyFiltersAndSort(source, mediaFilter, isShuffle, sortOrder, dates);
+      const shuffleKey = makeShuffleHistoryKey(currentDirs, mediaFilter);
+      if (!cancelled) applyFiltersAndSort(source, mediaFilter, isShuffle, sortOrder, dates, shuffleKey);
     })();
     return () => { cancelled = true; };
-  }, [allFiles, mediaFilter, isShuffle, sortOrder, favoritesOnly, tagFilter, ensureDates, applyFiltersAndSort, showToast]);
+  }, [allFiles, mediaFilter, isShuffle, sortOrder, favoritesOnly, tagFilter, currentDirs, shuffleHistoryReady, ensureDates, applyFiltersAndSort, showToast]);
+
+  // Viewing a slide records it immediately, so closing the app cannot make
+  // the next launch start repeating already-seen media.
+  useEffect(() => {
+    const file = files[currentIndex];
+    if (!isShuffle || !shuffleHistoryReady || !file || currentDirs.length === 0) return;
+    const key = makeShuffleHistoryKey(currentDirs, mediaFilter);
+    const next = recordViewed(shuffleHistoryRef.current, key, file.path);
+    if (next !== shuffleHistoryRef.current) persistShuffleHistory(next);
+  }, [files, currentIndex, isShuffle, shuffleHistoryReady, currentDirs, mediaFilter, persistShuffleHistory]);
 
   // Load favorites/tags from the library sidecars whenever folders change
   useEffect(() => {
@@ -361,19 +398,67 @@ function App() {
   // navigation skip slides in dev.
   const nextSlide = useCallback(() => {
     setDirection(1);
-    setCurrentIndex(prev => files.length === 0 ? prev : (prev + 1) % files.length);
-  }, [files.length]);
+    if (files.length === 0) return;
+    if (isShuffle && currentIndex === files.length - 1) {
+      const key = makeShuffleHistoryKey(currentDirs, mediaFilter);
+      persistShuffleHistory({ ...shuffleHistoryRef.current, [key]: [] });
+      setFiles(orderForNoRepeatShuffle(files, []).items);
+      setCurrentIndex(0);
+      return;
+    }
+    setCurrentIndex(prev => (prev + 1) % files.length);
+  }, [files, currentIndex, isShuffle, currentDirs, mediaFilter, persistShuffleHistory]);
 
   const prevSlide = useCallback(() => {
     setDirection(-1);
     setCurrentIndex(prev => files.length === 0 ? prev : (prev - 1 + files.length) % files.length);
   }, [files.length]);
 
-  const togglePlay = useCallback(() => setIsPlaying(prev => !prev), []);
+  const togglePlay = useCallback(() => {
+    if (!cullingMode) setIsPlaying(prev => !prev);
+  }, [cullingMode]);
 
   // List-shaping settings just persist; the effect above re-derives the list
   const toggleShuffle = () => setIsShuffle(!isShuffle);
   const handleMediaFilterChange = (newFilter: MediaFilter) => setMediaFilter(newFilter);
+
+  useEffect(() => {
+    if (cullingMode) setIsPlaying(false);
+  }, [cullingMode]);
+
+  const applyPreset = useCallback((name: SettingsPresetName) => {
+    const preset = SETTINGS_PRESETS[name];
+    setMediaFilter(preset.mediaFilter);
+    setIsShuffle(preset.isShuffle);
+    setIsSmart(preset.isSmart);
+    setIsSmartVideoEnabled(preset.isSmartVideoEnabled);
+    setIsStretch(preset.isStretch);
+    setIsKenBurns(preset.isKenBurns);
+    setIsExifEnabled(preset.isExifEnabled);
+    setTransitionStyle(preset.transitionStyle);
+    setSortOrder(preset.sortOrder);
+    setSlideDuration(preset.slideDuration);
+    setControlsPosition(preset.controlsPosition);
+    setShowSlideTimer(preset.showSlideTimer);
+    setFrameMode(preset.frameMode);
+    setAutoPlayOnOpen(preset.autoPlayOnOpen);
+    setRemoteEnabled(preset.remoteEnabled);
+    setCullingMode(preset.cullingMode);
+    if (preset.cullingMode) setIsPlaying(false);
+    showToast(`${name} preset applied`);
+  }, [setMediaFilter, setIsShuffle, setIsSmart, setIsSmartVideoEnabled, setIsStretch, setIsKenBurns, setIsExifEnabled, setTransitionStyle, setSortOrder, setSlideDuration, setControlsPosition, setShowSlideTimer, setFrameMode, setAutoPlayOnOpen, setRemoteEnabled, setCullingMode, showToast]);
+
+  const openHealthScan = useCallback(async () => {
+    let roots = currentDirs;
+    if (roots.length === 0) {
+      const picked = await window.api.pickDirectory();
+      if (!picked) return;
+      roots = [picked];
+    }
+    setHealthRoots(roots);
+    setIsSettingsOpen(false);
+    setIsHealthOpen(true);
+  }, [currentDirs]);
 
   const deleteCurrentFile = useCallback(async () => {
     if (files.length === 0) return;
@@ -721,6 +806,20 @@ function App() {
       if (['INPUT', 'SELECT', 'TEXTAREA'].includes(target?.tagName)) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
 
+      if (cullingMode) {
+        const action = cullingActionForKey(e.key);
+        if (action === 'keep') {
+          e.preventDefault();
+          nextSlide();
+          return;
+        }
+        if (action === 'reject') {
+          e.preventDefault();
+          deleteCurrentFile();
+          return;
+        }
+      }
+
       switch (e.key) {
         case 'ArrowRight':
           nextSlide();
@@ -766,12 +865,13 @@ function App() {
           setIsTagEditorOpen(false);
           setIsGridOpen(false);
           setIsSettingsOpen(false);
+          setIsHealthOpen(false);
           break;
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [nextSlide, prevSlide, togglePlay, deleteCurrentFile, showCurrentInFinder, seekVideoBy, quickMove, toggleFavorite, frameMode, setFrameMode]);
+  }, [nextSlide, prevSlide, togglePlay, deleteCurrentFile, showCurrentInFinder, seekVideoBy, quickMove, toggleFavorite, frameMode, setFrameMode, cullingMode]);
 
   // Update window title
   useEffect(() => {
@@ -862,6 +962,16 @@ function App() {
         tagFilter={tagFilter}
         onTagFilterChange={setTagFilter}
         tagNames={tagNames}
+        cullingMode={cullingMode}
+        onToggleCullingMode={() => {
+          const next = !cullingMode;
+          setCullingMode(next);
+          if (next) {
+            setMediaFilter('photos');
+            setIsPlaying(false);
+          }
+        }}
+        onApplyPreset={applyPreset}
         onShowInFinder={() => {
           showCurrentInFinder();
           toggleSettings();
@@ -870,6 +980,7 @@ function App() {
           setIsSettingsOpen(false);
           setIsDedupeOpen(true);
         }}
+        onScanHealth={openHealthScan}
       />
 
       {currentFile === null ? (
@@ -882,6 +993,7 @@ function App() {
             onResume={handleResume}
             onOpenSettings={() => setIsSettingsOpen(true)}
             onFindDuplicates={() => setIsDedupeOpen(true)}
+            onScanHealth={openHealthScan}
           />
         </>
       ) : (
@@ -907,6 +1019,18 @@ function App() {
           key={`${currentIndex}-${slideDuration}`}
           style={{ animationDuration: `${slideDuration}ms` }}
         />
+      )}
+
+      {cullingMode && (
+        <div className="culling-bar" aria-label="Photo culling controls">
+          <div className="culling-title"><strong>CULLING</strong><span>{currentIndex + 1} of {files.length}</span></div>
+          <button className="culling-action keep" onClick={nextSlide}><FiCheck /> Keep & Next <kbd>K</kbd></button>
+          <button className={`culling-action ${favorites.has(currentFile.path) ? 'active' : ''}`} onClick={toggleFavorite}><FiHeart /> Favorite <kbd>H</kbd></button>
+          {quickMoveFolders.map((folder, i) => folder && (
+            <button key={i} className="culling-action" onClick={() => quickMove(i)} title={folder}><FiFolder /> Move <kbd>{i + 1}</kbd></button>
+          ))}
+          <button className="culling-action reject" onClick={deleteCurrentFile}><FiTrash2 /> Reject <kbd>X</kbd></button>
+        </div>
       )}
 
       {frameMode && (
@@ -1125,6 +1249,12 @@ function App() {
         onClose={() => setIsDedupeOpen(false)}
         rootPaths={currentDirs}
         onFilesDeleted={handleFilesDeleted}
+      />
+
+      <LibraryHealthModal
+        isOpen={isHealthOpen}
+        roots={healthRoots}
+        onClose={() => setIsHealthOpen(false)}
       />
 
       <Toast message={toast} />
