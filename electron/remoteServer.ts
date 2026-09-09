@@ -1,7 +1,7 @@
 import http from 'node:http';
 import os from 'node:os';
-import crypto from 'node:crypto';
 import type { AddressInfo } from 'node:net';
+import { AuthThrottle, UploadBudget, clientKey, generateToken, safeTokenCompare } from './remoteGuard';
 
 /**
  * LAN remote control + party features: a token-guarded HTTP server serving
@@ -9,10 +9,12 @@ import type { AddressInfo } from 'node:net';
  * slide (swipe to navigate), emoji reactions that float over the show, and
  * guest photo uploads that join the running slideshow.
  *
- * Security shape: every request needs the per-session token; the client can
- * never supply a filesystem path (the thumbnail endpoint takes no arguments
- * and serves whatever slide is current); uploads are extension-whitelisted,
- * size-capped, filename-sanitized, and written only under <root>/guests.
+ * Security shape: every request needs the per-session 192-bit token, compared
+ * in constant time and rate-limited per client so it cannot be enumerated; the
+ * client can never supply a filesystem path (the thumbnail endpoint takes no
+ * arguments and serves whatever slide is current); uploads are
+ * extension-whitelisted, size-capped per file AND per session,
+ * filename-sanitized, and written only under <root>/guests.
  */
 
 export interface RemoteStatus {
@@ -39,6 +41,10 @@ export interface RemoteCallbacks {
 const ALLOWED_ACTIONS = new Set(['next', 'prev', 'toggle-play', 'favorite']);
 const ALLOWED_REACTIONS = new Set(['🎉', '❤️', '😂', '👏', '🔥']);
 const MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
+// A per-file cap does nothing against a client that repeats the request, so
+// the session also has a ceiling on how much a party can add in total.
+const MAX_SESSION_UPLOAD_FILES = 500;
+const MAX_SESSION_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024;
 
 const PAGE = `<!doctype html>
 <html><head>
@@ -194,16 +200,33 @@ export function getRemoteUrl(): string | null {
 export async function startRemoteServer(callbacks: RemoteCallbacks): Promise<string> {
     if (server && currentUrl) return currentUrl;
 
-    const token = crypto.randomBytes(4).toString('hex');
+    const token = generateToken();
     const page = PAGE.replace(/__TOKEN__/g, token);
+    const throttle = new AuthThrottle();
+    const budget = new UploadBudget({
+        maxFiles: MAX_SESSION_UPLOAD_FILES,
+        maxTotalBytes: MAX_SESSION_UPLOAD_BYTES,
+    });
 
     server = http.createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://localhost');
-        if (url.searchParams.get('t') !== token) {
+        const client = clientKey(req.socket.remoteAddress);
+
+        // A wrong token from a client that has been guessing costs it a
+        // cooldown, so the token cannot be enumerated at request speed.
+        const retryAfterMs = throttle.retryAfterMs(client);
+        if (retryAfterMs > 0) {
+            res.writeHead(429, { 'Retry-After': String(Math.ceil(retryAfterMs / 1000)) });
+            res.end('Too many attempts');
+            return;
+        }
+        if (!safeTokenCompare(url.searchParams.get('t'), token)) {
+            throttle.recordFailure(client);
             res.writeHead(403);
             res.end('Forbidden');
             return;
         }
+        throttle.recordSuccess(client);
 
         try {
             if (req.method === 'GET' && url.pathname === '/') {
@@ -253,7 +276,14 @@ export async function startRemoteServer(callbacks: RemoteCallbacks): Promise<str
                     res.end('File too large or empty');
                     return;
                 }
+                const reservation = budget.tryReserve(data.length);
+                if (!reservation.ok) {
+                    res.writeHead(507);
+                    res.end(reservation.error);
+                    return;
+                }
                 const result = await callbacks.saveUpload(name, data);
+                if (!result.ok) budget.release(data.length); // rejected: don't spend the budget
                 if (result.ok) {
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end('{"ok":true}');

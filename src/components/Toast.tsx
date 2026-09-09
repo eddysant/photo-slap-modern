@@ -1,6 +1,11 @@
 import { AnimatePresence, motion } from 'framer-motion';
 
-export function Toast({ message }: { message: string | null }) {
+export interface ToastAction {
+    label: string;
+    onAction: () => void;
+}
+
+export function Toast({ message, action }: { message: string | null; action?: ToastAction | null }) {
     return (
         <AnimatePresence>
             {message && (
@@ -11,7 +16,12 @@ export function Toast({ message }: { message: string | null }) {
                     exit={{ y: 40, opacity: 0 }}
                     transition={{ duration: 0.2 }}
                 >
-                    {message}
+                    <span>{message}</span>
+                    {action && (
+                        <button className="toast-action" onClick={action.onAction}>
+                            {action.label}
+                        </button>
+                    )}
                 </motion.div>
             )}
         </AnimatePresence>

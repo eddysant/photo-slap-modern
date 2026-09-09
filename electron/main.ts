@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, net, protocol, screen, powerSaveBlocker, Menu, MenuItemConstructorOptions } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell, net, protocol, screen, powerSaveBlocker, session, Menu, MenuItemConstructorOptions } from 'electron'
 
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
@@ -17,6 +17,10 @@ import {
   listQuarantinedFiles, restoreQuarantinedFiles, permanentlyDeleteQuarantinedFiles, quarantineEntriesToCsv,
 } from './libraryHealth'
 import { startRemoteServer, stopRemoteServer, getRemoteUrl, RemoteStatus } from './remoteServer'
+import {
+  allowRoot, isAllowedPath, assertAllowedPath, assertAllowedPaths, filterAllowedPaths, mediaUrlToPath,
+} from './pathAccess'
+import { sanitizeUploadName, findFreeUploadPath } from './guestUpload'
 import ExifReader from 'exifreader';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -55,22 +59,6 @@ protocol.registerSchemesAsPrivileged([
   },
 ])
 
-const allowedRoots = new Set<string>();
-
-function isAllowedPath(filePath: string): boolean {
-  for (const root of allowedRoots) {
-    if (filePath === root || filePath.startsWith(root + path.sep)) return true;
-  }
-  return false;
-}
-
-// media://local/Users/me/pic.jpg -> /Users/me/pic.jpg (or C:\... on Windows)
-function mediaUrlToPath(url: URL): string {
-  let p = decodeURIComponent(url.pathname);
-  if (/^\/[a-zA-Z]:[/\\]/.test(p)) p = p.slice(1); // strip leading slash of Windows drive paths
-  return path.normalize(p);
-}
-
 // CORS header so fetch() from the renderer and its workers can read media
 // (plain <img>/<video> tags don't need it, the perceptual-hash worker does).
 const MEDIA_CORS = { 'Access-Control-Allow-Origin': '*' };
@@ -87,8 +75,21 @@ const mimeFor = (p: string) => MIME_TYPES[path.extname(p).toLowerCase()] ?? 'app
 // on disk keyed by path+mtime+size+dimension, so each variant is computed once.
 let imageCacheDir: string | null = null;
 const IMAGE_CACHE_MAX_BYTES = 500 * 1024 * 1024;
+// Photo-frame installs run for weeks without a restart, so a startup-only
+// sweep would let the cache grow unbounded for the entire session. Bytes
+// written since the last sweep trigger the next one.
+const IMAGE_CACHE_SWEEP_INTERVAL_BYTES = 50 * 1024 * 1024;
+let bytesSinceLastEviction = 0;
+let evictionInFlight: Promise<void> | null = null;
 
-// LRU sweep at startup: hits touch mtime, so oldest mtime = least recently used
+function noteCacheWrite(bytes: number) {
+  bytesSinceLastEviction += bytes;
+  if (bytesSinceLastEviction < IMAGE_CACHE_SWEEP_INTERVAL_BYTES || evictionInFlight) return;
+  bytesSinceLastEviction = 0;
+  evictionInFlight = evictImageCache().finally(() => { evictionInFlight = null; });
+}
+
+// LRU sweep: hits touch mtime, so oldest mtime = least recently used
 async function evictImageCache() {
   if (!imageCacheDir) return;
   try {
@@ -185,7 +186,11 @@ async function deriveImage(filePath: string, maxDim: number | null): Promise<{ b
       ? await pipeline.png().toBuffer()
       : await pipeline.jpeg({ quality: 90 }).toBuffer();
 
-    if (cachePath) fs.writeFile(cachePath, buffer).catch(() => { });
+    if (cachePath) {
+      fs.writeFile(cachePath, buffer)
+        .then(() => noteCacheWrite(buffer.length))
+        .catch(() => { });
+    }
     return { buffer, type };
   }).finally(() => deriveInFlight.delete(inFlightKey));
 
@@ -209,7 +214,10 @@ async function handleMediaRequest(request: Request): Promise<Response> {
     try {
       const { buffer, type } = await deriveImage(filePath, maxDim);
       return new Response(new Uint8Array(buffer), {
-        headers: { 'Content-Type': type, 'Cache-Control': 'max-age=3600', ...MEDIA_CORS },
+        // The URL is only path + ?w=, so a time-based cache would keep
+        // serving a stale render after the file is edited in place. The disk
+        // cache already keys on mtime+size, so re-deriving a hit is cheap.
+        headers: { 'Content-Type': type, 'Cache-Control': 'no-cache', ...MEDIA_CORS },
       });
     } catch (e) {
       console.error(`Failed to derive image for ${filePath}`, e);
@@ -257,8 +265,7 @@ async function handleMediaRequest(request: Request): Promise<Response> {
 
 // Scan a directory and permit media:// to serve from it
 async function scanAndAllow(dir: string) {
-  const resolved = path.resolve(dir);
-  allowedRoots.add(path.normalize(resolved));
+  const resolved = allowRoot(dir);
   const { files, errors } = await scanDirectory(resolved);
   return { paths: [resolved], files, errors };
 }
@@ -463,14 +470,19 @@ function buildApplicationMenu() {
         { type: 'separator' },
         action('Toggle Favorite', 'H', 'favorite'),
         action('Edit Tags', 'T', 'tags'),
-        action('Culling: Keep & Next', 'K', 'next'),
-        action('Culling: Reject to Trash', 'X', 'delete'),
+        // These mirror the K/X keys, which record a non-destructive decision
+        // in the sidecar. They deliberately do NOT trash anything — 'Move File
+        // to Trash' below is the destructive action.
+        action('Culling: Keep & Next', 'K', 'culling-keep'),
+        action('Culling: Reject & Next', 'X', 'culling-reject'),
         { type: 'separator' },
         action('Video: Skip Forward 10s', 'M', 'seek-forward'),
         action('Video: Skip Back 10s', 'N', 'seek-back'),
         { type: 'separator' },
         action('Reveal in Finder', 'F', 'reveal'),
         action('Move File to Trash', 'Backspace', 'delete'),
+        { type: 'separator' },
+        action('Keyboard Shortcuts', 'Shift+/', 'shortcuts'),
       ]
     },
     // { role: 'viewMenu' }
@@ -515,6 +527,50 @@ function buildApplicationMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
 
+/**
+ * Content Security Policy for the renderer. Without one, any HTML that ends
+ * up in the window may pull and run remote code — in a renderer that holds
+ * the window.api IPC bridge.
+ *
+ * The policy is set as a response header rather than a <meta> tag so the
+ * packaged app can be strict while the Vite dev server still gets the inline
+ * script and websocket that HMR needs.
+ */
+function applyContentSecurityPolicy() {
+  const devServer = process.env.VITE_DEV_SERVER_URL;
+
+  const policy = [
+    "default-src 'none'",
+    // Inline styles: React style={{…}} attributes are inline styles.
+    "style-src 'self' 'unsafe-inline'",
+    "font-src 'self'", // Silkscreen is bundled, no external font CDN
+    // media: is the app's own protocol; data:/blob: cover the QR code and
+    // the canvases the perceptual-hash worker produces.
+    "img-src 'self' media: data: blob:",
+    "media-src 'self' media: blob:",
+    "connect-src 'self' media:" + (devServer ? ' ws: http://localhost:* http://127.0.0.1:*' : ''),
+    "worker-src 'self' blob:",
+    // Nothing in the app submits a form, embeds a frame, or is framed.
+    "form-action 'none'",
+    "frame-src 'none'",
+    "frame-ancestors 'none'",
+    "base-uri 'none'",
+    "object-src 'none'",
+    devServer
+      ? "script-src 'self' 'unsafe-inline' 'unsafe-eval'" // Vite HMR preamble
+      : "script-src 'self'",
+  ].join('; ');
+
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        'Content-Security-Policy': [policy],
+      },
+    });
+  });
+}
+
 function createWindow() {
   const iconPath = path.join(process.env.VITE_PUBLIC, 'icon.png');
 
@@ -545,6 +601,33 @@ function createWindow() {
 
   buildApplicationMenu();
 
+  // The preload exposes window.api to whatever document lives in this
+  // renderer, so nothing but the app's own page is allowed to load in it.
+  // A dropped link or an <a href> would otherwise navigate the window to
+  // arbitrary web content that still holds the IPC bridge.
+  const appOrigin = process.env.VITE_DEV_SERVER_URL
+    ? new URL(process.env.VITE_DEV_SERVER_URL).origin
+    : null;
+
+  win.webContents.on('will-navigate', (event, url) => {
+    const isAppPage = appOrigin
+      ? new URL(url).origin === appOrigin
+      : url.startsWith('file://');
+    if (!isAppPage) {
+      event.preventDefault();
+      shell.openExternal(url); // external links go to the real browser
+    }
+  });
+
+  // Same for window.open / target=_blank: never a second privileged renderer.
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/.test(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+
+  // Nothing in this app needs a camera, mic, or geolocation.
+  win.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
+
   if (process.env.VITE_DEV_SERVER_URL) {
     win.loadURL(process.env.VITE_DEV_SERVER_URL)
   } else {
@@ -569,7 +652,7 @@ ipcMain.handle('dialog:openDirectory', async () => {
   const allFiles: Awaited<ReturnType<typeof scanDirectory>>['files'] = [];
   const allErrors: string[] = [];
   for (const dirPath of result.filePaths) {
-    allowedRoots.add(path.normalize(dirPath)); // permit media:// to serve from here
+    allowRoot(dirPath); // permit media:// to serve from here
     const { files, errors } = await scanDirectory(dirPath);
     allFiles.push(...files);
     allErrors.push(...errors);
@@ -590,9 +673,7 @@ ipcMain.handle('dialog:pickDirectory', async () => {
   if (!win) return null;
   const result = await dialog.showOpenDialog(win, { properties: ['openDirectory'] });
   if (result.canceled || result.filePaths.length === 0) return null;
-  const dir = path.resolve(result.filePaths[0]);
-  allowedRoots.add(path.normalize(dir));
-  return dir;
+  return allowRoot(result.filePaths[0]);
 });
 
 // Scan an arbitrary directory (drag-and-drop, "resume last folder")
@@ -605,9 +686,9 @@ ipcMain.handle('dir:scan', async (_event, dirPath: string) => {
   return await scanAndAllow(dirPath);
 });
 
-ipcMain.handle('file:delete', async (_event, filePath) => {
+ipcMain.handle('file:delete', async (_event, filePath: string) => {
   try {
-    await shell.trashItem(filePath);
+    await shell.trashItem(assertAllowedPath(filePath));
     return true;
   } catch (e) {
     console.error('Failed to delete file', e);
@@ -618,7 +699,11 @@ ipcMain.handle('file:delete', async (_event, filePath) => {
 // Quick-move: relocate a file into one of the configured target folders
 ipcMain.handle('file:move', async (_event, filePath: string, destDir: string) => {
   try {
-    const dest = path.join(destDir, path.basename(filePath));
+    const source = assertAllowedPath(filePath);
+    // The destination is user-chosen in Settings rather than opened as a
+    // library root, so it is allowlisted here on first use.
+    const target = allowRoot(destDir);
+    const dest = path.join(target, path.basename(source));
     try {
       await fs.access(dest);
       return { ok: false, error: 'A file with that name already exists there' };
@@ -626,12 +711,12 @@ ipcMain.handle('file:move', async (_event, filePath: string, destDir: string) =>
       // destination free
     }
     try {
-      await fs.rename(filePath, dest);
+      await fs.rename(source, dest);
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === 'EXDEV') {
         // cross-volume move
-        await fs.copyFile(filePath, dest);
-        await fs.unlink(filePath);
+        await fs.copyFile(source, dest);
+        await fs.unlink(source);
       } else {
         throw e;
       }
@@ -652,44 +737,28 @@ ipcMain.on('remote:status', (_event, status: RemoteStatus) => {
   remoteStatus = status;
 });
 
-const UPLOAD_EXTENSIONS = new Set([
-  '.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.heif',
-  '.mp4', '.mov', '.webm',
-]);
+const fileExists = (p: string) => fs.access(p).then(() => true, () => false);
 
 async function saveGuestUpload(name: string, data: Buffer): Promise<{ ok: boolean; error?: string }> {
   const root = remoteStatus.root;
-  if (!root || !isAllowedPath(path.normalize(root))) {
+  if (!root || !isAllowedPath(root)) {
     return { ok: false, error: 'Open a folder in photo-slap first' };
   }
 
-  const safeName = path.basename(name).replace(/[^\w.\- ]+/g, '_');
-  const ext = path.extname(safeName).toLowerCase();
-  if (!UPLOAD_EXTENSIONS.has(ext)) {
-    return { ok: false, error: 'Unsupported file type' };
-  }
+  const sanitized = sanitizeUploadName(name);
+  if (!sanitized.ok) return { ok: false, error: sanitized.error };
 
   const guestsDir = path.join(root, 'guests');
   await fs.mkdir(guestsDir, { recursive: true });
 
   // never overwrite: suffix until the name is free
-  const stem = safeName.slice(0, -ext.length);
-  let dest = path.join(guestsDir, safeName);
-  for (let n = 1; ; n++) {
-    try {
-      await fs.access(dest);
-      dest = path.join(guestsDir, `${stem}-${n}${ext}`);
-    } catch {
-      break;
-    }
-  }
+  const dest = await findFreeUploadPath(guestsDir, sanitized.stem, sanitized.ext, fileExists);
 
   await fs.writeFile(dest, data);
-  const isVideo = /\.(mp4|mov|webm)$/i.test(ext);
   win?.webContents.send('remote:uploaded', {
     name: path.basename(dest),
     path: dest,
-    type: isVideo ? 'video' : 'image',
+    type: sanitized.type,
   });
   return { ok: true };
 }
@@ -735,8 +804,8 @@ ipcMain.handle('power:setBlocked', (_event, blocked: boolean) => {
   }
 });
 
-ipcMain.handle('file:showInFolder', async (_event, filePath) => {
-  shell.showItemInFolder(filePath);
+ipcMain.handle('file:showInFolder', async (_event, filePath: string) => {
+  shell.showItemInFolder(assertAllowedPath(filePath));
 });
 
 ipcMain.handle('store:get', (_event, key) => {
@@ -748,28 +817,28 @@ ipcMain.handle('store:set', (_event, key, value) => {
 });
 
 ipcMain.handle('dedupe:scan:exact', async (_event, dirPaths: string[], includeVideos: boolean = true) => {
-  return await findExactDuplicates(dirPaths, includeVideos);
+  return await findExactDuplicates(assertAllowedPaths(dirPaths), includeVideos);
 });
 
 ipcMain.handle('dedupe:scan:files', async (_event, dirPaths: string[], kind: 'images' | 'videos' = 'images') => {
-  return await scanFiles(dirPaths, kind);
+  return await scanFiles(assertAllowedPaths(dirPaths), kind);
 });
 
 // --------- Library metadata (favorites & tags, stored with the photos) ---------
 ipcMain.handle('library:load', async (_event, roots: string[]) => {
-  return await loadLibraryMeta(roots);
+  return await loadLibraryMeta(assertAllowedPaths(roots));
 });
 
 ipcMain.handle('library:save', async (_event, roots: string[], meta: LibraryMeta) => {
-  await saveLibraryMeta(roots, meta);
+  await saveLibraryMeta(assertAllowedPaths(roots), meta);
 });
 
 ipcMain.handle('library:health', async (_event, roots: string[]) => {
-  return await scanLibraryHealth(roots);
+  return await scanLibraryHealth(assertAllowedPaths(roots));
 });
 
 ipcMain.handle('library:health:repair', async (_event, roots: string[], action: 'remove-orphans' | 'quarantine-corrupt', paths: string[] = []) => {
-  const safeRoots = allowlistedLibraryRoots(roots);
+  const safeRoots = assertAllowedPaths(roots);
   if (action === 'remove-orphans') {
     return { removed: await removeOrphanedLibraryMeta(safeRoots), quarantined: [] };
   }
@@ -793,27 +862,21 @@ ipcMain.handle('library:health:export', async (_event, report: LibraryHealthRepo
   return result.filePath;
 });
 
-function allowlistedLibraryRoots(roots: string[]) {
-  const safeRoots = roots.map(root => path.resolve(root)).filter(root => isAllowedPath(root));
-  if (safeRoots.length !== roots.length) throw new Error('Library root is not allowlisted');
-  return safeRoots;
-}
-
 ipcMain.handle('quarantine:list', async (_event, roots: string[]) => {
-  return await listQuarantinedFiles(allowlistedLibraryRoots(roots));
+  return await listQuarantinedFiles(assertAllowedPaths(roots));
 });
 
 ipcMain.handle('quarantine:restore', async (_event, roots: string[], paths: string[]) => {
-  return await restoreQuarantinedFiles(allowlistedLibraryRoots(roots), paths);
+  return await restoreQuarantinedFiles(assertAllowedPaths(roots), paths);
 });
 
 ipcMain.handle('quarantine:delete', async (_event, roots: string[], paths: string[]) => {
-  return await permanentlyDeleteQuarantinedFiles(allowlistedLibraryRoots(roots), paths);
+  return await permanentlyDeleteQuarantinedFiles(assertAllowedPaths(roots), paths);
 });
 
 ipcMain.handle('quarantine:export', async (_event, roots: string[]) => {
   if (!win) return null;
-  const entries = await listQuarantinedFiles(allowlistedLibraryRoots(roots));
+  const entries = await listQuarantinedFiles(assertAllowedPaths(roots));
   const result = await dialog.showSaveDialog(win, {
     title: 'Export Quarantine Manifest',
     defaultPath: `photo-slap-quarantine-${new Date().toISOString().slice(0, 10)}.csv`,
@@ -827,7 +890,7 @@ ipcMain.handle('quarantine:export', async (_event, roots: string[]) => {
 // Basic file stats for the dedupe compare cards
 ipcMain.handle('files:getInfo', async (_event, paths: string[]) => {
   const result: Record<string, { size: number; mtimeMs: number }> = {};
-  await Promise.all(paths.map(async (p) => {
+  await Promise.all(filterAllowedPaths(paths).map(async (p) => {
     try {
       const stat = await fs.stat(p);
       result[p] = { size: stat.size, mtimeMs: stat.mtimeMs };
@@ -873,10 +936,11 @@ async function getFileDate(filePath: string): Promise<number> {
 
 ipcMain.handle('files:getDates', async (_event, paths: string[]) => {
   const result: Record<string, number> = {};
+  const allowed = filterAllowedPaths(paths);
   let next = 0;
   const worker = async () => {
-    while (next < paths.length) {
-      const p = paths[next++];
+    while (next < allowed.length) {
+      const p = allowed[next++];
       result[p] = await getFileDate(p);
     }
   };
@@ -884,9 +948,9 @@ ipcMain.handle('files:getDates', async (_event, paths: string[]) => {
   return result;
 });
 
-ipcMain.handle('file:getExif', async (_event, filePath) => {
+ipcMain.handle('file:getExif', async (_event, filePath: string) => {
   try {
-    const fileBuffer = await fs.readFile(filePath);
+    const fileBuffer = await fs.readFile(assertAllowedPath(filePath));
     const tags = await ExifReader.load(fileBuffer);
     // console.log('EXIF Tags for', filePath, Object.keys(tags)); // Debug log
 
@@ -939,6 +1003,7 @@ app.on('activate', () => {
 
 app.whenReady().then(async () => {
   protocol.handle('media', handleMediaRequest);
+  applyContentSecurityPolicy();
 
   try {
     imageCacheDir = path.join(app.getPath('userData'), 'image-cache');

@@ -83,6 +83,22 @@ async function makeFixture() {
     return { dir, heicPath, hasVideos };
 }
 
+/**
+ * A separate library for the "the show must keep moving" checks, opened via a
+ * second app launch so it can't perturb the counts every other check uses.
+ * The middle file is an .mp4 the decoder cannot possibly play.
+ */
+async function makeResilienceFixture() {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-slap-e2e-broken-'));
+    const tile = (color) => `<svg width="400" height="300" xmlns="http://www.w3.org/2000/svg"><rect width="400" height="300" fill="${color}"/></svg>`;
+    await sharp(Buffer.from(tile('#0af'))).jpeg().toFile(path.join(dir, '1-first.jpg'));
+    // Valid extension, garbage bytes: exactly the corrupt/undecodable video
+    // that used to leave the slideshow parked forever.
+    await fs.writeFile(path.join(dir, '2-broken.mp4'), Buffer.alloc(4096, 0x41));
+    await sharp(Buffer.from(tile('#fa0'))).jpeg().toFile(path.join(dir, '3-last.jpg'));
+    return dir;
+}
+
 // ---------- CDP ----------
 async function waitForPage(timeoutMs = 60000) {
     const deadline = Date.now() + timeoutMs;
@@ -141,18 +157,53 @@ await fs.writeFile(cfg, JSON.stringify({
     isKenBurns: false, isExifEnabled: false, isSmart: false, slideDuration: 3000,
 }));
 
-console.log('Launching app against', fixture);
-const child = spawn('npm', ['run', 'dev'], {
-    cwd: PROJECT_ROOT,
-    env: { ...process.env, PHOTO_SLAP_DIR: fixture, PHOTO_SLAP_DEBUG_PORT: String(PORT) },
-    stdio: ['ignore', 'pipe', 'pipe'],
-    detached: true,
-});
 let appLog = '';
-child.stdout.on('data', d => { appLog += d; });
-child.stderr.on('data', d => { appLog += d; });
+let child = null;
+
+// The app is single-instance, so opening a different library means a full
+// relaunch rather than a second process.
+function launchApp(dir) {
+    const proc = spawn('npm', ['run', 'dev'], {
+        cwd: PROJECT_ROOT,
+        env: { ...process.env, PHOTO_SLAP_DIR: dir, PHOTO_SLAP_DEBUG_PORT: String(PORT) },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        detached: true,
+    });
+    proc.stdout.on('data', d => { appLog += d; });
+    proc.stderr.on('data', d => { appLog += d; });
+    return proc;
+}
+
+async function shutdownApp(proc) {
+    if (!proc) return;
+    try { process.kill(-proc.pid, 'SIGTERM'); } catch { /* already gone */ }
+    // Wait for the debug port to go quiet so the next launch gets the lock
+    for (let i = 0; i < 40; i++) {
+        try {
+            await fetch(`http://127.0.0.1:${PORT}/json/list`, { signal: AbortSignal.timeout(500) });
+        } catch {
+            return;
+        }
+        await sleep(500);
+    }
+}
+
+/** Connect and wait for the slideshow to show a file counter. */
+async function attach() {
+    const cdpConn = await connect(await waitForPage());
+    for (let i = 0; i < 40; i++) {
+        const counter = await cdpConn.evaluate(`document.querySelector('.file-info')?.textContent ?? ''`);
+        if (counter) break;
+        await sleep(500);
+    }
+    return cdpConn;
+}
+
+console.log('Launching app against', fixture);
+child = launchApp(fixture);
 
 let cdp = null;
+let brokenFixture = null;
 try {
     const page = await waitForPage();
     cdp = await connect(page);
@@ -570,16 +621,101 @@ try {
             { method: 'POST', body: Buffer.from('x') });
         check('unsupported upload type rejected', badType.status === 400, String(badType.status));
     }
+
+    // ---------- playback resilience, undo, help ----------
+    // Its own library, and its own app launch: the app is single-instance,
+    // and these checks must not perturb the counts used above.
+    console.log('undecodable media does not freeze the slideshow');
+    brokenFixture = await makeResilienceFixture();
+    cdp.close();
+    cdp = null;
+    await shutdownApp(child);
+    child = launchApp(brokenFixture);
+    cdp = await attach();
+
+    let opened = '';
+    for (let i = 0; i < 40; i++) {
+        opened = await cdp.evaluate(`document.querySelector('.file-info')?.textContent ?? ''`);
+        if (opened.trim().endsWith('/ 3')) break;
+        await sleep(500);
+    }
+    check('relaunched against the resilience fixture', opened.trim().endsWith('/ 3'), opened);
+
+    if (opened.trim().endsWith('/ 3')) {
+        // Land on the broken video and start the show
+        const parked = await cdp.evaluate(`(async () => {
+            const key = k => window.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true }));
+            key('ArrowRight');                       // -> 2-broken.mp4
+            await new Promise(r => setTimeout(r, 400));
+            const title = document.querySelector('.title-bar')?.textContent ?? '';
+            key(' ');                                // play
+            return title;
+        })()`);
+        check('slideshow reached the broken video', parked.includes('2-broken'), parked);
+
+        // The old bug: `ended` never fires, so the show sat here for good.
+        let movedTo = '';
+        for (let i = 0; i < 40; i++) {
+            await sleep(500);
+            movedTo = await cdp.evaluate(`document.querySelector('.title-bar')?.textContent ?? ''`);
+            if (!movedTo.includes('2-broken')) break;
+        }
+        check('slideshow advances past a video it cannot decode', !movedTo.includes('2-broken'), movedTo);
+
+        await cdp.evaluate(`window.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }))`); // pause
+        await sleep(300);
+    }
+
+    console.log('delete keeps your place, and is undoable');
+    const del = await cdp.evaluate(`(async () => {
+        const key = k => window.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true }));
+        const counter = () => document.querySelector('.file-info')?.textContent?.trim() ?? '';
+        const title = () => document.querySelector('.title-bar')?.textContent ?? '';
+        // Go to the last slide, so a reset-to-first would be obvious
+        key('ArrowRight'); await new Promise(r => setTimeout(r, 300));
+        key('ArrowRight'); await new Promise(r => setTimeout(r, 300));
+        const before = { counter: counter(), title: title() };
+        key('Backspace');
+        await new Promise(r => setTimeout(r, 900));
+        const afterDelete = { counter: counter(), title: title(), toast: document.querySelector('.toast')?.textContent ?? '' };
+        const undoBtn = document.querySelector('.toast-action');
+        const hadUndo = !!undoBtn;
+        undoBtn?.click();
+        await new Promise(r => setTimeout(r, 1200));
+        return JSON.stringify({ before, afterDelete, hadUndo, restored: counter() });
+    })()`).then(JSON.parse);
+
+    check('delete offers an undo', del.hadUndo && /undo/i.test(del.afterDelete.toast), del.afterDelete.toast);
+    check('delete does not jump back to the first slide',
+        !del.afterDelete.counter.startsWith('1 /') || del.before.counter.startsWith('1 /'),
+        `${del.before.counter} -> ${del.afterDelete.counter}`);
+    check('undo restores the deleted file', del.restored.endsWith('/ 3'), `${del.afterDelete.counter} -> ${del.restored}`);
+    const stillOnDisk = await fs.readdir(brokenFixture);
+    check('undone delete never reached the Trash', stillOnDisk.length === 3, JSON.stringify(stillOnDisk));
+
+    console.log('keyboard help');
+    const help = await cdp.evaluate(`(async () => {
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true }));
+        await new Promise(r => setTimeout(r, 400));
+        const panel = document.querySelector('.shortcuts-panel');
+        const rows = document.querySelectorAll('.shortcuts-group li').length;
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        await new Promise(r => setTimeout(r, 400));
+        return JSON.stringify({ opened: !!panel, rows, closed: !document.querySelector('.shortcuts-panel') });
+    })()`).then(JSON.parse);
+    check('? opens the shortcut list', help.opened && help.rows > 10, `${help.rows} shortcuts`);
+    check('Escape closes it', help.closed);
 } catch (e) {
     failures++;
     console.error('✗ E2E aborted:', e.message);
     console.error(appLog.split('\n').slice(-15).join('\n'));
 } finally {
     cdp?.close();
-    try { process.kill(-child.pid, 'SIGTERM'); } catch { /* already gone */ }
+    try { if (child) process.kill(-child.pid, 'SIGTERM'); } catch { /* already gone */ }
     if (configBackup !== null) await fs.writeFile(cfg, configBackup);
     else await fs.rm(cfg, { force: true });
     await fs.rm(fixture, { recursive: true, force: true });
+    if (brokenFixture) await fs.rm(brokenFixture, { recursive: true, force: true });
 }
 
 console.log(failures === 0 ? '\nE2E: all checks passed' : `\nE2E: ${failures} check(s) FAILED`);

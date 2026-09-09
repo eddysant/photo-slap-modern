@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import QRCode from 'qrcode'
 import { FiSettings, FiPlay, FiPause, FiSkipBack, FiSkipForward, FiTrash2, FiVolume2, FiVolumeX, FiGrid, FiHeart, FiCheck, FiFolder, FiX } from 'react-icons/fi'
 import './App.css'
 import { DedupeModal } from './components/DedupeModal'
@@ -10,9 +9,16 @@ import { IntroScreen } from './components/IntroScreen'
 import { LibraryHealthModal } from './components/LibraryHealthModal'
 import { TagEditor } from './components/TagEditor'
 import { SettingsMenu, MediaFilter, ControlsPosition, SortOrder } from './components/SettingsMenu'
-import { Toast } from './components/Toast'
+import { ShortcutsOverlay } from './components/ShortcutsOverlay'
+import { Toast, ToastAction } from './components/Toast'
 import { ZoomPan } from './components/ZoomPan'
+import { useImagePreloader } from './hooks/useImagePreloader'
+import { useLibraryMeta } from './hooks/useLibraryMeta'
+import { usePendingDeletes, UNDO_WINDOW_MS } from './hooks/usePendingDeletes'
+import { useRemote } from './hooks/useRemote'
+import { useSlideshowPlayback } from './hooks/useSlideshowPlayback'
 import { usePersistedState } from './hooks/usePersistedState'
+import { clampIndex, survivingNeighbourPath } from './playlist'
 import { slideTransitions, TransitionStyle } from './transitions'
 import { getFileUrl, getDisplayUrl } from './utils'
 import { cullingActionForKey } from './culling'
@@ -44,15 +50,9 @@ function App() {
   const [isGridOpen, setIsGridOpen] = useState(false)
   const [isTagEditorOpen, setIsTagEditorOpen] = useState(false)
   const [isHealthOpen, setIsHealthOpen] = useState(false)
+  const [isShortcutsOpen, setIsShortcutsOpen] = useState(false)
   const [healthRoots, setHealthRoots] = useState<string[]>([])
 
-  // Library metadata — lives in .photo-slap.json sidecars
-  // files next to the photos, not in app storage
-  const [favorites, setFavorites] = useState<Set<string>>(new Set())
-  const [fileTags, setFileTags] = useState<Record<string, string[]>>({})
-  const [tagNames, setTagNames] = useState<string[]>([])
-  const [ratings, setRatings] = useState<Record<string, number>>({})
-  const [cullingDecisions, setCullingDecisions] = useState<Record<string, CullingDecision>>({})
   const [healthReport, setHealthReport] = useState<LibraryHealthReport | null>(null)
   // Session-only view filters (not persisted — a hidden filter across
   // launches would look like lost photos)
@@ -83,7 +83,6 @@ function App() {
   const [autoPlayOnOpen, setAutoPlayOnOpen] = usePersistedState('autoPlayOnOpen', false)
   const [remoteEnabled, setRemoteEnabled] = usePersistedState('remoteEnabled', false)
   const [cullingMode, setCullingMode] = usePersistedState('cullingMode', false)
-  const [remoteUrl, setRemoteUrl] = useState<string | null>(null)
 
   // Shuffle history is keyed by library roots + media filter. It deliberately
   // lives in app storage (not the library sidecar) so viewed state survives an
@@ -113,13 +112,44 @@ function App() {
       .catch(() => { });
   }, []);
 
-  // Toast
+  // Toast — optionally with a single action button (used by undo)
   const [toast, setToast] = useState<string | null>(null)
+  const [toastAction, setToastAction] = useState<ToastAction | null>(null)
   const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const showToast = useCallback((message: string) => {
+  const showToast = useCallback((message: string, action: ToastAction | null = null, durationMs = 4000) => {
     setToast(message);
+    setToastAction(action);
     if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
-    toastTimeoutRef.current = setTimeout(() => setToast(null), 4000);
+    toastTimeoutRef.current = setTimeout(() => {
+      setToast(null);
+      setToastAction(null);
+    }, durationMs);
+  }, []);
+  const dismissToast = useCallback(() => {
+    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+    setToast(null);
+    setToastAction(null);
+  }, []);
+
+  // Set by Resume so the slideshow reopens at the slide it was left on
+  const pendingIndexRef = useRef<number | null>(null);
+  // Set when the list is about to be re-derived but the slideshow should land
+  // on a specific file (the survivor of a delete, a guest upload, …)
+  const pendingPathRef = useRef<string | null>(null);
+
+  /** Index to land on for a freshly derived list, consuming any pin. */
+  const takePendingIndex = useCallback((list: MediaFile[]) => {
+    if (pendingPathRef.current !== null) {
+      const idx = list.findIndex(f => f.path === pendingPathRef.current);
+      pendingPathRef.current = null;
+      if (idx >= 0) return idx;
+    }
+    if (pendingIndexRef.current !== null) {
+      const idx = clampIndex(pendingIndexRef.current, list.length);
+      pendingIndexRef.current = null;
+      return idx;
+    }
+    return 0;
   }, []);
 
   const applyFiltersAndSort = useCallback((
@@ -161,8 +191,12 @@ function App() {
     }
 
     setFiles(sorted);
-    setCurrentIndex(0);
-  }, [persistShuffleHistory]);
+    // Resume on the pinned slide when one is queued (a delete, a quick-move,
+    // a guest upload, Resume). Consuming the pin *here* matters: this is the
+    // one place that would otherwise force index 0, and the effect that used
+    // to restore the pin ran on an earlier render, so the reset always won.
+    setCurrentIndex(takePendingIndex(sorted));
+  }, [persistShuffleHistory, takePendingIndex]);
 
   // Date-taken lookup, fetched lazily the first time a date sort is used
   // and cached until a different folder is opened.
@@ -174,12 +208,6 @@ function App() {
     }
     return fileDatesRef.current;
   }, [showToast]);
-
-  // Set by Resume so the slideshow reopens at the slide it was left on
-  const pendingIndexRef = useRef<number | null>(null);
-  // Set when the list is about to be re-derived but the current slide
-  // should stay put (e.g. a guest upload appends a file)
-  const pendingPathRef = useRef<string | null>(null);
 
   const ingestScanResult = useCallback((result: ScanResult) => {
     if (result.errors.length > 0) {
@@ -199,22 +227,22 @@ function App() {
     }
   }, [showToast, autoPlayOnOpen]);
 
-  // Restore the pending position (by path, else index) once the list is ready
+  // Self-heal an index left past the end of a list that shrank. It used to
+  // mean `files[currentIndex]` was undefined, which both killed the advance
+  // timer (a permanent freeze) and threw while rendering the slide.
+  useEffect(() => {
+    if (files.length > 0 && currentIndex > files.length - 1) {
+      setCurrentIndex(files.length - 1);
+    }
+  }, [files, currentIndex]);
+
+  // Fallback for lists set outside applyFiltersAndSort (which consumes the
+  // pin itself). A no-op when it already did.
   useEffect(() => {
     if (files.length === 0) return;
-    if (pendingPathRef.current !== null) {
-      const idx = files.findIndex(f => f.path === pendingPathRef.current);
-      pendingPathRef.current = null;
-      if (idx >= 0) {
-        setCurrentIndex(idx);
-        return;
-      }
-    }
-    if (pendingIndexRef.current !== null) {
-      setCurrentIndex(Math.min(pendingIndexRef.current, files.length - 1));
-      pendingIndexRef.current = null;
-    }
-  }, [files]);
+    if (pendingPathRef.current === null && pendingIndexRef.current === null) return;
+    setCurrentIndex(takePendingIndex(files));
+  }, [files, takePendingIndex]);
 
   // Remember the current position per folder set (debounced)
   useEffect(() => {
@@ -228,6 +256,10 @@ function App() {
     return () => clearTimeout(timer);
   }, [currentIndex, lastDirs, files.length]);
 
+  // Favorites, tags, ratings and culling decisions (sidecar-backed)
+  const meta = useLibraryMeta(currentDirs);
+  const { favorites, fileTags, tagNames, ratings, cullingDecisions } = meta;
+
   // Refs so favorite/tag EDITS don't re-derive the list (which would reset
   // the slide index); the favorites/tag FILTER toggles are real deps below.
   const favoritesRef = useRef(favorites);
@@ -240,7 +272,13 @@ function App() {
   // Derive the playable list whenever the source files or any list-shaping
   // setting changes (also handles persisted settings hydrating after launch).
   useEffect(() => {
-    if (allFiles.length === 0) return;
+    if (allFiles.length === 0) {
+      // Deleting the last file used to leave it on screen: the derive bailed
+      // out here and `files` kept the stale list.
+      setFiles([]);
+      setCurrentIndex(0);
+      return;
+    }
     if (isShuffle && !shuffleHistoryReady) return;
     let cancelled = false;
     (async () => {
@@ -268,70 +306,23 @@ function App() {
     setShuffleProgress(getShuffleProgress(files, next[key] ?? []));
   }, [files, currentIndex, isShuffle, shuffleHistoryReady, currentDirs, mediaFilter, persistShuffleHistory]);
 
-  // Load metadata from the library sidecars whenever folders change
-  useEffect(() => {
-    if (currentDirs.length === 0) return;
-    window.api.libraryLoad(currentDirs)
-      .then(meta => {
-        setFavorites(new Set(meta.favorites));
-        setFileTags(meta.tags);
-        setTagNames(meta.tagNames);
-        setRatings(meta.ratings);
-        setCullingDecisions(meta.culling);
-      })
-      .catch(e => console.error('Failed to load library metadata:', e));
-  }, [currentDirs]);
-
-  // Debounced sidecar write-back
-  const librarySaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const scheduleLibrarySave = useCallback((
-    favs: Set<string>,
-    tags: Record<string, string[]>,
-    names: string[],
-    nextRatings: Record<string, number>,
-    culling: Record<string, CullingDecision>,
-  ) => {
-    if (librarySaveTimer.current) clearTimeout(librarySaveTimer.current);
-    librarySaveTimer.current = setTimeout(() => {
-      window.api.librarySave(currentDirs, { favorites: [...favs], tags, tagNames: names, ratings: nextRatings, culling })
-        .catch(e => console.error('Failed to save library metadata:', e));
-    }, 800);
-  }, [currentDirs]);
-
   const toggleFavorite = useCallback(() => {
     const file = files[currentIndex];
     if (!file) return;
-    const next = new Set(favorites);
-    const nowFavorite = !next.has(file.path);
-    if (nowFavorite) next.add(file.path);
-    else next.delete(file.path);
-    setFavorites(next);
-    scheduleLibrarySave(next, fileTags, tagNames, ratings, cullingDecisions);
+    const nowFavorite = meta.toggleFavoriteAt(file.path);
     // Un-favoriting while the favorites filter is on removes it from view
     if (!nowFavorite && favoritesOnly) {
       const remaining = files.filter(f => f.path !== file.path);
       setFiles(remaining);
-      setCurrentIndex(ci => Math.min(ci, Math.max(0, remaining.length - 1)));
+      setCurrentIndex(ci => clampIndex(ci, remaining.length));
     }
-  }, [files, currentIndex, favorites, fileTags, tagNames, ratings, cullingDecisions, favoritesOnly, scheduleLibrarySave]);
+  }, [files, currentIndex, favoritesOnly, meta]);
 
   const setTagOnCurrent = useCallback((tag: string, ensureInVocabulary = false) => {
     const file = files[currentIndex];
     if (!file) return;
-    const current = fileTags[file.path] ?? [];
-    const nextTags = {
-      ...fileTags,
-      [file.path]: current.includes(tag) ? current.filter(t => t !== tag) : [...current, tag],
-    };
-    if (nextTags[file.path].length === 0) delete nextTags[file.path];
-    let nextNames = tagNames;
-    if (ensureInVocabulary && !tagNames.includes(tag)) {
-      nextNames = [...tagNames, tag].sort();
-      setTagNames(nextNames);
-    }
-    setFileTags(nextTags);
-    scheduleLibrarySave(favorites, nextTags, nextNames, ratings, cullingDecisions);
-  }, [files, currentIndex, fileTags, tagNames, favorites, ratings, cullingDecisions, scheduleLibrarySave]);
+    meta.setTag(file.path, tag, ensureInVocabulary);
+  }, [files, currentIndex, meta]);
 
   const handleOpenDirectory = useCallback(async () => {
     try {
@@ -489,34 +480,80 @@ function App() {
     setIsHealthOpen(true);
   }, [currentDirs]);
 
-  const deleteCurrentFile = useCallback(async () => {
-    if (files.length === 0) return;
-    const fileToDelete = files[currentIndex];
-    const success = await window.api.deleteFile(fileToDelete.path);
-    if (success) {
-      setAllFiles(prev => prev.filter(f => f.path !== fileToDelete.path));
-      const newFiles = files.filter((_, i) => i !== currentIndex);
-      setFiles(newFiles);
-      setCurrentIndex(Math.min(currentIndex, Math.max(0, newFiles.length - 1)));
-    }
+  /**
+   * Pin the nearest surviving slide before a removal. Changing `allFiles`
+   * re-derives the playable list, and that derive resets the index to 0 — so
+   * without this every delete threw the user back to the first photo.
+   */
+  const pinSurvivingNeighbour = useCallback((removedPaths: string[]) => {
+    pendingPathRef.current = survivingNeighbourPath(files, currentIndex, new Set(removedPaths));
   }, [files, currentIndex]);
 
-  // Dedupe moved files to Trash: drop them from the slideshow too
+  /**
+   * Take files out of the slideshow without touching disk. Only `allFiles` is
+   * touched: the derive effect is the single owner of the playable list, and
+   * setting `files` here too would race it (and would consume the pin on an
+   * earlier render than the derive's own reset).
+   */
+  const removeFromView = useCallback((paths: string[]) => {
+    if (paths.length === 0) return;
+    const gone = new Set(paths);
+    pinSurvivingNeighbour(paths);
+    setAllFiles(prev => prev.filter(f => !gone.has(f.path)));
+  }, [pinSurvivingNeighbour]);
+
+  /** Put files back after an undo, or after a trash that failed. */
+  const restoreToView = useCallback((restored: MediaFile[]) => {
+    if (restored.length === 0) return;
+    pendingPathRef.current = restored[0].path;
+    setAllFiles(prev => {
+      const known = new Set(prev.map(f => f.path));
+      const missing = restored.filter(f => !known.has(f.path));
+      return missing.length === 0 ? prev : [...prev, ...missing];
+    });
+  }, []);
+
+  const { pending: pendingDelete, requestDelete, undo: undoDelete } = usePendingDeletes({
+    onRemoved: files => removeFromView(files.map(f => f.path)),
+    onRestored: restoreToView,
+  });
+
+  // Deleting also forgets the files' sidecar metadata, so favorites and tags
+  // for paths that no longer exist don't accumulate into orphan entries.
+  useEffect(() => {
+    if (pendingDelete) meta.forget(pendingDelete.map(f => f.path));
+  }, [pendingDelete, meta]);
+
+  const undoDeleteAndDismiss = useCallback(() => {
+    undoDelete();
+    dismissToast();
+    showToast('Delete undone');
+  }, [undoDelete, dismissToast, showToast]);
+
+  const deleteFiles = useCallback((toDelete: MediaFile[]) => {
+    if (toDelete.length === 0) return;
+    requestDelete(toDelete);
+    const label = toDelete.length === 1
+      ? `Deleted ${toDelete[0].name}`
+      : `Deleted ${toDelete.length} files`;
+    showToast(label, { label: 'Undo', onAction: undoDeleteAndDismiss }, UNDO_WINDOW_MS);
+  }, [requestDelete, showToast, undoDeleteAndDismiss]);
+
+  const deleteCurrentFile = useCallback(() => {
+    const file = files[currentIndex];
+    if (file) deleteFiles([file]);
+  }, [files, currentIndex, deleteFiles]);
+
+  // Dedupe and health repairs move files out from under us: drop them from
+  // the slideshow and forget their metadata too.
   const handleFilesDeleted = useCallback((deleted: string[]) => {
-    const del = new Set(deleted);
-    setAllFiles(prev => prev.filter(f => !del.has(f.path)));
-    const newFiles = files.filter(f => !del.has(f.path));
-    setFiles(newFiles);
-    setCurrentIndex(ci => Math.min(ci, Math.max(0, newFiles.length - 1)));
-  }, [files]);
+    removeFromView(deleted);
+    meta.forget(deleted);
+  }, [removeFromView, meta]);
 
   const handleMetadataRemoved = useCallback((removed: string[]) => {
-    const paths = new Set(removed);
-    setFavorites(previous => new Set([...previous].filter(filePath => !paths.has(filePath))));
-    setFileTags(previous => Object.fromEntries(Object.entries(previous).filter(([filePath]) => !paths.has(filePath))));
-    setRatings(previous => Object.fromEntries(Object.entries(previous).filter(([filePath]) => !paths.has(filePath))));
-    setCullingDecisions(previous => Object.fromEntries(Object.entries(previous).filter(([filePath]) => !paths.has(filePath))));
-  }, []);
+    meta.forgetLocally(removed); // the repair already rewrote the sidecars
+  }, [meta]);
 
   const handleFilesRestored = useCallback(async (restored: string[]) => {
     if (restored.length === 0 || currentDirs.length === 0) return;
@@ -584,6 +621,7 @@ function App() {
   };
 
   const handleVideoTimeUpdate = () => {
+    notePlaybackProgress(); // tells the stall watchdog the video is alive
     if (videoRef.current) {
       const progress = (videoRef.current.currentTime / videoRef.current.duration) * 100;
       setVideoProgress(progress || 0);
@@ -643,59 +681,23 @@ function App() {
   }, [isPlaying, currentIsVideo, isUserPaused]);
 
   // Batch operations from the grid's select mode
-  const batchFavorite = useCallback((paths: string[], favorite: boolean) => {
-    const next = new Set(favorites);
-    paths.forEach(p => favorite ? next.add(p) : next.delete(p));
-    setFavorites(next);
-    scheduleLibrarySave(next, fileTags, tagNames, ratings, cullingDecisions);
-  }, [favorites, fileTags, tagNames, ratings, cullingDecisions, scheduleLibrarySave]);
-
-  const batchTag = useCallback((paths: string[], tag: string) => {
-    const nextTags = { ...fileTags };
-    paths.forEach(p => {
-      const current = nextTags[p] ?? [];
-      if (!current.includes(tag)) nextTags[p] = [...current, tag];
-    });
-    let names = tagNames;
-    if (!names.includes(tag)) {
-      names = [...names, tag].sort();
-      setTagNames(names);
-    }
-    setFileTags(nextTags);
-    scheduleLibrarySave(favorites, nextTags, names, ratings, cullingDecisions);
-  }, [favorites, fileTags, tagNames, ratings, cullingDecisions, scheduleLibrarySave]);
-
-  const batchRating = useCallback((paths: string[], rating: number | null) => {
-    const next = { ...ratings };
-    paths.forEach(path => rating === null ? delete next[path] : next[path] = rating);
-    setRatings(next);
-    scheduleLibrarySave(favorites, fileTags, tagNames, next, cullingDecisions);
-  }, [ratings, favorites, fileTags, tagNames, cullingDecisions, scheduleLibrarySave]);
-
-  const batchCulling = useCallback((paths: string[], decision: CullingDecision | null) => {
-    const next = { ...cullingDecisions };
-    paths.forEach(path => decision === null ? delete next[path] : next[path] = decision);
-    setCullingDecisions(next);
-    scheduleLibrarySave(favorites, fileTags, tagNames, ratings, next);
-  }, [cullingDecisions, favorites, fileTags, tagNames, ratings, scheduleLibrarySave]);
+  const batchFavorite = meta.setFavorite;
+  const batchTag = meta.addTagToAll;
+  const batchRating = meta.setRating;
+  const batchCulling = meta.setCulling;
 
   const markCurrentCulling = useCallback((decision: CullingDecision) => {
     const file = files[currentIndex];
     if (!file) return;
-    batchCulling([file.path], decision);
+    meta.setCulling([file.path], decision);
     nextSlide();
-  }, [files, currentIndex, batchCulling, nextSlide]);
+  }, [files, currentIndex, meta, nextSlide]);
 
-  const batchDelete = useCallback(async (paths: string[]) => {
-    const deleted: string[] = [];
-    for (const p of paths) {
-      if (await window.api.deleteFile(p)) deleted.push(p);
-    }
-    if (deleted.length > 0) {
-      handleFilesDeleted(deleted);
-      showToast(`Moved ${deleted.length} file${deleted.length > 1 ? 's' : ''} to Trash`);
-    }
-  }, [handleFilesDeleted, showToast]);
+  const batchDelete = useCallback((paths: string[]) => {
+    const known = new Map(files.map(f => [f.path, f]));
+    const toDelete = paths.map(p => known.get(p)).filter((f): f is MediaFile => f !== undefined);
+    deleteFiles(toDelete);
+  }, [files, deleteFiles]);
 
   const batchMove = useCallback(async (paths: string[], slot: number) => {
     const destDir = quickMoveFolders[slot];
@@ -714,73 +716,40 @@ function App() {
     }
   }, [quickMoveFolders, handleFilesDeleted, showToast]);
 
-  // Photo-frame overlay: fetch the current photo's date-taken lazily
+  // Photo-frame overlay: fetch the current photo's date-taken lazily.
+  // The "already fetched" set is a ref so adding an entry doesn't re-run the
+  // effect that added it.
   const [frameDates, setFrameDates] = useState<Record<string, number>>({});
+  const frameDatesFetched = useRef<Set<string>>(new Set());
   useEffect(() => {
     const file = files[currentIndex];
-    if (!frameMode || !file || file.path in frameDates) return;
+    if (!frameMode || !file || frameDatesFetched.current.has(file.path)) return;
+    frameDatesFetched.current.add(file.path);
     window.api.getDates([file.path]).then(dates => {
       setFrameDates(prev => ({ ...prev, [file.path]: dates[file.path] ?? 0 }));
     });
-  }, [frameMode, files, currentIndex, frameDates]);
+  }, [frameMode, files, currentIndex]);
 
-  // Phone remote: start/stop the LAN server with the setting
-  useEffect(() => {
-    let cancelled = false;
-    window.api.setRemoteEnabled(remoteEnabled)
-      .then(url => { if (!cancelled) setRemoteUrl(url); })
-      .catch(() => { if (!cancelled) setRemoteUrl(null); });
-    return () => { cancelled = true; };
-  }, [remoteEnabled]);
-
-  // …and keep it fed with playback status (path/root stay in the main
-  // process for the thumbnail and upload endpoints — never sent to phones)
-  useEffect(() => {
-    const file = files[currentIndex];
-    window.api.sendRemoteStatus({
-      name: file?.name ?? null,
-      index: file ? currentIndex + 1 : null,
-      total: files.length,
-      playing: isPlaying,
-      favorite: file ? favorites.has(file.path) : false,
-      path: file?.path ?? null,
-      root: currentDirs[0] ?? null,
-    });
-  }, [files, currentIndex, isPlaying, favorites, currentDirs]);
-
-  // Guest uploads join the running show; keep the current slide in place
-  // (the re-derive would otherwise reset to slide 1)
-  useEffect(() => {
-    return window.api.on('remote:uploaded', (_event, file: MediaFile) => {
-      pendingPathRef.current = files[currentIndex]?.path ?? null;
-      setAllFiles(prev => prev.some(f => f.path === file.path) ? prev : [...prev, file]);
-      showToast(`📸 ${file.name} joined the show`);
-    });
+  // Phone remote, party reactions, guest uploads and the join QR code
+  const handleGuestUpload = useCallback((file: MediaFile) => {
+    // Keep the current slide in place; the re-derive would otherwise reset it
+    pendingPathRef.current = files[currentIndex]?.path ?? null;
+    setAllFiles(prev => prev.some(f => f.path === file.path) ? prev : [...prev, file]);
+    showToast(`\u{1F4F8} ${file.name} joined the show`);
   }, [files, currentIndex, showToast]);
 
-  // Emoji reactions from phones float up over the show
-  const [reactions, setReactions] = useState<{ id: number; emoji: string; x: number }[]>([]);
-  useEffect(() => {
-    return window.api.on('remote:reaction', (_event, emoji: string) => {
-      const id = Date.now() + Math.random();
-      setReactions(prev => [...prev.slice(-30), { id, emoji, x: 8 + Math.random() * 84 }]);
-      setTimeout(() => {
-        setReactions(prev => prev.filter(r => r.id !== id));
-      }, 3000);
-    });
-  }, []);
+  const currentFile: MediaFile | null = files[currentIndex] ?? null;
 
-  // QR code for the remote URL (shown in settings)
-  const [remoteQr, setRemoteQr] = useState<string | null>(null);
-  useEffect(() => {
-    if (!remoteUrl) {
-      setRemoteQr(null);
-      return;
-    }
-    QRCode.toDataURL(remoteUrl, { margin: 1, width: 180 })
-      .then(setRemoteQr)
-      .catch(() => setRemoteQr(null));
-  }, [remoteUrl]);
+  const { url: remoteUrl, qr: remoteQr, reactions } = useRemote({
+    enabled: remoteEnabled,
+    currentFile,
+    currentIndex,
+    total: files.length,
+    isPlaying,
+    isFavorite: currentFile ? favorites.has(currentFile.path) : false,
+    root: currentDirs[0] ?? null,
+    onUploaded: handleGuestUpload,
+  });
 
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newVolume = parseFloat(e.target.value);
@@ -799,31 +768,7 @@ function App() {
     }
   };
 
-  // Preloading Logic
-  const preloadRefs = useRef<HTMLImageElement[]>([]);
-
-  useEffect(() => {
-    if (files.length === 0) return;
-
-    const PRELOAD_COUNT = 10;
-    const newPreloads: HTMLImageElement[] = [];
-
-    for (let i = 1; i <= PRELOAD_COUNT; i++) {
-      const nextIndex = (currentIndex + i) % files.length;
-      const file = files[nextIndex];
-
-      if (file.type === 'image') {
-        const img = new Image();
-        img.src = getDisplayUrl(file.path);
-        // decode() warms the pixel cache so the incoming slide paints on the
-        // first transition frame instead of decoding mid-wipe
-        img.decode().catch(() => { });
-        newPreloads.push(img);
-      }
-    }
-
-    preloadRefs.current = newPreloads;
-  }, [currentIndex, files]);
+  useImagePreloader(files, currentIndex);
 
   // Auto-hide controls logic
   const [showControls, setShowControls] = useState(false);
@@ -849,18 +794,31 @@ function App() {
     }
   }, [handleMouseMove]);
 
-  // Slideshow timer
-  useEffect(() => {
-    let interval: ReturnType<typeof setInterval> | undefined;
-    if (isPlaying && files.length > 0) {
-      const current = files[currentIndex];
-      // Only start timer if it's an image. Videos handle their own progression via onEnded.
-      if (current && current.type === 'image') {
-        interval = setInterval(nextSlide, slideDuration);
-      }
-    }
-    return () => clearInterval(interval);
-  }, [isPlaying, files, currentIndex, slideDuration, nextSlide]);
+  // Slideshow advance: image timer + the watchdog for videos whose `ended`
+  // event never arrives (see useSlideshowPlayback).
+  const handleStalledVideo = useCallback((file: MediaFile) => {
+    showToast(`Skipping ${file.name} — it won't play`);
+  }, [showToast]);
+
+  const { notePlaybackProgress } = useSlideshowPlayback({
+    isPlaying,
+    currentFile: files[currentIndex] ?? null,
+    isUserPaused,
+    slideDuration,
+    onAdvance: nextSlide,
+    onStalled: handleStalledVideo,
+  });
+
+  /**
+   * A video that cannot be decoded at all (unsupported codec, truncated file,
+   * or one deleted from disk while queued) fires `error` and never `ended`.
+   * Move on rather than parking the slideshow on it.
+   */
+  const handleVideoError = useCallback(() => {
+    const file = files[currentIndex];
+    showToast(file ? `Can't play ${file.name} — skipping` : "Can't play that video");
+    if (isPlaying) nextSlide();
+  }, [files, currentIndex, isPlaying, nextSlide, showToast]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -905,6 +863,9 @@ function App() {
         case 'g':
           setIsGridOpen(prev => !prev);
           break;
+        case '?':
+          setIsShortcutsOpen(prev => !prev);
+          break;
         case 'h':
           toggleFavorite();
           break;
@@ -930,6 +891,7 @@ function App() {
           setIsGridOpen(false);
           setIsSettingsOpen(false);
           setIsHealthOpen(false);
+          setIsShortcutsOpen(false);
           break;
       }
     };
@@ -961,6 +923,11 @@ function App() {
       'seek-back': () => seekVideoBy(-10),
       'reveal': showCurrentInFinder,
       'delete': deleteCurrentFile,
+      // Non-destructive, matching the K/X keys. 'delete' above is the only
+      // menu action that trashes anything.
+      'culling-keep': () => markCurrentCulling('keep'),
+      'culling-reject': () => markCurrentCulling('reject'),
+      'shortcuts': () => setIsShortcutsOpen(prev => !prev),
     };
     const cleanups = [
       window.api.on('menu:open-directory', () => handleOpenDirectory()),
@@ -969,9 +936,8 @@ function App() {
       window.api.on('menu:action', (_event, name: string) => actions[name]?.()),
     ];
     return () => cleanups.forEach(c => c());
-  }, [handleOpenDirectory, showCurrentInFinder, nextSlide, prevSlide, togglePlay, seekVideoBy, deleteCurrentFile, toggleFavorite, frameMode, setFrameMode]);
+  }, [handleOpenDirectory, showCurrentInFinder, nextSlide, prevSlide, togglePlay, seekVideoBy, deleteCurrentFile, toggleFavorite, frameMode, setFrameMode, markCurrentCulling]);
 
-  const currentFile: MediaFile | null = files.length > 0 ? files[currentIndex] : null;
   const fileUrl = currentFile ? getFileUrl(currentFile.path) : '';
   const currentTransition = slideTransitions[transitionStyle];
   const healthIssues = useMemo(() => healthIssuesByPath(healthReport), [healthReport]);
@@ -1179,6 +1145,7 @@ function App() {
                   loop={!isPlaying} // Loop ONLY if not in slideshow mode. If slideshow, play once then next.
                   onTimeUpdate={handleVideoTimeUpdate}
                   onEnded={handleVideoEnded}
+                  onError={handleVideoError}
                   onClick={toggleVideoPause}
                   style={{
                     cursor: 'pointer',
@@ -1340,7 +1307,9 @@ function App() {
         onFilesRestored={handleFilesRestored}
       />
 
-      <Toast message={toast} />
+      <Toast message={toast} action={toastAction} />
+
+      {isShortcutsOpen && <ShortcutsOverlay onClose={() => setIsShortcutsOpen(false)} />}
 
       {reactions.length > 0 && (
         <div className="reactions-layer">
