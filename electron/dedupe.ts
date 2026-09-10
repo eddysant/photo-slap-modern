@@ -18,13 +18,24 @@ const VIDEO_PATTERNS = ['**/*.mp4', '**/*.mov', '**/*.webm', '**/*.mkv', '**/*.o
 
 const asDirs = (dirs: string | string[]) => (Array.isArray(dirs) ? dirs : [dirs]);
 
+/**
+ * fast-glob matches case-sensitively by default, so the lowercase patterns
+ * above missed every IMG_0001.JPG / CLIP.MOV a camera or phone produces —
+ * the duplicate finder silently ignored them while the slideshow (which
+ * lowercases the extension before matching) showed them. Keep this in step
+ * with fileScanner.ts.
+ */
+const GLOB_OPTIONS = { absolute: true, onlyFiles: true, caseSensitiveMatch: false } as const;
+
+/** Hashing reads whole files; a few at once keeps the disk busy without thrashing. */
+const HASH_CONCURRENCY = 8;
+
 export async function scanFiles(dirs: string | string[], kind: 'images' | 'videos' = 'images'): Promise<string[]> {
     const patterns = kind === 'videos' ? VIDEO_PATTERNS : IMAGE_PATTERNS;
 
     const results = await Promise.all(asDirs(dirs).map(dir => glob(patterns, {
         cwd: path.resolve(dir).replace(/\\/g, '/'),
-        absolute: true,
-        onlyFiles: true
+        ...GLOB_OPTIONS,
     })));
 
     return [...new Set(results.flat())];
@@ -36,10 +47,9 @@ export async function findExactDuplicates(dirs: string | string[], includeVideos
     // Scan every folder into one pool so duplicates ACROSS folders group too
     const perDir = await Promise.all(asDirs(dirs).map(dir => glob(patterns, {
         cwd: path.resolve(dir).replace(/\\/g, '/'),
-        absolute: true,
+        ...GLOB_OPTIONS,
         stats: true,
-        onlyFiles: true,
-        objectMode: true
+        objectMode: true,
     })));
     const seen = new Set<string>();
     const entries = perDir.flat().filter(e => !seen.has(e.path) && seen.add(e.path));
@@ -60,26 +70,38 @@ export async function findExactDuplicates(dirs: string | string[], includeVideos
         if (paths.length > 1) candidates.push(...paths);
     }
 
-    // Hash candidates
+    // Hash candidates. Each hash reads a whole file, so they run a few at a
+    // time instead of strictly one after another — on a library with many
+    // same-sized candidates the sequential version was the whole scan's cost.
     const hashMap = new Map<string, string[]>();
-
-    for (const filePath of candidates) {
-        try {
-            const hash = await calculateHash(filePath);
-            if (!hashMap.has(hash)) hashMap.set(hash, []);
-            hashMap.get(hash)?.push(filePath);
-        } catch (e) {
-            console.error(`Failed to hash ${filePath}`, e);
+    let next = 0;
+    const worker = async () => {
+        while (next < candidates.length) {
+            const filePath = candidates[next++];
+            try {
+                const hash = await calculateHash(filePath);
+                const group = hashMap.get(hash);
+                if (group) group.push(filePath);
+                else hashMap.set(hash, [filePath]);
+            } catch (e) {
+                console.error(`Failed to hash ${filePath}`, e);
+            }
         }
-    }
+    };
+    await Promise.all(
+        Array.from({ length: Math.min(HASH_CONCURRENCY, candidates.length) }, worker),
+    );
 
-    // Result
+    // Result. Files are sorted within each group and groups by their first
+    // file: hashing now completes out of order, and the review UI compares
+    // "the group's first two files", which should not shuffle between scans.
     const results: DuplicateGroup[] = [];
     for (const [hash, files] of hashMap.entries()) {
         if (files.length > 1) {
-            results.push({ hash, files });
+            results.push({ hash, files: [...files].sort() });
         }
     }
+    results.sort((a, b) => a.files[0].localeCompare(b.files[0]));
 
     return results;
 }

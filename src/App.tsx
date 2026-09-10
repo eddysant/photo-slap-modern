@@ -36,6 +36,9 @@ const mergeScans = (results: ScanResult[]): ScanResult => ({
 // which matters when sorting libraries with tens of thousands of files.
 const nameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
 
+/** Viewed-history disk writes are coalesced over this window. */
+const SHUFFLE_HISTORY_WRITE_DEBOUNCE_MS = 5000;
+
 const KEN_BURNS_ANIMATIONS = ['kb-pan-left', 'kb-pan-right', 'kb-pan-up', 'kb-pan-down', 'kb-zoom-in', 'kb-zoom-out'];
 
 function App() {
@@ -96,10 +99,38 @@ function App() {
       .finally(() => setShuffleHistoryReady(true));
   }, []);
 
+  /**
+   * Record the history in memory immediately, but write it to disk on a
+   * debounce. Every slide adds one path, and writing on each of them meant
+   * serialising the whole (library-sized) viewed list to electron-store every
+   * few seconds — for a photo frame left running, that is constant disk churn
+   * for data only read at startup.
+   */
+  const shuffleWriteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flushShuffleHistory = useCallback(() => {
+    if (!shuffleWriteTimer.current) return;
+    clearTimeout(shuffleWriteTimer.current);
+    shuffleWriteTimer.current = null;
+    window.api.setStore('shuffleHistory', shuffleHistoryRef.current);
+  }, []);
+
   const persistShuffleHistory = useCallback((history: ShuffleHistory) => {
     shuffleHistoryRef.current = history;
-    window.api.setStore('shuffleHistory', history);
+    if (shuffleWriteTimer.current) clearTimeout(shuffleWriteTimer.current);
+    shuffleWriteTimer.current = setTimeout(() => {
+      shuffleWriteTimer.current = null;
+      window.api.setStore('shuffleHistory', shuffleHistoryRef.current);
+    }, SHUFFLE_HISTORY_WRITE_DEBOUNCE_MS);
   }, []);
+
+  // Don't lose the tail of a session on quit or reload
+  useEffect(() => {
+    window.addEventListener('beforeunload', flushShuffleHistory);
+    return () => {
+      window.removeEventListener('beforeunload', flushShuffleHistory);
+      flushShuffleHistory();
+    };
+  }, [flushShuffleHistory]);
 
   // Zoom state (per-slide; ZoomPan reports in so Ken Burns can pause)
   const [isZoomed, setIsZoomed] = useState(false)
@@ -116,17 +147,25 @@ function App() {
   const [toast, setToast] = useState<string | null>(null)
   const [toastAction, setToastAction] = useState<ToastAction | null>(null)
   const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // While a toast carries an action, that toast is the only way to reach it.
+  // A passing status message ("Skipping X — it won't play") must not replace
+  // it and silently take Undo away mid-window.
+  const actionToastUntilRef = useRef(0);
   const showToast = useCallback((message: string, action: ToastAction | null = null, durationMs = 4000) => {
+    if (!action && Date.now() < actionToastUntilRef.current) return;
+    actionToastUntilRef.current = action ? Date.now() + durationMs : 0;
     setToast(message);
     setToastAction(action);
     if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
     toastTimeoutRef.current = setTimeout(() => {
+      actionToastUntilRef.current = 0;
       setToast(null);
       setToastAction(null);
     }, durationMs);
   }, []);
   const dismissToast = useCallback(() => {
     if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+    actionToastUntilRef.current = 0;
     setToast(null);
     setToastAction(null);
   }, []);

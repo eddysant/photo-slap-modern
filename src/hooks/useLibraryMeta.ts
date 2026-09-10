@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 /**
  * Favorites, tags, ratings and culling decisions — the metadata that lives in
@@ -211,7 +211,12 @@ export function useLibraryMeta(currentDirs: string[]) {
         if (next !== prev) commit(next);
     }, [commit]);
 
-    return {
+    // Memoized: a fresh object here changes identity on every render, which
+    // makes every consumer callback that lists it as a dependency unstable.
+    // In App that reached the effects owning the keydown handler and the
+    // menu:action IPC listeners, so they tore down and re-registered several
+    // times a second while a video played.
+    return useMemo(() => ({
         ...state,
         setFavorite,
         toggleFavoriteAt,
@@ -221,5 +226,5 @@ export function useLibraryMeta(currentDirs: string[]) {
         setCulling,
         forget,
         forgetLocally,
-    };
+    }), [state, setFavorite, toggleFavoriteAt, setTag, addTagToAll, setRating, setCulling, forget, forgetLocally]);
 }

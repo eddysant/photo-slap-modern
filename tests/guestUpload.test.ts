@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import path from 'node:path';
 import { findFreeUploadPath, sanitizeUploadName, UPLOAD_EXTENSIONS } from '../electron/guestUpload';
+import { SUPPORTED_EXTENSIONS } from '../electron/fileScanner';
 
 describe('sanitizeUploadName', () => {
     it('keeps an ordinary photo name intact', () => {
@@ -9,8 +10,15 @@ describe('sanitizeUploadName', () => {
     });
 
     it('classifies videos by extension', () => {
-        expect(sanitizeUploadName('clip.MOV')).toMatchObject({ ok: true, type: 'video', ext: '.mov' });
+        expect(sanitizeUploadName('clip.MP4')).toMatchObject({ ok: true, type: 'video', ext: '.mp4' });
         expect(sanitizeUploadName('clip.webm')).toMatchObject({ ok: true, type: 'video' });
+    });
+
+    it('refuses formats the slideshow cannot scan back', () => {
+        // .mov used to be accepted: the upload would join the running show and
+        // then disappear, because scanDirectory does not recognise it.
+        expect(sanitizeUploadName('IMG_0001.mov').ok).toBe(false);
+        expect(sanitizeUploadName('clip.mkv').ok).toBe(false);
     });
 
     it('strips any directory component from a traversal attempt', () => {
@@ -64,6 +72,11 @@ describe('sanitizeUploadName', () => {
         for (const ext of UPLOAD_EXTENSIONS) {
             expect(sanitizeUploadName(`photo${ext}`).ok).toBe(true);
         }
+    });
+
+    it('accepts exactly what the library scanner supports', () => {
+        // Guests must not be able to add a file that a re-scan would drop.
+        expect([...UPLOAD_EXTENSIONS].sort()).toEqual([...SUPPORTED_EXTENSIONS].sort());
     });
 });
 

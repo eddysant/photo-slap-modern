@@ -33,3 +33,38 @@ describe('scanFiles', () => {
         expect(names).toEqual(['one.jpg', 'other.jpg', 'small.png', 'two.jpg']);
     });
 });
+
+describe('uppercase extensions', () => {
+    let upperDir: string;
+
+    beforeAll(async () => {
+        upperDir = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-slap-upper-'));
+        // Cameras and phones routinely write uppercase extensions (IMG_0001.JPG).
+        // The slideshow scanner lowercases before matching, so these files show
+        // up in the show — the duplicate finder must not silently ignore them.
+        await fs.writeFile(path.join(upperDir, 'IMG_0001.JPG'), 'same-bytes-here');
+        await fs.writeFile(path.join(upperDir, 'IMG_0002.JPG'), 'same-bytes-here');
+        await fs.writeFile(path.join(upperDir, 'CLIP.MOV'), 'video-bytes-aaaa');
+        await fs.writeFile(path.join(upperDir, 'copy.MOV'), 'video-bytes-aaaa');
+    });
+
+    afterAll(async () => {
+        await fs.rm(upperDir, { recursive: true, force: true });
+    });
+
+    it('scanFiles finds uppercase image extensions', async () => {
+        const names = (await scanFiles(upperDir)).map(f => path.basename(f)).sort();
+        expect(names).toEqual(['IMG_0001.JPG', 'IMG_0002.JPG']);
+    });
+
+    it('scanFiles finds uppercase video extensions', async () => {
+        const names = (await scanFiles(upperDir, 'videos')).map(f => path.basename(f)).sort();
+        expect(names).toEqual(['CLIP.MOV', 'copy.MOV']);
+    });
+
+    it('findExactDuplicates groups uppercase-extension duplicates', async () => {
+        const groups = await findExactDuplicates(upperDir);
+        const grouped = groups.map(g => g.files.map(f => path.basename(f)).sort()).sort();
+        expect(grouped).toEqual([['CLIP.MOV', 'copy.MOV'], ['IMG_0001.JPG', 'IMG_0002.JPG']]);
+    });
+});

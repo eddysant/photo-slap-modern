@@ -18,6 +18,8 @@ import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
 
 const PORT = 9333;
+// Mirrors UNDO_WINDOW_MS in src/hooks/usePendingDeletes.ts
+const UNDO_WINDOW_MS = 7000;
 const PROJECT_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const HEIC_SAMPLE_URL = 'https://nokiatech.github.io/heif/content/images/autumn_1440x960.heic';
 
@@ -96,7 +98,12 @@ async function makeResilienceFixture() {
     // that used to leave the slideshow parked forever.
     await fs.writeFile(path.join(dir, '2-broken.mp4'), Buffer.alloc(4096, 0x41));
     await sharp(Buffer.from(tile('#fa0'))).jpeg().toFile(path.join(dir, '3-last.jpg'));
-    return dir;
+    // A playable clip, for the re-render/listener-churn measurement. Video
+    // timeupdate events are the app's highest-frequency render driver.
+    const playable = spawnSync('ffmpeg', ['-v', 'error', '-f', 'lavfi',
+        '-i', 'testsrc=duration=6:size=320x240:rate=10', '-pix_fmt', 'yuv420p',
+        path.join(dir, '4-playable.mp4')]);
+    return { dir, hasPlayable: playable.status === 0 };
 }
 
 // ---------- CDP ----------
@@ -626,7 +633,9 @@ try {
     // Its own library, and its own app launch: the app is single-instance,
     // and these checks must not perturb the counts used above.
     console.log('undecodable media does not freeze the slideshow');
-    brokenFixture = await makeResilienceFixture();
+    const resilience = await makeResilienceFixture();
+    brokenFixture = resilience.dir;
+    const resilienceCount = (await fs.readdir(brokenFixture)).length;
     cdp.close();
     cdp = null;
     await shutdownApp(child);
@@ -636,12 +645,12 @@ try {
     let opened = '';
     for (let i = 0; i < 40; i++) {
         opened = await cdp.evaluate(`document.querySelector('.file-info')?.textContent ?? ''`);
-        if (opened.trim().endsWith('/ 3')) break;
+        if (opened.trim().endsWith(`/ ${resilienceCount}`)) break;
         await sleep(500);
     }
-    check('relaunched against the resilience fixture', opened.trim().endsWith('/ 3'), opened);
+    check('relaunched against the resilience fixture', opened.trim().endsWith(`/ ${resilienceCount}`), opened);
 
-    if (opened.trim().endsWith('/ 3')) {
+    if (opened.trim().endsWith(`/ ${resilienceCount}`)) {
         // Land on the broken video and start the show
         const parked = await cdp.evaluate(`(async () => {
             const key = k => window.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true }));
@@ -671,9 +680,14 @@ try {
         const key = k => window.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true }));
         const counter = () => document.querySelector('.file-info')?.textContent?.trim() ?? '';
         const title = () => document.querySelector('.title-bar')?.textContent ?? '';
-        // Go to the last slide, so a reset-to-first would be obvious
-        key('ArrowRight'); await new Promise(r => setTimeout(r, 300));
-        key('ArrowRight'); await new Promise(r => setTimeout(r, 300));
+        // Park on a known image slide first. Landing on a video would let its
+        // load/skip toast race the delete toast and make this non-deterministic.
+        for (let i = 0; i < 10; i++) {
+            if (title().includes('3-last')) break;
+            key('ArrowRight');
+            await new Promise(r => setTimeout(r, 300));
+        }
+        await new Promise(r => setTimeout(r, 600));
         const before = { counter: counter(), title: title() };
         key('Backspace');
         await new Promise(r => setTimeout(r, 900));
@@ -689,9 +703,70 @@ try {
     check('delete does not jump back to the first slide',
         !del.afterDelete.counter.startsWith('1 /') || del.before.counter.startsWith('1 /'),
         `${del.before.counter} -> ${del.afterDelete.counter}`);
-    check('undo restores the deleted file', del.restored.endsWith('/ 3'), `${del.afterDelete.counter} -> ${del.restored}`);
+    check('undo restores the deleted file', del.restored.endsWith(`/ ${resilienceCount}`), `${del.afterDelete.counter} -> ${del.restored}`);
+    // Wait out the undo window: an undone delete must never reach the Trash,
+    // even after the timer that would otherwise have committed it.
+    await sleep(UNDO_WINDOW_MS + 1500);
     const stillOnDisk = await fs.readdir(brokenFixture);
-    check('undone delete never reached the Trash', stillOnDisk.length === 3, JSON.stringify(stillOnDisk));
+    check('undone delete never reached the Trash even after the window closed',
+        stillOnDisk.length === resilienceCount, JSON.stringify(stillOnDisk));
+
+    if (resilience.hasPlayable) {
+        console.log('render churn');
+        // Video `timeupdate` fires ~4x/s and is the app's highest-frequency
+        // render driver. Effects that own the keydown listener must not tear
+        // down and re-register on every render: when the hooks feeding their
+        // dependency arrays return a fresh object each render, the app
+        // re-registers its global listeners several times a second.
+        const churn = await cdp.evaluate(`(async () => {
+            const key = k => window.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true }));
+            // Navigate to the playable clip
+            for (let i = 0; i < 8; i++) {
+                if ((document.querySelector('.title-bar')?.textContent ?? '').includes('4-playable')) break;
+                key('ArrowRight');
+                await new Promise(r => setTimeout(r, 250));
+            }
+            const onClip = (document.querySelector('.title-bar')?.textContent ?? '').includes('4-playable');
+            // The <video> mounts after the slide transition settles, so wait
+            // for it — attaching to nothing would leave the measurement below
+            // recording zero and passing without testing anything.
+            let clip = null;
+            for (let i = 0; i < 40; i++) {
+                clip = document.querySelector('video.media-element');
+                if (clip && clip.readyState >= 2) break;
+                await new Promise(r => setTimeout(r, 250));
+            }
+            if (clip) { clip.currentTime = 0; await clip.play().catch(() => {}); }
+            const original = window.addEventListener.bind(window);
+            let keydownRegistrations = 0;
+            window.addEventListener = function (type, ...rest) {
+                if (type === 'keydown') keydownRegistrations++;
+                return original(type, ...rest);
+            };
+            const video = clip ?? document.querySelector('video.media-element');
+            const diag = video ? {
+                paused: video.paused, readyState: video.readyState,
+                duration: video.duration, err: video.error?.code ?? null,
+                src: (video.currentSrc || '').split('/').pop(),
+            } : null;
+            let timeupdates = 0;
+            const countTick = () => { timeupdates++; };
+            video?.addEventListener('timeupdate', countTick);
+            await new Promise(r => setTimeout(r, 5000));
+            video?.removeEventListener('timeupdate', countTick);
+            return JSON.stringify({ onClip, keydownRegistrations, timeupdates, diag });
+        })()`).then(JSON.parse);
+
+        check('measurement landed on the playable clip', churn.onClip, JSON.stringify(churn));
+        // Without ticks there are no re-renders, and the check below is vacuous
+        check('the clip actually played during the measurement', churn.timeupdates > 5,
+            `${churn.timeupdates} timeupdates`);
+        // One registration per genuine slide change is fine; one per render
+        // is not. The clip drives ~20 timeupdates over 5s.
+        check('keydown listener is not re-registered on every render',
+            churn.keydownRegistrations <= 4,
+            `${churn.keydownRegistrations} registrations over ${churn.timeupdates} timeupdates`);
+    }
 
     console.log('keyboard help');
     const help = await cdp.evaluate(`(async () => {

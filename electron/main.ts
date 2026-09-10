@@ -21,6 +21,7 @@ import {
   allowRoot, isAllowedPath, assertAllowedPath, assertAllowedPaths, filterAllowedPaths, mediaUrlToPath,
 } from './pathAccess'
 import { sanitizeUploadName, findFreeUploadPath } from './guestUpload'
+import { createConcurrencyLimit } from './concurrencyLimit'
 import ExifReader from 'exifreader';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -121,22 +122,8 @@ const isScalableImage = (p: string) => /\.(jpe?g|png|webp|bmp|heic|heif)$/i.test
 // derivations are capped to a small concurrency (the rest queue) and
 // identical in-flight requests are coalesced into one job.
 const DERIVE_CONCURRENCY = 4;
-let deriveActive = 0;
-const deriveQueue: (() => void)[] = [];
+const withDeriveSlot = createConcurrencyLimit(DERIVE_CONCURRENCY);
 const deriveInFlight = new Map<string, Promise<{ buffer: Buffer; type: string }>>();
-
-async function withDeriveSlot<T>(fn: () => Promise<T>): Promise<T> {
-  if (deriveActive >= DERIVE_CONCURRENCY) {
-    await new Promise<void>(resolve => deriveQueue.push(resolve));
-  }
-  deriveActive++;
-  try {
-    return await fn();
-  } finally {
-    deriveActive--;
-    deriveQueue.shift()?.();
-  }
-}
 
 /**
  * HEIC transcode and/or downscale to `maxDim` (longest side), disk-cached.

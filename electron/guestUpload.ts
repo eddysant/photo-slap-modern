@@ -1,16 +1,18 @@
 import path from 'node:path';
+import { SUPPORTED_EXTENSIONS, VIDEO_EXTENSIONS } from './fileScanner';
 
 /**
  * Guest uploads arrive over the LAN remote from phones at a party. The
  * filename is attacker-controlled, so it is reduced to a bare, sanitized
  * basename with a whitelisted extension before it ever reaches the disk.
  */
-export const UPLOAD_EXTENSIONS = new Set([
-    '.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.heif',
-    '.mp4', '.mov', '.webm',
-]);
-
-const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.webm']);
+/**
+ * Derived from the scanner's list rather than written out again. The two had
+ * drifted: uploads accepted `.mov`, which the scanner does not recognise, so
+ * a guest's iPhone video joined the running show and then vanished from the
+ * library on the next launch — with nothing to explain where it went.
+ */
+export const UPLOAD_EXTENSIONS = SUPPORTED_EXTENSIONS;
 
 export type SanitizedUploadName =
     | { ok: true; safeName: string; stem: string; ext: string; type: 'image' | 'video' }

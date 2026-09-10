@@ -1,9 +1,14 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-const VIDEO_EXTENSIONS = new Set(['.webm', '.mp4', '.gifv', '.ogg']);
+/**
+ * The formats the slideshow can actually play back. This is the authority:
+ * anything not listed here will not be found by a re-scan, so it must not be
+ * accepted from anywhere else either (see guestUpload.ts).
+ */
+export const VIDEO_EXTENSIONS = new Set(['.webm', '.mp4', '.gifv', '.ogg']);
 
-const SUPPORTED_EXTENSIONS = new Set([
+export const SUPPORTED_EXTENSIONS = new Set([
   // Images (.heic/.heif are transcoded to JPEG by the media:// protocol)
   '.jpg', '.jpeg', '.webp', '.gif', '.png', '.bmp', '.heic', '.heif',
   ...VIDEO_EXTENSIONS,
