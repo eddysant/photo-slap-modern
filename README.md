@@ -90,11 +90,17 @@ The file is fine — after dragging **photo-slap.app** to Applications, clear th
 quarantine flag once:
 
 ```bash
-xattr -cr /Applications/photo-slap.app
+xattr -dr com.apple.quarantine /Applications/photo-slap.app
 ```
 
-It opens normally from then on. Apps you build yourself (`npm run build`) are
-never quarantined and don't need this.
+It opens normally from then on — but **the flag comes back on every upgrade**,
+because each install stages a fresh copy of the app. (`xattr -cr` also works,
+but it strips *every* extended attribute; the command above removes only the
+quarantine flag.)
+
+Apps you build yourself (`npm run build`) are never quarantined and don't need
+this. Signing and notarizing would remove the step entirely — see the
+improvement notes in [CLAUDE.md](CLAUDE.md).
 
 The Homebrew Cask is published from [eddysant/homebrew-tap](https://github.com/eddysant/homebrew-tap)
 and follows the latest GitHub Release. The macOS package is Apple Silicon.
