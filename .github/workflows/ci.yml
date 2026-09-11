@@ -33,6 +33,13 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # Chromium refuses to start rather than drop its sandbox, and npm cannot
+      # set the setuid bit on extraction. Keep the sandbox on (rather than
+      # passing --no-sandbox) so CI runs the same way a user's machine does.
+      - name: Fix permissions on Electron's sandbox helper
+        run: |
+          sudo chown root:root node_modules/electron/dist/chrome-sandbox
+          sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
       - run: npx tsc && npx vite build
       # Electron needs a display even though nothing looks at the window.
       - run: xvfb-run -a npm run test:smoke

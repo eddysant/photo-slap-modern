@@ -73,7 +73,9 @@ async function waitForPage(timeoutMs = 60000) {
         } catch { /* not up yet */ }
         await sleep(500);
     }
-    throw new Error('App page never appeared (another photo-slap may hold the single-instance lock)');
+    throw new Error('App page never appeared on the debug port — see the app output below. '
+        + 'Common causes: another photo-slap holds the single-instance lock, no display available, '
+        + "or Electron's chrome-sandbox lacks its setuid bit on Linux.");
 }
 
 function connect(page) {
