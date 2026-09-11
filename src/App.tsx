@@ -1183,7 +1183,7 @@ function App() {
       )}
 
       {isExifEnabled && exifData && (
-        <div className={`exif-overlay ${controlsPosition === 'left' ? 'position-left' : ''}`}>
+        <div className={`exif-overlay ${controlsPosition === 'left' ? 'position-left' : ''} ${toast ? 'toast-visible' : ''}`}>
           {exifData.make && <div>CAM: {exifData.make} {exifData.model}</div>}
           {exifData.lens && <div>LENS: {exifData.lens}</div>}
           <div style={{ display: 'flex', gap: '10px' }}>
@@ -1409,7 +1409,7 @@ function App() {
         onFilesRestored={handleFilesRestored}
       />
 
-      <Toast message={toast} action={toastAction} />
+      <Toast message={toast} action={toastAction} positionLeft={controlsPosition === 'left'} />
 
       {isShortcutsOpen && <ShortcutsOverlay onClose={() => setIsShortcutsOpen(false)} />}
 

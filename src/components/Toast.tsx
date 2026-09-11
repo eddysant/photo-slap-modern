@@ -5,15 +5,21 @@ export interface ToastAction {
     onAction: () => void;
 }
 
-export function Toast({ message, action }: { message: string | null; action?: ToastAction | null }) {
+export function Toast({ message, action, positionLeft = false }: {
+    message: string | null;
+    action?: ToastAction | null;
+    /** Controls are on the left, so the right edge carries the title bar. */
+    positionLeft?: boolean;
+}) {
     return (
         <AnimatePresence>
             {message && (
                 <motion.div
-                    className="toast"
-                    initial={{ y: 40, opacity: 0 }}
-                    animate={{ y: 0, opacity: 1 }}
-                    exit={{ y: 40, opacity: 0 }}
+                    className={`toast ${positionLeft ? 'position-left' : ''}`}
+                    // Slides in from the right edge it now sits against
+                    initial={{ x: 40, opacity: 0 }}
+                    animate={{ x: 0, opacity: 1 }}
+                    exit={{ x: 40, opacity: 0 }}
                     transition={{ duration: 0.2 }}
                 >
                     <span>{message}</span>

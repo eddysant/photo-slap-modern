@@ -987,6 +987,16 @@
   text-align: right;
   backdrop-filter: blur(4px);
   box-shadow: 4px 4px 0px rgba(0, 0, 0, 0.5);
+  transition: top 0.2s ease;
+}
+
+/*
+ * The toast now lives in the same corner. Rather than let it cover the camera
+ * details, the EXIF panel steps down while one is on screen and slides back
+ * when it clears. Far enough to clear a wrapped two-line toast with an action.
+ */
+.exif-overlay.toast-visible {
+  top: 156px;
 }
 
 .volume-control {
@@ -1793,11 +1803,15 @@
 }
 
 /* Toast Notifications */
+/*
+ * Top-right, clear of the 38px title bar. It used to sit at bottom-center,
+ * directly over the control bar and the middle of the picture.
+ */
 .toast {
   position: fixed;
-  bottom: 110px;
-  left: 50%;
-  transform: translateX(-50%);
+  top: 46px;
+  right: 20px;
+  max-width: min(420px, calc(100vw - 40px));
   background: #1a1a1a;
   color: #fff;
   font-family: 'Silkscreen', cursive;
@@ -1829,6 +1843,11 @@
 .toast-action:hover {
   color: #000;
   background: #00ff88;
+}
+
+/* Left-hand controls put a vertical title bar down the whole right edge. */
+.toast.position-left {
+  right: 68px;
 }
 .exif-overlay.position-left {
   right: 80px;
