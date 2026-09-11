@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getShuffleProgress, makeShuffleHistoryKey, orderForNoRepeatShuffle, recordViewed } from '../src/shuffleHistory';
+import { getShuffleProgress, makeShuffleHistoryKey, orderForNoRepeatShuffle, recordViewed, shuffleInPlace } from '../src/shuffleHistory';
 
 const files = ['a', 'b', 'c', 'd'].map(path => ({ path }));
 
@@ -29,5 +29,37 @@ describe('no-repeat shuffle', () => {
     it('reports unique eligible progress and ignores stale history', () => {
         expect(getShuffleProgress(files, ['a', 'a', 'c', 'missing'])).toEqual({ viewed: 2, total: 4 });
         expect(getShuffleProgress(files, [])).toEqual({ viewed: 0, total: 4 });
+    });
+});
+
+describe('shuffleInPlace', () => {
+    it('keeps exactly the same items', () => {
+        const items = [1, 2, 3, 4, 5, 6, 7, 8];
+        const result = shuffleInPlace([...items]);
+        expect([...result].sort((a, b) => a - b)).toEqual(items);
+    });
+
+    it('shuffles in place and returns the same array', () => {
+        const items = [1, 2, 3];
+        const result = shuffleInPlace(items);
+        expect(result).toBe(items);
+    });
+
+    it('is driven entirely by the injected random source', () => {
+        // A source that always returns 0 makes Fisher-Yates fully deterministic
+        const a = shuffleInPlace([1, 2, 3, 4, 5], () => 0);
+        const b = shuffleInPlace([1, 2, 3, 4, 5], () => 0);
+        expect(a).toEqual(b);
+    });
+
+    it('handles empty and single-item arrays', () => {
+        expect(shuffleInPlace([])).toEqual([]);
+        expect(shuffleInPlace(['only'])).toEqual(['only']);
+    });
+
+    it('actually reorders with a real random source', () => {
+        const items = Array.from({ length: 50 }, (_, i) => i);
+        const shuffled = shuffleInPlace([...items]);
+        expect(shuffled).not.toEqual(items); // 50! makes a no-op shuffle impossible in practice
     });
 });

@@ -37,7 +37,7 @@ Images: `.jpg` `.jpeg` `.png` `.webp` `.gif` `.bmp` `.heic` `.heif` — Videos: 
 - **Grid view** (`G`) — virtualized thumbnails, smooth at tens of thousands of photos. Filename, tag, favorite, health, rating, and culling filters compose together, and select mode batch-applies favorites, tags, ratings, decisions, moves, or deletes.
 - **Culling mode** — a paused, photos-only review bar. `K`/`Enter` to Keep, `X` to Reject, `H` to favorite, `1`–`3` to file into a quick-move folder, and 1–5 stars from the bar itself. Decisions are non-destructive and live in the sidecar; Trash stays a separate action.
 - **Quick-move folders** — assign up to three targets in Settings, then `1`/`2`/`3` moves the current file. With `Delete`, it makes triaging a photo dump fast.
-- **Safe delete** — files go to the system Trash, never hard-deleted, and every delete is undoable: the file leaves the slideshow at once but the trashing is held for a few seconds while the toast offers **Undo**.
+- **Safe delete** — files go to the system Trash, never hard-deleted. Deleting from the slideshow or the grid is undoable: the file leaves the view at once but the trashing is held for a few seconds while the toast offers **Undo**. Duplicate-finder deletions apply immediately — you've just compared the two side by side — and are recoverable from the Trash like any other.
 
 ## Cleaning up
 

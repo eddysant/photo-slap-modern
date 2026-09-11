@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import glob from 'fast-glob';
+import { isWithin } from './pathAccess';
 
 /**
  * Favorites and tags live WITH the photo library, not in app storage:
@@ -110,8 +111,6 @@ export async function loadLibraryMeta(roots: string[]): Promise<LibraryMeta> {
     return mergeSidecars(sidecars);
 }
 
-const isUnder = (dir: string, p: string) => p === dir || p.startsWith(dir + path.sep);
-
 export async function saveLibraryMeta(roots: string[], meta: LibraryMeta): Promise<void> {
     for (const root of roots) {
         const resolvedRoot = path.resolve(root);
@@ -120,7 +119,7 @@ export async function saveLibraryMeta(roots: string[], meta: LibraryMeta): Promi
         // deepest first so entries stay in the most specific file.
         const dirs = [...new Set([...existingFiles.map(f => path.dirname(f)), resolvedRoot])]
             .sort((a, b) => b.length - a.length);
-        const ownerOf = (p: string) => dirs.find(d => isUnder(d, p)) ?? resolvedRoot;
+        const ownerOf = (p: string) => dirs.find(d => isWithin(d, p)) ?? resolvedRoot;
 
         const buckets = new Map<string, {
             favorites: string[];
@@ -134,22 +133,22 @@ export async function saveLibraryMeta(roots: string[], meta: LibraryMeta): Promi
         };
 
         for (const fav of meta.favorites) {
-            if (!isUnder(resolvedRoot, fav)) continue; // belongs to another root
+            if (!isWithin(resolvedRoot, fav)) continue; // belongs to another root
             const dir = ownerOf(fav);
             bucketFor(dir).favorites.push(path.relative(dir, fav));
         }
         for (const [filePath, fileTags] of Object.entries(meta.tags)) {
-            if (!isUnder(resolvedRoot, filePath) || fileTags.length === 0) continue;
+            if (!isWithin(resolvedRoot, filePath) || fileTags.length === 0) continue;
             const dir = ownerOf(filePath);
             bucketFor(dir).tags[path.relative(dir, filePath)] = fileTags;
         }
         for (const [filePath, rating] of Object.entries(meta.ratings ?? {})) {
-            if (!isUnder(resolvedRoot, filePath) || !Number.isInteger(rating) || rating < 1 || rating > 5) continue;
+            if (!isWithin(resolvedRoot, filePath) || !Number.isInteger(rating) || rating < 1 || rating > 5) continue;
             const dir = ownerOf(filePath);
             bucketFor(dir).ratings[path.relative(dir, filePath)] = rating;
         }
         for (const [filePath, decision] of Object.entries(meta.culling ?? {})) {
-            if (!isUnder(resolvedRoot, filePath) || (decision !== 'keep' && decision !== 'reject')) continue;
+            if (!isWithin(resolvedRoot, filePath) || (decision !== 'keep' && decision !== 'reject')) continue;
             const dir = ownerOf(filePath);
             bucketFor(dir).culling[path.relative(dir, filePath)] = decision;
         }

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import path from 'node:path';
 import {
     allowRoot, isAllowedPath, assertAllowedPath, assertAllowedPaths, filterAllowedPaths,
-    mediaUrlToPath, __resetAllowedRoots,
+    isWithin, mediaUrlToPath, __resetAllowedRoots,
 } from '../electron/pathAccess';
 import { getFileUrl } from '../src/utils';
 
@@ -86,5 +86,30 @@ describe('mediaUrlToPath', () => {
     it('normalizes encoded traversal so the allowlist sees the real path', () => {
         const resolved = mediaUrlToPath(new URL('media://local/tmp/lib/..%2F..%2Fetc/passwd'));
         expect(resolved).not.toContain('..');
+    });
+});
+
+describe('isWithin', () => {
+    it('matches a file inside the directory, at any depth', () => {
+        expect(isWithin('/lib', '/lib/a.jpg')).toBe(true);
+        expect(isWithin('/lib', '/lib/nested/deep/a.jpg')).toBe(true);
+        expect(isWithin('/lib', '/lib')).toBe(true);
+    });
+
+    it('does not match a sibling sharing the name as a prefix', () => {
+        // The trailing separator is the whole point
+        expect(isWithin('/lib', '/lib-private/secret.jpg')).toBe(false);
+        expect(isWithin('/lib', '/library/a.jpg')).toBe(false);
+    });
+
+    it('does not match an unrelated path', () => {
+        expect(isWithin('/lib', '/etc/passwd')).toBe(false);
+    });
+
+    it('is case-sensitive, unlike the security check', () => {
+        // Ownership decisions feed path.relative(), which would produce
+        // "../../a/b/c.jpg" if a differently-cased root were treated as a match.
+        expect(isWithin('/Lib', '/lib/a.jpg')).toBe(false);
+        expect(path.relative('/Lib', '/lib/a.jpg')).toContain('..');
     });
 });

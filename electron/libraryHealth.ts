@@ -5,6 +5,7 @@ import sharp from 'sharp';
 import decodeHeic from 'heic-decode';
 import ExifReader from 'exifreader';
 import { loadLibraryMeta } from './libraryMeta';
+import { isWithin } from './pathAccess';
 import { scanDirectory } from './fileScanner';
 
 export type LibraryHealthCategory = 'corrupt' | 'tiny' | 'unsupported' | 'missing-date' | 'orphan-sidecar';
@@ -203,8 +204,6 @@ export async function scanLibraryHealth(roots: string[]): Promise<LibraryHealthR
     return { roots: normalizedRoots, scannedFiles: supported.length, issues, summary };
 }
 
-const isUnder = (root: string, filePath: string) => filePath === root || filePath.startsWith(root + path.sep);
-
 const toPortableRelative = (relativePath: string) => relativePath.split(path.sep).join('/');
 const fromPortableRelative = (relativePath: string) => relativePath.replace(/\\/g, '/').split('/').join(path.sep);
 
@@ -271,8 +270,8 @@ export async function quarantineCorruptFiles(roots: string[], filePaths: string[
     const results: QuarantinedFile[] = [];
     for (const requested of [...new Set(filePaths)]) {
         const source = path.resolve(requested);
-        const root = normalizedRoots.find(candidate => isUnder(candidate, source));
-        if (!root || isUnder(quarantineRoot(root), source)) continue;
+        const root = normalizedRoots.find(candidate => isWithin(candidate, source));
+        if (!root || isWithin(quarantineRoot(root), source)) continue;
         let stat;
         try {
             stat = await fs.stat(source);
@@ -346,7 +345,7 @@ export async function restoreQuarantinedFiles(roots: string[], requestedPaths: s
     const removedByRoot = new Map<string, Set<string>>();
     for (const requested of [...new Set(requestedPaths.map(candidate => path.resolve(candidate)))]) {
         const entry = byPath.get(requested);
-        if (!entry || !isUnder(quarantineRoot(entry.root), requested) || !isUnder(entry.root, entry.originalPath)) continue;
+        if (!entry || !isWithin(quarantineRoot(entry.root), requested) || !isWithin(entry.root, entry.originalPath)) continue;
         const destination = await unusedDestination(entry.originalPath);
         await fs.mkdir(path.dirname(destination), { recursive: true });
         await moveAcrossDevices(requested, destination);
@@ -365,7 +364,7 @@ export async function permanentlyDeleteQuarantinedFiles(roots: string[], request
     const removedByRoot = new Map<string, Set<string>>();
     for (const requested of [...new Set(requestedPaths.map(candidate => path.resolve(candidate)))]) {
         const entry = byPath.get(requested);
-        if (!entry || !isUnder(quarantineRoot(entry.root), requested)) continue;
+        if (!entry || !isWithin(quarantineRoot(entry.root), requested)) continue;
         try {
             await fs.unlink(requested);
             if (!removedByRoot.has(entry.root)) removedByRoot.set(entry.root, new Set());

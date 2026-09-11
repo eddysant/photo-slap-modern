@@ -18,6 +18,22 @@ const allowedRoots = new Set<string>();
 const CASE_INSENSITIVE = process.platform === 'darwin' || process.platform === 'win32';
 const forCompare = (p: string) => (CASE_INSENSITIVE ? p.toLowerCase() : p);
 
+/**
+ * Exact containment: is `filePath` inside `dir`?
+ *
+ * Deliberately case-SENSITIVE, unlike `isAllowedPath` below. Callers use this
+ * to decide which root *owns* a path and then take `path.relative()` against
+ * that root — and a case-insensitive match between "/A/B" and "/a/b/c.jpg"
+ * would produce a relative path of "../../a/b/c.jpg", corrupting sidecar and
+ * quarantine entries. The security check can be lenient about case because it
+ * only needs a yes/no; ownership cannot.
+ *
+ * The trailing separator is what stops "/lib-private" matching root "/lib".
+ */
+export function isWithin(dir: string, filePath: string): boolean {
+    return filePath === dir || filePath.startsWith(dir + path.sep);
+}
+
 /** Permit reads/writes under `dir`. Returns the resolved root. */
 export function allowRoot(dir: string): string {
     const resolved = path.resolve(dir);

@@ -129,6 +129,16 @@ export function DedupeModal({ isOpen, onClose, rootPaths, onFilesDeleted }: Dedu
     const [dimensions, setDimensions] = useState<Record<string, Dimensions>>({});
 
     const workerRef = useRef<Worker | null>(null);
+    /**
+     * Paths already asked about. `files:getInfo` omits anything it cannot stat
+     * — a file deleted since the scan, most obviously — and the effect below
+     * used to key off `fileInfos`, which it also replaced with a fresh object
+     * every time. A path that never came back therefore re-triggered the
+     * effect forever: measured at ~2,700 IPC calls a second.
+     */
+    const requestedInfoRef = useRef<Set<string>>(new Set());
+    /** Files the review tried to trash but couldn't, reported at the end. */
+    const failedDeletesRef = useRef<string[]>([]);
 
     // The folders to scan: defaults to the whole open session, but a folder
     // can be picked here directly (the modal is reachable from the start screen).
@@ -143,6 +153,8 @@ export function DedupeModal({ isOpen, onClose, rootPaths, onFilesDeleted }: Dedu
             setScanRoots(rootPaths);
             setFileInfos({});
             setDimensions({});
+            requestedInfoRef.current.clear();
+            failedDeletesRef.current = [];
         }
     }, [isOpen, rootPaths]);
 
@@ -181,13 +193,13 @@ export function DedupeModal({ isOpen, onClose, rootPaths, onFilesDeleted }: Dedu
 
     // Fetch sizes for the pair on display
     useEffect(() => {
-        const missing = [leftImage, rightImage].filter(p => p && !(p in fileInfos));
-        if (missing.length > 0) {
-            window.api.getFileInfo(missing).then(info => {
-                setFileInfos(prev => ({ ...prev, ...info }));
-            });
-        }
-    }, [leftImage, rightImage, fileInfos]);
+        const missing = [leftImage, rightImage].filter(p => p && !requestedInfoRef.current.has(p));
+        if (missing.length === 0) return;
+        missing.forEach(p => requestedInfoRef.current.add(p));
+        window.api.getFileInfo(missing).then(info => {
+            if (Object.keys(info).length > 0) setFileInfos(prev => ({ ...prev, ...info }));
+        });
+    }, [leftImage, rightImage]);
 
     const recordDimensions = (path: string, dims: Dimensions) => {
         setDimensions(prev => (prev[path]?.w === dims.w && prev[path]?.h === dims.h ? prev : { ...prev, [path]: dims }));
@@ -308,7 +320,10 @@ export function DedupeModal({ isOpen, onClose, rootPaths, onFilesDeleted }: Dedu
         if (currentGroupIndex < groups.length - 1) {
             setCurrentGroupIndex(prev => prev + 1);
         } else {
-            setStatusMsg('All duplicates resolved!');
+            const failed = failedDeletesRef.current.length;
+            setStatusMsg(failed === 0
+                ? 'All duplicates resolved!'
+                : `All duplicates resolved — but ${failed} file${failed > 1 ? 's' : ''} could not be moved to Trash.`);
             setStep('done');
         }
     };
@@ -316,6 +331,10 @@ export function DedupeModal({ isOpen, onClose, rootPaths, onFilesDeleted }: Dedu
     const deleteFile = async (path: string) => {
         const ok = await window.api.deleteFile(path);
         if (ok) onFilesDeleted?.([path]);
+        // A file that couldn't be trashed still leaves the review — repeating
+        // the same pair would just trap the user — but saying nothing would
+        // leave them believing it was deleted.
+        else failedDeletesRef.current.push(path);
         return ok;
     };
 
