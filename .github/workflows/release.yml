@@ -22,6 +22,12 @@ jobs:
       - run: npx electron-builder --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
+      # Smoke-test the bundle we are about to publish, in its shipped
+      # configuration (file:// + production CSP + asar). npm test and the e2e
+      # only ever exercise the dev server, which differs in ways that have
+      # shipped bugs before.
+      - name: Smoke-test the built app
+        run: npm run test:smoke -- --app "$(ls -d release/*/mac-*/photo-slap.app | head -1)"
       - uses: softprops/action-gh-release@v3
         with:
           files: |

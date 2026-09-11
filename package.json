@@ -12,6 +12,7 @@
     "lint": "eslint . --max-warnings 0",
     "test": "vitest run",
     "test:e2e": "node scripts/e2e.mjs",
+    "test:smoke": "node scripts/smoke-packaged.mjs",
     "preview": "vite preview",
     "start": "open release/0.0.0/mac-arm64/photo-slap.app"
   },

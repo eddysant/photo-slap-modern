@@ -21,3 +21,18 @@ jobs:
       - run: npx tsc
       - run: npx eslint . --max-warnings 0
       - run: npm test
+
+  # The renderer behaves differently when loaded from disk under the strict
+  # CSP than it does behind the Vite dev server, and nothing else covers that.
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx tsc && npx vite build
+      # Electron needs a display even though nothing looks at the window.
+      - run: xvfb-run -a npm run test:smoke
