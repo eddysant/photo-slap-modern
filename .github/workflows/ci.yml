@@ -33,6 +33,10 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # npm's install scripts don't always fetch the binary (see CLAUDE.md);
+      # without this, node_modules/electron/dist does not exist yet.
+      - name: Ensure the Electron binary is present
+        run: node node_modules/electron/install.js
       # Chromium refuses to start rather than drop its sandbox, and npm cannot
       # set the setuid bit on extraction. Keep the sandbox on (rather than
       # passing --no-sandbox) so CI runs the same way a user's machine does.
