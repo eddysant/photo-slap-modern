@@ -147,7 +147,7 @@ export function SettingsMenu(props: SettingsMenuProps) {
                         <div className="settings-grid">
                             <label className="setting-item"><span className="setting-label">Transition</span>
                                 <select className="setting-control" value={props.transitionStyle} onChange={e => props.onTransitionChange(e.target.value as TransitionStyle)}>
-                                    <option value="fade">Fade</option><option value="slide">Slide</option><option value="zoom">Zoom</option><option value="flip">Flip</option><option value="star">Star Wipe</option>
+                                    <option value="fade">Fade</option><option value="slide">Slide</option><option value="zoom">Zoom</option><option value="flip">Flip</option><option value="star">Star Wipe</option><option value="random">Surprise Me</option>
                                 </select>
                             </label>
                             <label className="setting-item"><span className="setting-label">Photo duration</span>

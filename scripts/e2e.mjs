@@ -627,6 +627,41 @@ try {
         const badType = await fetch(`${remoteApi.origin}/api/upload?t=${remoteApi.token}&name=evil.exe`,
             { method: 'POST', body: Buffer.from('x') });
         check('unsupported upload type rejected', badType.status === 400, String(badType.status));
+
+        console.log('guests picking what plays next');
+        const lib = await (await fetch(`${remoteApi.origin}/api/library?t=${remoteApi.token}&limit=30`)).json();
+        check('library lists slides for the browse grid', lib.total > 1 && lib.items.length > 1,
+            `${lib.items.length} of ${lib.total}`);
+        check('library never exposes a filesystem path',
+            lib.items.every(i => typeof i.name === 'string' && !('path' in i) && !JSON.stringify(i).includes('/')),
+            JSON.stringify(lib.items[0]));
+        check('page size is capped', (await (await fetch(
+            `${remoteApi.origin}/api/library?t=${remoteApi.token}&limit=9999`)).json()).items.length <= 60);
+
+        const thumbAt = await fetch(`${remoteApi.origin}/api/thumb?t=${remoteApi.token}&i=${lib.total - 1}`);
+        check('thumbnails are addressable by index', thumbAt.status === 200, String(thumbAt.status));
+
+        // Queue the LAST slide, then advance: it should jump the line
+        const target = lib.items[lib.items.length - 1];
+        const queued = await fetch(`${remoteApi.origin}/api/queue?t=${remoteApi.token}`,
+            { method: 'POST', body: JSON.stringify({ index: target.i }) });
+        check('queue accepts a valid index', queued.status === 200, String(queued.status));
+        await sleep(600);
+        const afterQueue = await (await fetch(`${remoteApi.origin}/api/status?t=${remoteApi.token}`)).json();
+        check('status reports the queue depth', afterQueue.queued === 1, JSON.stringify(afterQueue.queued));
+
+        await cdp.evaluate(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))`);
+        await sleep(900);
+        const nowPlaying = await cdp.evaluate(`document.querySelector('.title-bar')?.textContent ?? ''`);
+        check('the queued slide plays next', nowPlaying.includes(target.name), `${nowPlaying} (wanted ${target.name})`);
+        const drained = await (await fetch(`${remoteApi.origin}/api/status?t=${remoteApi.token}`)).json();
+        check('the queue drains after playing', drained.queued === 0, String(drained.queued));
+
+        for (const bad of [{ index: 99999 }, { index: -1 }, { index: 'evil' }, {}]) {
+            const res = await fetch(`${remoteApi.origin}/api/queue?t=${remoteApi.token}`,
+                { method: 'POST', body: JSON.stringify(bad) });
+            check(`queue rejects ${JSON.stringify(bad)}`, res.status === 400, String(res.status));
+        }
     }
 
     // ---------- playback resilience, undo, help ----------

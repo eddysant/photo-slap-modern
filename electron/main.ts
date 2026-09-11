@@ -717,11 +717,22 @@ ipcMain.handle('file:move', async (_event, filePath: string, destDir: string) =>
 
 // --------- Phone remote ---------
 let remoteStatus: RemoteStatus = {
-  name: null, index: null, total: 0, playing: false, favorite: false, path: null, root: null,
+  name: null, index: null, total: 0, playing: false, favorite: false, queued: 0, path: null, root: null,
 };
 
 ipcMain.on('remote:status', (_event, status: RemoteStatus) => {
   remoteStatus = status;
+});
+
+/**
+ * The playable list, mirrored here so the remote can offer a browse grid.
+ * Paths stay in this process: clients address slides by index only, exactly
+ * as they do for the current-slide thumbnail.
+ */
+let remoteLibrary: { name: string; path: string; type: 'image' | 'video' }[] = [];
+
+ipcMain.on('remote:library', (_event, files: typeof remoteLibrary) => {
+  remoteLibrary = Array.isArray(files) ? files : [];
 });
 
 const fileExists = (p: string) => fs.access(p).then(() => true, () => false);
@@ -750,6 +761,16 @@ async function saveGuestUpload(name: string, data: Buffer): Promise<{ ok: boolea
   return { ok: true };
 }
 
+/** 512px derive for a path we own, or null when it has no still frame. */
+async function thumbnailFor(filePath: string | null) {
+  if (!filePath || !isAllowedPath(filePath) || !isScalableImage(filePath)) return null;
+  try {
+    return await deriveImage(filePath, 512);
+  } catch {
+    return null;
+  }
+}
+
 ipcMain.handle('remote:setEnabled', async (_event, enabled: boolean) => {
   if (!enabled) {
     stopRemoteServer();
@@ -760,15 +781,21 @@ ipcMain.handle('remote:setEnabled', async (_event, enabled: boolean) => {
       getStatus: () => remoteStatus,
       dispatchAction: (action) => win?.webContents.send('menu:action', action),
       sendReaction: (emoji) => win?.webContents.send('remote:reaction', emoji),
-      getThumb: async () => {
-        // No client input: serves the current slide only
-        const current = remoteStatus.path;
-        if (!current || !isAllowedPath(path.normalize(current)) || !isScalableImage(current)) return null;
-        try {
-          return await deriveImage(current, 512);
-        } catch {
-          return null;
-        }
+      getThumb: async () => thumbnailFor(remoteStatus.path),
+      getThumbAt: async (index) => thumbnailFor(remoteLibrary[index]?.path ?? null),
+      getLibrary: (offset, limit) => ({
+        total: remoteLibrary.length,
+        // Names and indices only — never a path.
+        items: remoteLibrary.slice(offset, offset + limit).map((file, n) => ({
+          i: offset + n,
+          name: file.name,
+          type: file.type,
+        })),
+      }),
+      queueSlide: (index) => {
+        if (index >= remoteLibrary.length) return false;
+        win?.webContents.send('remote:queue', index);
+        return true;
       },
       saveUpload: saveGuestUpload,
     });

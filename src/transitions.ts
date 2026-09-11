@@ -1,6 +1,9 @@
 import type { Variants, Transition } from 'framer-motion';
 
-export type TransitionStyle = 'fade' | 'slide' | 'zoom' | 'flip' | 'star';
+export type TransitionStyle = 'fade' | 'slide' | 'zoom' | 'flip' | 'star' | 'random';
+
+/** The concrete styles — everything `random` can actually pick from. */
+export type ConcreteTransitionStyle = Exclude<TransitionStyle, 'random'>;
 
 // Classic 5-point star, as [x, y] percentages of the slide box.
 const STAR_POINTS = [
@@ -25,7 +28,7 @@ export interface SlideTransition {
  * `custom` prop (not baked into the exit prop at render time) is what keeps
  * the *outgoing* slide's exit correct when the direction just changed.
  */
-export const slideTransitions: Record<TransitionStyle, SlideTransition> = {
+export const slideTransitions: Record<ConcreteTransitionStyle, SlideTransition> = {
     fade: {
         variants: {
             enter: { opacity: 0 },
@@ -77,3 +80,32 @@ export const slideTransitions: Record<TransitionStyle, SlideTransition> = {
         transition: { duration: 0.6, ease: 'easeInOut' },
     },
 };
+
+export const CONCRETE_TRANSITIONS: ConcreteTransitionStyle[] =
+    Object.keys(slideTransitions) as ConcreteTransitionStyle[];
+
+/**
+ * Resolve the configured style to the one a given slide should actually use.
+ *
+ * `random` picks per slide, avoiding an immediate repeat so a long slideshow
+ * doesn't land on the same wipe twice in a row (which is the monotony the
+ * setting exists to break). Anything else resolves to itself.
+ */
+export function resolveTransition(
+    style: TransitionStyle,
+    previous: ConcreteTransitionStyle | null,
+    random: () => number = Math.random,
+): ConcreteTransitionStyle {
+    if (style !== 'random') return style;
+    const pool = CONCRETE_TRANSITIONS.filter(name => name !== previous);
+    return pool[Math.floor(random() * pool.length)] ?? CONCRETE_TRANSITIONS[0];
+}
+
+/**
+ * AnimatePresence mode for a given transition. The star wipe needs both
+ * slides mounted at once ("sync") so the outgoing one stays visible under the
+ * growing clip-path; everything else reads better with the outgoing slide
+ * gone first ("wait").
+ */
+export const presenceModeFor = (style: ConcreteTransitionStyle): 'sync' | 'wait' =>
+    (style === 'star' ? 'sync' : 'wait');

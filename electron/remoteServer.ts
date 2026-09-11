@@ -23,10 +23,18 @@ export interface RemoteStatus {
     total: number;
     playing: boolean;
     favorite: boolean;
+    /** How many guest-queued slides are waiting. */
+    queued: number;
     /** Absolute path of the current file (server-side use only, never sent to clients). */
     path: string | null;
     /** First session root — uploads land in <root>/guests. */
     root: string | null;
+}
+
+export interface LibraryPage {
+    total: number;
+    /** Names and indices only — a client is never told a filesystem path. */
+    items: { i: number; name: string; type: 'image' | 'video' }[];
 }
 
 export interface RemoteCallbacks {
@@ -35,6 +43,12 @@ export interface RemoteCallbacks {
     sendReaction: (emoji: string) => void;
     /** Thumbnail of the current slide, or null when it has none (video/none). */
     getThumb: () => Promise<{ buffer: Buffer; type: string } | null>;
+    /** Thumbnail of a slide by index, for the browse grid. */
+    getThumbAt: (index: number) => Promise<{ buffer: Buffer; type: string } | null>;
+    /** A page of the playable list, for guests picking what plays next. */
+    getLibrary: (offset: number, limit: number) => LibraryPage;
+    /** Queue a slide by index. Returns false when the index is out of range. */
+    queueSlide: (index: number) => boolean;
     saveUpload: (name: string, data: Buffer) => Promise<{ ok: boolean; error?: string }>;
 }
 
@@ -45,6 +59,15 @@ const MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
 // the session also has a ceiling on how much a party can add in total.
 const MAX_SESSION_UPLOAD_FILES = 500;
 const MAX_SESSION_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024;
+/** Cap a browse page so one request can't ask for a whole 50k-file library. */
+const MAX_LIBRARY_PAGE = 60;
+
+/** Parse a client-supplied integer, rejecting anything that isn't one. */
+function parseIndex(raw: string | null | undefined): number | null {
+    if (raw === null || raw === undefined || raw.trim() === '') return null;
+    const n = Number(raw);
+    return Number.isInteger(n) && n >= 0 ? n : null;
+}
 
 const PAGE = `<!doctype html>
 <html><head>
@@ -74,6 +97,20 @@ const PAGE = `<!doctype html>
                   border: 3px solid #00aaff; color: #00aaff; cursor: pointer; }
   #upload-status { color: #00ff88; font-size: 12px; min-height: 1.2em; }
   input[type=file] { display: none; }
+  #queued { color: #ffb300; font-size: 12px; min-height: 1.2em; }
+  #browse-btn { font-size: 15px; padding: 14px 22px; border-color: #ffb300; color: #ffb300; }
+  #browse { position: fixed; inset: 0; background: #000; overflow-y: auto; padding: 12px; display: none; }
+  #browse.open { display: block; }
+  #browse-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+                position: sticky; top: 0; background: #000; padding: 6px 0 12px; }
+  #browse-bar button { font-size: 15px; padding: 10px 16px; }
+  #browse-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
+  .tile { position: relative; aspect-ratio: 1; background: #161616; border: 2px solid #333;
+          overflow: hidden; padding: 0; }
+  .tile img { width: 100%; height: 100%; object-fit: cover; }
+  .tile.queued { border-color: #ffb300; }
+  .tile .badge { position: absolute; inset: auto 0 0 0; background: rgba(0,0,0,.75);
+                 font-size: 9px; padding: 2px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 </style></head>
 <body>
   <h2>PHOTO-SLAP</h2>
@@ -94,10 +131,20 @@ const PAGE = `<!doctype html>
     <button class="react">😂</button><button class="react">👏</button>
     <button class="react">🔥</button>
   </div>
+  <button id="browse-btn">▤ Pick what plays next</button>
+  <div id="queued"></div>
   <label id="upload-label">＋ Add your photos to the show
     <input id="upload" type="file" accept="image/*,video/*" multiple>
   </label>
   <div id="upload-status"></div>
+  <div id="browse">
+    <div id="browse-bar">
+      <strong>PICK A PHOTO</strong>
+      <button id="browse-more">Load more</button>
+      <button id="browse-close">✕ Close</button>
+    </div>
+    <div id="browse-grid"></div>
+  </div>
   <script>
     const TOKEN = '__TOKEN__';
     const $ = (id) => document.getElementById(id);
@@ -127,6 +174,9 @@ const PAGE = `<!doctype html>
         $('count').textContent = s.index != null ? s.index + ' / ' + s.total : '';
         $('play').textContent = s.playing ? '⏸' : '▶';
         $('fav').classList.toggle('on', !!s.favorite);
+        $('queued').textContent = s.queued > 0
+          ? s.queued + ' photo' + (s.queued > 1 ? 's' : '') + ' queued by guests'
+          : '';
         if (s.name !== lastName) {
           lastName = s.name;
           const img = $('thumb');
@@ -141,6 +191,47 @@ const PAGE = `<!doctype html>
     }
     setInterval(poll, 2000);
     poll();
+
+    // Browse the library and queue a slide to play next
+    let browseOffset = 0;
+    let browseTotal = 0;
+    const grid = $('browse-grid');
+
+    async function loadBrowsePage() {
+      const res = await fetch('/api/library?t=' + TOKEN + '&offset=' + browseOffset + '&limit=30');
+      const page = await res.json();
+      browseTotal = page.total;
+      for (const item of page.items) {
+        const tile = document.createElement('button');
+        tile.className = 'tile';
+        const img = document.createElement('img');
+        img.loading = 'lazy';
+        img.alt = '';
+        img.src = '/api/thumb?t=' + TOKEN + '&i=' + item.i;
+        img.onerror = () => { img.remove(); tile.textContent = item.type === 'video' ? '▶' : '▧'; };
+        const badge = document.createElement('span');
+        badge.className = 'badge';
+        badge.textContent = item.name;
+        tile.append(img, badge);
+        tile.onclick = async () => {
+          const r = await fetch('/api/queue?t=' + TOKEN, {
+            method: 'POST', body: JSON.stringify({ index: item.i }),
+          });
+          if (r.ok) { tile.classList.add('queued'); poll(); }
+        };
+        grid.appendChild(tile);
+      }
+      browseOffset += page.items.length;
+      $('browse-more').style.display =
+        (browseOffset < browseTotal && page.items.length > 0) ? '' : 'none';
+    }
+
+    $('browse-btn').onclick = () => {
+      $('browse').classList.add('open');
+      if (grid.children.length === 0) loadBrowsePage();
+    };
+    $('browse-close').onclick = () => $('browse').classList.remove('open');
+    $('browse-more').onclick = () => loadBrowsePage();
 
     // Guest uploads: raw body per file, filename in the query string
     $('upload').addEventListener('change', async (e) => {
@@ -234,11 +325,35 @@ export async function startRemoteServer(callbacks: RemoteCallbacks): Promise<str
                 res.end(page);
             } else if (req.method === 'GET' && url.pathname === '/api/status') {
                 // Strip server-side fields; clients never see paths
-                const { name, index, total, playing, favorite } = callbacks.getStatus();
+                const { name, index, total, playing, favorite, queued } = callbacks.getStatus();
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ name, index, total, playing, favorite }));
+                res.end(JSON.stringify({ name, index, total, playing, favorite, queued }));
+            } else if (req.method === 'GET' && url.pathname === '/api/library') {
+                const offset = parseIndex(url.searchParams.get('offset')) ?? 0;
+                const requested = parseIndex(url.searchParams.get('limit')) ?? MAX_LIBRARY_PAGE;
+                const page = callbacks.getLibrary(offset, Math.min(requested, MAX_LIBRARY_PAGE));
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(page));
+            } else if (req.method === 'POST' && url.pathname === '/api/queue') {
+                const body = await readBody(req, 4096);
+                const { index } = JSON.parse(body?.toString() ?? '{}') as { index?: unknown };
+                // Only ever an integer index into the list the renderer
+                // published; a client can still never name a path.
+                const wanted = typeof index === 'number' ? parseIndex(String(index)) : null;
+                if (wanted !== null && callbacks.queueSlide(wanted)) {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end('{"ok":true}');
+                } else {
+                    res.writeHead(400);
+                    res.end('Unknown slide');
+                }
             } else if (req.method === 'GET' && url.pathname === '/api/thumb') {
-                const thumb = await callbacks.getThumb();
+                // With ?i= it serves that slide (for the browse grid); without,
+                // whatever is on screen now.
+                const wanted = parseIndex(url.searchParams.get('i'));
+                const thumb = wanted === null
+                    ? await callbacks.getThumb()
+                    : await callbacks.getThumbAt(wanted);
                 if (thumb) {
                     res.writeHead(200, { 'Content-Type': thumb.type, 'Cache-Control': 'no-store' });
                     res.end(thumb.buffer);

@@ -28,6 +28,7 @@ contextBridge.exposeInMainWorld('api', {
   exportQuarantine: (roots: string[]) => ipcRenderer.invoke('quarantine:export', roots),
   setRemoteEnabled: (enabled: boolean) => ipcRenderer.invoke('remote:setEnabled', enabled),
   sendRemoteStatus: (status: unknown) => ipcRenderer.send('remote:status', status),
+  sendRemoteLibrary: (files: unknown) => ipcRenderer.send('remote:library', files),
   setPowerBlocked: (blocked: boolean) => ipcRenderer.invoke('power:setBlocked', blocked),
   // Dedupe
   scanDedupeExact: (dirs: string[], includeVideos: boolean) => ipcRenderer.invoke('dedupe:scan:exact', dirs, includeVideos),

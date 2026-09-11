@@ -97,9 +97,11 @@ interface Window {
         setRemoteEnabled: (enabled: boolean) => Promise<string | null>;
         sendRemoteStatus: (status: {
             name: string | null; index: number | null; total: number;
-            playing: boolean; favorite: boolean;
+            playing: boolean; favorite: boolean; queued: number;
             path: string | null; root: string | null;
         }) => void;
+        /** Mirror the playable list to main so the remote can browse it. */
+        sendRemoteLibrary: (files: MediaFile[]) => void;
         setPowerBlocked: (blocked: boolean) => Promise<void>;
         scanDedupeExact: (dirs: string[], includeVideos: boolean) => Promise<{ hash: string; files: string[] }[]>;
         scanDedupeFiles: (dirs: string[], kind: 'images' | 'videos') => Promise<string[]>;

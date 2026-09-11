@@ -19,7 +19,10 @@ import { useRemote } from './hooks/useRemote'
 import { useSlideshowPlayback } from './hooks/useSlideshowPlayback'
 import { usePersistedState } from './hooks/usePersistedState'
 import { clampIndex, survivingNeighbourPath } from './playlist'
-import { slideTransitions, TransitionStyle } from './transitions'
+import {
+  slideTransitions, presenceModeFor, resolveTransition,
+  type ConcreteTransitionStyle, type TransitionStyle,
+} from './transitions'
 import { getFileUrl, getDisplayUrl } from './utils'
 import { cullingActionForKey } from './culling'
 import { SETTINGS_PRESETS, type SettingsPresetName } from './settingsPresets'
@@ -131,6 +134,18 @@ function App() {
       flushShuffleHistory();
     };
   }, [flushShuffleHistory]);
+
+  /**
+   * The style the next slide change will actually use. With `random` this is
+   * re-rolled per slide; with a fixed style it just tracks the setting.
+   *
+   * It is chosen for the *next* change rather than the current one on purpose:
+   * framer-motion reads `variants` when the incoming slide mounts, so the
+   * value has to be settled before the key changes. Picking it here — after a
+   * slide has landed — means it always is, and AnimatePresence's `mode` never
+   * flips in the same render as the key.
+   */
+  const [activeTransition, setActiveTransition] = useState<ConcreteTransitionStyle>('fade')
 
   // Zoom state (per-slide; ZoomPan reports in so Ken Burns can pause)
   const [isZoomed, setIsZoomed] = useState(false)
@@ -439,12 +454,49 @@ function App() {
     };
   }, [ingestScanResult, showToast]);
 
+  /**
+   * Slides guests have queued from their phones, as paths. A queued slide
+   * jumps the line on the next advance — automatic or manual — which is the
+   * whole point: someone picks a photo and it comes up next.
+   */
+  const queueRef = useRef<string[]>([]);
+  const [queuedCount, setQueuedCount] = useState(0);
+
+  /** Pop the next queued slide's index, skipping any that have since gone. */
+  const takeQueuedIndex = useCallback((list: MediaFile[]) => {
+    let found: number | null = null;
+    while (queueRef.current.length > 0 && found === null) {
+      const [path, ...rest] = queueRef.current;
+      queueRef.current = rest;
+      const index = list.findIndex(file => file.path === path);
+      if (index >= 0) found = index;
+    }
+    setQueuedCount(queueRef.current.length);
+    return found;
+  }, []);
+
+  useEffect(() => {
+    return window.api.on('remote:queue', (_event, index: number) => {
+      const file = files[index];
+      if (!file) return;
+      queueRef.current = [...queueRef.current, file.path];
+      setQueuedCount(queueRef.current.length);
+      showToast(`\u{1F4FA} ${file.name} — queued by a guest`);
+    });
+  }, [files, showToast]);
+
   // NOTE: keep these updaters pure (no setState inside another setState
   // updater) — StrictMode double-invokes updaters and impure ones make
   // navigation skip slides in dev.
   const nextSlide = useCallback(() => {
     setDirection(1);
     if (files.length === 0) return;
+    // Guest picks come first, ahead of shuffle and normal order alike.
+    const queued = takeQueuedIndex(files);
+    if (queued !== null) {
+      setCurrentIndex(queued);
+      return;
+    }
     if (isShuffle && currentIndex === files.length - 1) {
       const key = makeShuffleHistoryKey(currentDirs, mediaFilter);
       persistShuffleHistory({ ...shuffleHistoryRef.current, [key]: [] });
@@ -454,7 +506,7 @@ function App() {
       return;
     }
     setCurrentIndex(prev => (prev + 1) % files.length);
-  }, [files, currentIndex, isShuffle, currentDirs, mediaFilter, persistShuffleHistory]);
+  }, [files, currentIndex, isShuffle, currentDirs, mediaFilter, persistShuffleHistory, takeQueuedIndex]);
 
   const prevSlide = useCallback(() => {
     setDirection(-1);
@@ -632,6 +684,14 @@ function App() {
     }
   }, [currentIndex, isExifEnabled, isKenBurns, files]);
 
+  useEffect(() => {
+    const next = resolveTransition(transitionStyle, activeTransition);
+    if (next !== activeTransition) setActiveTransition(next);
+    // activeTransition is deliberately not a dependency: including it would
+    // re-run this on its own update and re-roll on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [transitionStyle, currentIndex]);
+
   // Sync Volume
   useEffect(() => {
     if (videoRef.current) {
@@ -786,6 +846,8 @@ function App() {
     total: files.length,
     isPlaying,
     isFavorite: currentFile ? favorites.has(currentFile.path) : false,
+    queued: queuedCount,
+    library: files,
     root: currentDirs[0] ?? null,
     onUploaded: handleGuestUpload,
   });
@@ -978,7 +1040,7 @@ function App() {
   }, [handleOpenDirectory, showCurrentInFinder, nextSlide, prevSlide, togglePlay, seekVideoBy, deleteCurrentFile, toggleFavorite, frameMode, setFrameMode, markCurrentCulling]);
 
   const fileUrl = currentFile ? getFileUrl(currentFile.path) : '';
-  const currentTransition = slideTransitions[transitionStyle];
+  const currentTransition = slideTransitions[activeTransition];
   const healthIssues = useMemo(() => healthIssuesByPath(healthReport), [healthReport]);
 
   // Settings, dedupe, and toasts are available in both states — you can
@@ -1134,9 +1196,10 @@ function App() {
       )}
 
       <div className="viewer-container" onClick={() => isSettingsOpen && setIsSettingsOpen(false)}>
-        {/* "sync" keeps the old slide mounted underneath while the star wipes in over it.
-            `custom` carries the nav direction so exiting slides mirror correctly too. */}
-        <AnimatePresence mode={transitionStyle === 'star' ? 'sync' : 'wait'} custom={direction}>
+        {/* "sync" keeps the old slide mounted underneath while the star wipes in over it
+            (see presenceModeFor); `custom` carries the nav direction so exiting
+            slides mirror correctly too. */}
+        <AnimatePresence mode={presenceModeFor(activeTransition)} custom={direction}>
           <motion.div
             key={currentFile.path}
             custom={direction}

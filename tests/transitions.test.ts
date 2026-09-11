@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { starPolygon, slideTransitions } from '../src/transitions';
+import {
+    starPolygon, slideTransitions, resolveTransition, presenceModeFor, CONCRETE_TRANSITIONS,
+} from '../src/transitions';
 
 const parsePoints = (polygon: string): [number, number][] => {
     const inner = polygon.slice('polygon('.length, -1);
@@ -84,5 +86,65 @@ describe('directional transitions', () => {
         const exit = slideTransitions.zoom.variants.exit as Dynamic;
         expect(enter(1).scale).toBe(exit(-1).scale);
         expect(enter(-1).scale).toBe(exit(1).scale);
+    });
+});
+
+describe('resolveTransition', () => {
+    it('returns a fixed style unchanged', () => {
+        for (const style of CONCRETE_TRANSITIONS) {
+            expect(resolveTransition(style, null)).toBe(style);
+            expect(resolveTransition(style, 'fade')).toBe(style);
+        }
+    });
+
+    it('picks a concrete style for random', () => {
+        expect(CONCRETE_TRANSITIONS).toContain(resolveTransition('random', null, () => 0.5));
+    });
+
+    it('never picks "random" itself', () => {
+        for (let i = 0; i < 200; i++) {
+            expect(resolveTransition('random', null)).not.toBe('random');
+        }
+    });
+
+    it('never repeats the previous style back-to-back', () => {
+        // A long slideshow landing on the same wipe twice in a row is exactly
+        // the monotony this setting exists to break.
+        let previous: ReturnType<typeof resolveTransition> | null = null;
+        for (let i = 0; i < 500; i++) {
+            const next = resolveTransition('random', previous);
+            expect(next).not.toBe(previous);
+            previous = next;
+        }
+    });
+
+    it('can reach every concrete style', () => {
+        const seen = new Set<string>();
+        let previous: ReturnType<typeof resolveTransition> | null = null;
+        for (let i = 0; i < 2000; i++) {
+            previous = resolveTransition('random', previous);
+            seen.add(previous);
+        }
+        expect([...seen].sort()).toEqual([...CONCRETE_TRANSITIONS].sort());
+    });
+
+    it('is driven by the injected random source', () => {
+        expect(resolveTransition('random', null, () => 0)).toBe(CONCRETE_TRANSITIONS[0]);
+    });
+});
+
+describe('presenceModeFor', () => {
+    it('keeps both slides mounted only for the star wipe', () => {
+        // sync is what lets the outgoing slide stay visible under the clip-path
+        expect(presenceModeFor('star')).toBe('sync');
+        for (const style of CONCRETE_TRANSITIONS.filter(s => s !== 'star')) {
+            expect(presenceModeFor(style)).toBe('wait');
+        }
+    });
+
+    it('has a defined mode for every concrete style', () => {
+        for (const style of CONCRETE_TRANSITIONS) {
+            expect(['sync', 'wait']).toContain(presenceModeFor(style));
+        }
     });
 });

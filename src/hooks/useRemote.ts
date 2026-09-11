@@ -8,6 +8,10 @@ interface RemoteOptions {
     total: number;
     isPlaying: boolean;
     isFavorite: boolean;
+    /** Slides guests have queued and not yet seen. */
+    queued: number;
+    /** The playable list, mirrored to main so guests can browse it. */
+    library: MediaFile[];
     /** First opened folder — guest uploads land in <root>/guests. */
     root: string | null;
     onUploaded: (file: MediaFile) => void;
@@ -18,7 +22,7 @@ interface RemoteOptions {
  * code for joining, incoming emoji reactions, and guest uploads.
  */
 export function useRemote({
-    enabled, currentFile, currentIndex, total, isPlaying, isFavorite, root, onUploaded,
+    enabled, currentFile, currentIndex, total, isPlaying, isFavorite, queued, library, root, onUploaded,
 }: RemoteOptions) {
     const [url, setUrl] = useState<string | null>(null);
     const [qr, setQr] = useState<string | null>(null);
@@ -43,12 +47,20 @@ export function useRemote({
             total,
             playing: isPlaying,
             favorite: isFavorite,
+            queued,
             // path/root stay in the main process for the thumbnail and upload
             // endpoints; they are stripped from anything sent to phones.
             path: currentFile?.path ?? null,
             root,
         });
-    }, [enabled, currentFile, currentIndex, total, isPlaying, isFavorite, root]);
+    }, [enabled, currentFile, currentIndex, total, isPlaying, isFavorite, queued, root]);
+
+    // Mirror the playable list so the remote's browse grid can offer it.
+    // Only the list identity changes (a re-derive), not every slide.
+    useEffect(() => {
+        if (!enabled) return;
+        window.api.sendRemoteLibrary(library);
+    }, [enabled, library]);
 
     // QR code for the join URL, shown in settings
     useEffect(() => {
