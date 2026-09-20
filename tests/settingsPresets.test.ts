@@ -10,6 +10,16 @@ describe('named settings presets', () => {
         expect(SETTINGS_PRESETS.Culling).toMatchObject({ cullingMode: true, mediaFilter: 'photos', autoPlayOnOpen: false });
         expect(SETTINGS_PRESETS.TV).toMatchObject({ controlsPosition: 'left', autoPlayOnOpen: true });
     });
+
+    it('decides the backdrop for every preset rather than inheriting it', () => {
+        // Applying a preset should fully determine the look; leaving the
+        // ambient colour at whatever it happened to be would not.
+        for (const preset of Object.values(SETTINGS_PRESETS)) {
+            expect(typeof preset.isAmbientColor).toBe('boolean');
+            // The blurred background fills the same space, so never both
+            expect(preset.isSmart && preset.isAmbientColor).toBe(false);
+        }
+    });
 });
 
 describe('culling keyboard workflow', () => {

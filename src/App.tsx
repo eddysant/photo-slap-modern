@@ -12,6 +12,7 @@ import { SettingsMenu, MediaFilter, ControlsPosition, SortOrder } from './compon
 import { ShortcutsOverlay } from './components/ShortcutsOverlay'
 import { Toast, ToastAction } from './components/Toast'
 import { ZoomPan } from './components/ZoomPan'
+import { useAmbientColor } from './hooks/useAmbientColor'
 import { useImagePreloader } from './hooks/useImagePreloader'
 import { useLibraryMeta } from './hooks/useLibraryMeta'
 import { usePendingDeletes, UNDO_WINDOW_MS } from './hooks/usePendingDeletes'
@@ -74,6 +75,9 @@ function App() {
   const [slideDuration, setSlideDuration] = usePersistedState('slideDuration', 3000)
   const [mediaFilter, setMediaFilter] = usePersistedState<MediaFilter>('mediaFilter', 'both')
   const [isSmart, setIsSmart] = usePersistedState('isSmart', false)
+  // Fills the letterbox with the photo's own average colour. Mutually
+  // exclusive with the blurred smart background, which fills the same space.
+  const [isAmbientColor, setIsAmbientColor] = usePersistedState('isAmbientColor', false)
   const [isSmartVideoEnabled, setIsSmartVideoEnabled] = usePersistedState('isSmartVideoEnabled', true)
   const [isStretch, setIsStretch] = usePersistedState('isStretch', false)
   const [isKenBurns, setIsKenBurns] = usePersistedState('isKenBurns', false)
@@ -542,6 +546,7 @@ function App() {
     setIsShuffle(preset.isShuffle);
     setIsSmart(preset.isSmart);
     setIsSmartVideoEnabled(preset.isSmartVideoEnabled);
+    setIsAmbientColor(preset.isAmbientColor);
     setIsStretch(preset.isStretch);
     setIsKenBurns(preset.isKenBurns);
     setIsExifEnabled(preset.isExifEnabled);
@@ -556,7 +561,7 @@ function App() {
     setCullingMode(preset.cullingMode);
     if (preset.cullingMode) setIsPlaying(false);
     showToast(`${name} preset applied`);
-  }, [setMediaFilter, setIsShuffle, setIsSmart, setIsSmartVideoEnabled, setIsStretch, setIsKenBurns, setIsExifEnabled, setTransitionStyle, setSortOrder, setSlideDuration, setControlsPosition, setShowSlideTimer, setFrameMode, setAutoPlayOnOpen, setRemoteEnabled, setCullingMode, showToast]);
+  }, [setMediaFilter, setIsShuffle, setIsSmart, setIsSmartVideoEnabled, setIsAmbientColor, setIsStretch, setIsKenBurns, setIsExifEnabled, setTransitionStyle, setSortOrder, setSlideDuration, setControlsPosition, setShowSlideTimer, setFrameMode, setAutoPlayOnOpen, setRemoteEnabled, setCullingMode, showToast]);
 
   const openHealthScan = useCallback(async () => {
     let roots = currentDirs;
@@ -839,6 +844,8 @@ function App() {
 
   const currentFile: MediaFile | null = files[currentIndex] ?? null;
 
+  const ambientColor = useAmbientColor(currentFile, isAmbientColor && !isSmart);
+
   const { url: remoteUrl, qr: remoteQr, reactions } = useRemote({
     enabled: remoteEnabled,
     currentFile,
@@ -1059,6 +1066,8 @@ function App() {
         onResetShuffle={resetShuffleHistory}
         isSmart={isSmart}
         onToggleSmart={() => setIsSmart(!isSmart)}
+        isAmbientColor={isAmbientColor}
+        onToggleAmbientColor={() => setIsAmbientColor(!isAmbientColor)}
         isSmartVideoEnabled={isSmartVideoEnabled}
         onToggleSmartVideo={() => setIsSmartVideoEnabled(!isSmartVideoEnabled)}
         isStretch={isStretch}
@@ -1208,7 +1217,13 @@ function App() {
             animate="center"
             exit="exit"
             transition={currentTransition.transition}
-            style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+            style={{
+              position: 'absolute', inset: 0, display: 'flex',
+              alignItems: 'center', justifyContent: 'center',
+              // Sits on the slide wrapper, not the viewer, so it travels with
+              // the slide through the transition instead of snapping.
+              ...(ambientColor ? { backgroundColor: ambientColor } : {}),
+            }}
           >
             {/* Smart Background Layer */}
             {isSmart && (currentFile.type === 'image' || isSmartVideoEnabled) && (

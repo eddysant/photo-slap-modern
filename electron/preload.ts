@@ -36,5 +36,6 @@ contextBridge.exposeInMainWorld('api', {
   getFileInfo: (paths: string[]) => ipcRenderer.invoke('files:getInfo', paths),
   showInFolder: (path: string) => ipcRenderer.invoke('file:showInFolder', path),
   getExif: (path: string) => ipcRenderer.invoke('file:getExif', path),
+  getAmbientColor: (path: string) => ipcRenderer.invoke('file:getAmbientColor', path),
 })
 

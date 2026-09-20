@@ -961,6 +961,43 @@ ipcMain.handle('files:getDates', async (_event, paths: string[]) => {
   return result;
 });
 
+/**
+ * Average colour of an image, for the ambient letterbox. Derived from the
+ * existing 64px variant so HEIC decoding, the disk cache and the concurrency
+ * cap all come for free; the 1x1 resize is then the arithmetic mean.
+ *
+ * Cached in memory keyed by path+mtime — three bytes per entry, so a large
+ * library costs nothing and a re-edited file re-derives.
+ */
+const ambientColorCache = new Map<string, string>();
+const AMBIENT_COLOR_CACHE_MAX = 20000;
+
+ipcMain.handle('file:getAmbientColor', async (_event, filePath: string) => {
+  try {
+    const resolved = assertAllowedPath(filePath);
+    const stat = await fs.stat(resolved);
+    const key = `${resolved}:${stat.mtimeMs}`;
+    const cached = ambientColorCache.get(key);
+    if (cached) return cached;
+
+    const { buffer } = await deriveImage(resolved, 64);
+    const [r, g, b] = await sharp(buffer)
+      .resize(1, 1, { fit: 'cover' })
+      .removeAlpha()
+      .raw()
+      .toBuffer();
+    const hex = `#${[r, g, b].map(v => v.toString(16).padStart(2, '0')).join('')}`;
+
+    if (ambientColorCache.size >= AMBIENT_COLOR_CACHE_MAX) {
+      ambientColorCache.delete(ambientColorCache.keys().next().value!);
+    }
+    ambientColorCache.set(key, hex);
+    return hex;
+  } catch {
+    return null; // undecodable or not allowlisted — caller falls back to black
+  }
+});
+
 ipcMain.handle('file:getExif', async (_event, filePath: string) => {
   try {
     const fileBuffer = await fs.readFile(assertAllowedPath(filePath));

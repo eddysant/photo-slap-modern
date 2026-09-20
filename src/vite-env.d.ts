@@ -80,6 +80,8 @@ interface Window {
         setStore: (key: string, value: any) => Promise<void>;
         showInFolder: (path: string) => Promise<void>;
         getExif: (path: string) => Promise<ExifData | null>;
+        /** Average colour of an image as #rrggbb, for the ambient letterbox. */
+        getAmbientColor: (path: string) => Promise<string | null>;
         moveFile: (path: string, destDir: string) => Promise<{ ok: boolean; error?: string }>;
         libraryLoad: (roots: string[]) => Promise<LibraryMeta>;
         librarySave: (roots: string[], meta: LibraryMeta) => Promise<void>;

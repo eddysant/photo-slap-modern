@@ -7,7 +7,7 @@ describe('options menu organization', () => {
         const noop = () => {};
         const html = renderToStaticMarkup(<SettingsMenu
             isOpen onClose={noop} hasFiles={false} mediaFilter="both" onMediaFilterChange={noop}
-            isShuffle={false} onToggleShuffle={noop} shuffleProgress={{ viewed: 0, total: 0 }} onResetShuffle={noop} isSmart={false} onToggleSmart={noop}
+            isShuffle={false} onToggleShuffle={noop} shuffleProgress={{ viewed: 0, total: 0 }} onResetShuffle={noop} isSmart={false} onToggleSmart={noop} isAmbientColor={false} onToggleAmbientColor={noop}
             isSmartVideoEnabled={true} onToggleSmartVideo={noop} isStretch={false} onToggleStretch={noop}
             isKenBurns={false} onToggleKenBurns={noop} isExifEnabled={false} onToggleExif={noop}
             transitionStyle="fade" onTransitionChange={noop} sortOrder="name" onSortChange={noop}

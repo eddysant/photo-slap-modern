@@ -21,9 +21,10 @@ Images: `.jpg` `.jpeg` `.png` `.webp` `.gif` `.bmp` `.heic` `.heif` — Videos: 
 ## Watching
 
 - **Slideshow** — open folders by dialog, drag-and-drop, or a command-line argument. Photos advance on a timer (2s–1min); videos play through, then advance. A video that can't be decoded is skipped rather than stalling the show.
-- **Transitions** — Fade, Slide, Zoom, Flip, a classic **Star Wipe** (the new slide revealed through a growing star over the old one), or **Surprise Me**, which picks a different one for every slide. Directional styles mirror when you navigate backwards.
+- **Transitions** — Fade, Slide, Zoom, Flip, a classic **Star Wipe** (the new slide revealed through a growing star over the old one), a **CRT Power-On** that collapses the slide to a glowing line and snaps it back out, or **Surprise Me**, which picks a different one for every slide. Directional styles mirror when you navigate backwards.
 - **Ken Burns** — slow random pan/zoom on photos.
 - **Smart Background** — a blurred, darkened copy of the current media fills the letterbox area, optionally for videos too.
+- **Ambient background colour** — instead of the blur, fill the bars beside a photo with the photo's own average colour, dimmed so it sits behind rather than competing. Portrait shots on a widescreen TV stop floating in a black void.
 - **Zoom & pan** — scroll to zoom toward the cursor, drag to pan, double-click to toggle. Pinch works too.
 - **Sorting & shuffle** — natural filename order or date taken (EXIF capture date, file-modified fallback). Shuffle remembers what you've seen per library, across restarts: nothing repeats until the set completes a cycle. Progress and a reset are in Settings.
 - **Video controls** — scrubber, volume, mute, click-to-pause, `M`/`N` to skip ±10s.

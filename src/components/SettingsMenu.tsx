@@ -19,6 +19,8 @@ interface SettingsMenuProps {
     onResetShuffle: () => void;
     isSmart: boolean;
     onToggleSmart: () => void;
+    isAmbientColor: boolean;
+    onToggleAmbientColor: () => void;
     isSmartVideoEnabled: boolean;
     onToggleSmartVideo: () => void;
     isStretch: boolean;
@@ -140,6 +142,8 @@ export function SettingsMenu(props: SettingsMenuProps) {
                             <Toggle checked={props.frameMode} onChange={props.onToggleFrameMode}>Photo frame overlay</Toggle>
                         </div>
                         {props.isSmart && <div className="nested-setting"><Toggle checked={props.isSmartVideoEnabled} onChange={props.onToggleSmartVideo}>Also blur video backgrounds</Toggle></div>}
+                        {/* Fills the same space as the blur, so it only applies when that is off */}
+                        {!props.isSmart && <Toggle checked={props.isAmbientColor} onChange={props.onToggleAmbientColor}>Ambient background colour</Toggle>}
                     </section>
 
                     <section className="settings-section">
@@ -147,7 +151,7 @@ export function SettingsMenu(props: SettingsMenuProps) {
                         <div className="settings-grid">
                             <label className="setting-item"><span className="setting-label">Transition</span>
                                 <select className="setting-control" value={props.transitionStyle} onChange={e => props.onTransitionChange(e.target.value as TransitionStyle)}>
-                                    <option value="fade">Fade</option><option value="slide">Slide</option><option value="zoom">Zoom</option><option value="flip">Flip</option><option value="star">Star Wipe</option><option value="random">Surprise Me</option>
+                                    <option value="fade">Fade</option><option value="slide">Slide</option><option value="zoom">Zoom</option><option value="flip">Flip</option><option value="star">Star Wipe</option><option value="crt">CRT Power-On</option><option value="random">Surprise Me</option>
                                 </select>
                             </label>
                             <label className="setting-item"><span className="setting-label">Photo duration</span>

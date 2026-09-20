@@ -1,6 +1,6 @@
 import type { Variants, Transition } from 'framer-motion';
 
-export type TransitionStyle = 'fade' | 'slide' | 'zoom' | 'flip' | 'star' | 'random';
+export type TransitionStyle = 'fade' | 'slide' | 'zoom' | 'flip' | 'star' | 'crt' | 'random';
 
 /** The concrete styles — everything `random` can actually pick from. */
 export type ConcreteTransitionStyle = Exclude<TransitionStyle, 'random'>;
@@ -60,6 +60,19 @@ export const slideTransitions: Record<ConcreteTransitionStyle, SlideTransition> 
             exit: (dir: number) => ({ rotateY: dir >= 0 ? -90 : 90, opacity: 0 }),
         },
         transition: { duration: 0.5 },
+    },
+    /*
+     * CRT power-on: the slide collapses to a horizontal line and snaps back
+     * out, overshooting sideways the way an old tube did. Not directional — a
+     * tube doesn't care which way you navigated.
+     */
+    crt: {
+        variants: {
+            enter: { scaleY: 0.004, scaleX: 1.4, opacity: 1, boxShadow: '0px 0px 70px 30px rgba(255,255,255,0.9)' },
+            center: { scaleY: 1, scaleX: 1, opacity: 1, boxShadow: '0px 0px 0px 0px rgba(255,255,255,0)' },
+            exit: { scaleY: 0.004, scaleX: 1.4, opacity: 0, boxShadow: '0px 0px 70px 30px rgba(255,255,255,0.9)' },
+        },
+        transition: { duration: 0.42, ease: [0.16, 1, 0.3, 1] },
     },
     // Star wipe: the incoming slide is revealed through a growing star
     // while the outgoing slide stays fully visible underneath. Requires
