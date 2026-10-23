@@ -27,7 +27,11 @@ import {
 import { getFileUrl, getDisplayUrl } from './utils'
 import { cullingActionForKey } from './culling'
 import { SETTINGS_PRESETS, type SettingsPresetName } from './settingsPresets'
-import { getShuffleProgress, makeShuffleHistoryKey, orderForNoRepeatShuffle, recordViewed, type ShuffleHistory } from './shuffleHistory'
+import {
+  getShuffleProgress, hasSeenEverything, makeShuffleHistoryKey, newShuffleSeed,
+  orderForNoRepeatShuffle, reconcileShuffleOrder, recordViewed,
+  type ShuffleHistory, type ShuffleSeeds,
+} from './shuffleHistory'
 import { healthIssuesByPath } from './gridFilters'
 
 const mergeScans = (results: ScanResult[]): ScanResult => ({
@@ -100,10 +104,42 @@ function App() {
   const shuffleHistoryRef = useRef<ShuffleHistory>({})
   const [shuffleHistoryReady, setShuffleHistoryReady] = useState(false)
   const [shuffleProgress, setShuffleProgress] = useState({ viewed: 0, total: 0 })
+  /**
+   * The seed fixing the order of the current cycle, per library. Stored beside
+   * the viewed list rather than inside it so an older saved history (a bare
+   * array of paths) still loads; a library without a seed simply gets one.
+   */
+  const shuffleSeedsRef = useRef<ShuffleSeeds>({})
   useEffect(() => {
-    window.api.getStore('shuffleHistory')
-      .then(value => { if (value && typeof value === 'object') shuffleHistoryRef.current = value as ShuffleHistory; })
+    Promise.all([
+      window.api.getStore('shuffleHistory'),
+      window.api.getStore('shuffleSeeds'),
+    ])
+      .then(([history, seeds]) => {
+        if (history && typeof history === 'object') shuffleHistoryRef.current = history as ShuffleHistory;
+        if (seeds && typeof seeds === 'object') shuffleSeedsRef.current = seeds as ShuffleSeeds;
+      })
       .finally(() => setShuffleHistoryReady(true));
+  }, []);
+
+  /**
+   * The order currently in play, per library. Session-only: on a fresh launch
+   * we deliberately re-partition so anything unseen comes first again.
+   */
+  const shuffleOrderRef = useRef<Record<string, string[]>>({})
+  const forgetShuffleOrder = useCallback((key?: string) => {
+    if (key) delete shuffleOrderRef.current[key];
+    else shuffleOrderRef.current = {};
+  }, []);
+
+  /** The cycle seed for a library, minting and persisting one when needed. */
+  const seedFor = useCallback((key: string, fresh = false) => {
+    const existing = shuffleSeedsRef.current[key];
+    if (!fresh && typeof existing === 'number') return existing;
+    const seed = newShuffleSeed();
+    shuffleSeedsRef.current = { ...shuffleSeedsRef.current, [key]: seed };
+    window.api.setStore('shuffleSeeds', shuffleSeedsRef.current);
+    return seed;
   }, []);
 
   /**
@@ -238,12 +274,24 @@ function App() {
 
     if (isShuffled) {
       const previousHistory = shuffleHistoryRef.current[shuffleKey] ?? [];
-      const ordered = orderForNoRepeatShuffle(sorted, previousHistory);
-      sorted.splice(0, sorted.length, ...ordered.items);
-      setShuffleProgress(getShuffleProgress(sorted, ordered.viewedPaths));
-      if (ordered.cycleReset || ordered.viewedPaths.length !== previousHistory.length) {
-        persistShuffleHistory({ ...shuffleHistoryRef.current, [shuffleKey]: ordered.viewedPaths });
+      const established = shuffleOrderRef.current[shuffleKey];
+      if (established) {
+        // Mid-cycle re-derive (a delete, a guest upload): keep the running
+        // order rather than re-partitioning the user's position away.
+        sorted.splice(0, sorted.length, ...reconcileShuffleOrder(sorted, established, seedFor(shuffleKey)));
+        setShuffleProgress(getShuffleProgress(sorted, previousHistory));
+      } else {
+        const ordered = orderForNoRepeatShuffle(sorted, previousHistory, seedFor(shuffleKey));
+        sorted.splice(0, sorted.length, ...ordered.items);
+        setShuffleProgress(getShuffleProgress(sorted, ordered.viewedPaths));
+        if (ordered.cycleReset || ordered.viewedPaths.length !== previousHistory.length) {
+          persistShuffleHistory({ ...shuffleHistoryRef.current, [shuffleKey]: ordered.viewedPaths });
+        }
+        // A finished cycle earns a new order; without a new seed the next pass
+        // would replay the previous one exactly.
+        if (ordered.cycleReset) seedFor(shuffleKey, true);
       }
+      shuffleOrderRef.current[shuffleKey] = sorted.map(file => file.path);
     } else {
       setShuffleProgress({ viewed: 0, total: sorted.length });
     }
@@ -254,7 +302,8 @@ function App() {
     // one place that would otherwise force index 0, and the effect that used
     // to restore the pin ran on an earlier render, so the reset always won.
     setCurrentIndex(takePendingIndex(sorted));
-  }, [persistShuffleHistory, takePendingIndex]);
+  }, [persistShuffleHistory, takePendingIndex, seedFor]);
+
 
   // Date-taken lookup, fetched lazily the first time a date sort is used
   // and cached until a different folder is opened.
@@ -501,16 +550,23 @@ function App() {
       setCurrentIndex(queued);
       return;
     }
-    if (isShuffle && currentIndex === files.length - 1) {
+    // Start a new cycle only once everything really has been seen. Keying off
+    // "we are on the last index" meant wrapping backwards from slide 1 landed
+    // on the last slide, and the next press then reshuffled the whole library.
+    if (isShuffle) {
       const key = makeShuffleHistoryKey(currentDirs, mediaFilter);
-      persistShuffleHistory({ ...shuffleHistoryRef.current, [key]: [] });
-      setShuffleProgress({ viewed: 0, total: files.length });
-      setFiles(orderForNoRepeatShuffle(files, []).items);
-      setCurrentIndex(0);
-      return;
+      if (hasSeenEverything(files, shuffleHistoryRef.current[key] ?? [])) {
+        persistShuffleHistory({ ...shuffleHistoryRef.current, [key]: [] });
+        setShuffleProgress({ viewed: 0, total: files.length });
+        const reshuffled = orderForNoRepeatShuffle(files, [], seedFor(key, true)).items;
+        shuffleOrderRef.current[key] = reshuffled.map(file => file.path);
+        setFiles(reshuffled);
+        setCurrentIndex(0);
+        return;
+      }
     }
     setCurrentIndex(prev => (prev + 1) % files.length);
-  }, [files, currentIndex, isShuffle, currentDirs, mediaFilter, persistShuffleHistory, takeQueuedIndex]);
+  }, [files, isShuffle, currentDirs, mediaFilter, persistShuffleHistory, takeQueuedIndex, seedFor]);
 
   const prevSlide = useCallback(() => {
     setDirection(-1);
@@ -522,18 +578,25 @@ function App() {
   }, [cullingMode]);
 
   // List-shaping settings just persist; the effect above re-derives the list
-  const toggleShuffle = () => setIsShuffle(!isShuffle);
+  const toggleShuffle = () => {
+    if (isShuffle) forgetShuffleOrder(); // re-partition when it comes back on
+    setIsShuffle(!isShuffle);
+  };
   const resetShuffleHistory = useCallback(() => {
     if (currentDirs.length === 0) return;
     const key = makeShuffleHistoryKey(currentDirs, mediaFilter);
     persistShuffleHistory({ ...shuffleHistoryRef.current, [key]: [] });
     setShuffleProgress({ viewed: 0, total: files.length });
     if (isShuffle) {
-      setFiles(orderForNoRepeatShuffle(files, []).items);
+      // An explicit reset should give a genuinely different order, not the
+      // same one the finished cycle used.
+      const reshuffled = orderForNoRepeatShuffle(files, [], seedFor(key, true)).items;
+      shuffleOrderRef.current[key] = reshuffled.map(file => file.path);
+      setFiles(reshuffled);
       setCurrentIndex(0);
     }
     showToast('Shuffle history reset');
-  }, [currentDirs, mediaFilter, files, isShuffle, persistShuffleHistory, showToast]);
+  }, [currentDirs, mediaFilter, files, isShuffle, persistShuffleHistory, showToast, seedFor]);
   const handleMediaFilterChange = (newFilter: MediaFilter) => setMediaFilter(newFilter);
 
   useEffect(() => {
@@ -922,6 +985,20 @@ function App() {
    * or one deleted from disk while queued) fires `error` and never `ended`.
    * Move on rather than parking the slideshow on it.
    */
+  /**
+   * A photo that will not load — deleted from disk while the show was on it,
+   * unreadable, or corrupt — used to sit there as a broken-image icon. Drop it
+   * from the view and move on.
+   *
+   * This takes it out of the session only: the file is left alone on disk and
+   * its sidecar metadata is NOT pruned, because an image can fail to load for
+   * reasons that have nothing to do with it being gone.
+   */
+  const handleImageError = useCallback((file: MediaFile) => {
+    showToast(`Skipping ${file.name} — it can't be displayed`);
+    removeFromView([file.path]);
+  }, [removeFromView, showToast]);
+
   const handleVideoError = useCallback(() => {
     const file = files[currentIndex];
     showToast(file ? `Can't play ${file.name} — skipping` : "Can't play that video");
@@ -1285,6 +1362,7 @@ function App() {
                   src={getDisplayUrl(currentFile.path)}
                   className={`media-element ${isKenBurns && !isZoomed ? `ken-burns-active ${kenBurnsClass}` : ''}`}
                   alt={currentFile.name}
+                  onError={() => handleImageError(currentFile)}
                   style={{
                     objectFit: isStretch ? 'contain' : (isKenBurns ? 'cover' : 'contain'),
                     width: isStretch || isKenBurns ? '100%' : 'auto',

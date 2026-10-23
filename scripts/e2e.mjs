@@ -98,6 +98,10 @@ async function makeResilienceFixture() {
     // that used to leave the slideshow parked forever.
     await fs.writeFile(path.join(dir, '2-broken.mp4'), Buffer.alloc(4096, 0x41));
     await sharp(Buffer.from(tile('#fa0'))).jpeg().toFile(path.join(dir, '3-last.jpg'));
+    // Valid extension, garbage bytes. Unlike a deleted file this can never be
+    // served from a cache, so the "skip what cannot be displayed" check is
+    // never satisfied by a stale decode.
+    await fs.writeFile(path.join(dir, '9-corrupt.jpg'), Buffer.alloc(3072, 0x5a));
     // A playable clip, for the re-render/listener-churn measurement. Video
     // timeupdate events are the app's highest-frequency render driver.
     const playable = spawnSync('ffmpeg', ['-v', 'error', '-f', 'lavfi',
@@ -670,7 +674,7 @@ try {
     console.log('undecodable media does not freeze the slideshow');
     const resilience = await makeResilienceFixture();
     brokenFixture = resilience.dir;
-    const resilienceCount = (await fs.readdir(brokenFixture)).length;
+    let resilienceCount = (await fs.readdir(brokenFixture)).length;
     cdp.close();
     cdp = null;
     await shutdownApp(child);
@@ -684,6 +688,44 @@ try {
         await sleep(500);
     }
     check('relaunched against the resilience fixture', opened.trim().endsWith(`/ ${resilienceCount}`), opened);
+
+    // A photo that cannot be decoded used to sit on screen as a broken-image
+    // icon. Walk until it is reached; it should remove itself and say so.
+    const corrupt = await cdp.evaluate(`(async () => {
+        const key = k => window.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true }));
+        const title = () => (document.querySelector('.title-bar')?.textContent ?? '').trim();
+        // Watch for the toast throughout: it expires, and the skip can happen
+        // several presses before the walk ends.
+        let sawToast = '';
+        const watch = setInterval(() => {
+            const t = (document.querySelector('.toast')?.textContent ?? '').trim();
+            if (/skipping/i.test(t)) sawToast = t;
+        }, 100);
+        for (let i = 0; i < 12; i++) {
+            if (title().includes('9-corrupt')) break;
+            key('ArrowRight');
+            await new Promise(r => setTimeout(r, 350));
+        }
+        await new Promise(r => setTimeout(r, 1800));
+        clearInterval(watch);
+        const img = document.querySelector('img.media-element');
+        return JSON.stringify({
+            title: title(),
+            toast: sawToast,
+            counter: (document.querySelector('.file-info')?.textContent ?? '').trim(),
+            brokenImage: img ? (img.complete && img.naturalWidth === 0) : false,
+        });
+    })()`).then(JSON.parse);
+
+    check('an undecodable photo is skipped, not left broken on screen',
+        !corrupt.title.includes('9-corrupt') && corrupt.brokenImage === false, JSON.stringify(corrupt));
+    check('and it says which file it skipped', /skipping 9-corrupt/i.test(corrupt.toast), corrupt.toast);
+    // It removed itself from the *view*; the file is untouched on disk, so the
+    // on-disk assertion later still counts every fixture file.
+    const filesOnDisk = resilienceCount;
+    resilienceCount -= 1;
+    check('the skipped photo left the playable list',
+        corrupt.counter.endsWith(`/ ${resilienceCount}`), corrupt.counter);
 
     if (opened.trim().endsWith(`/ ${resilienceCount}`)) {
         // Land on the broken video and start the show
@@ -744,7 +786,7 @@ try {
     await sleep(UNDO_WINDOW_MS + 1500);
     const stillOnDisk = await fs.readdir(brokenFixture);
     check('undone delete never reached the Trash even after the window closed',
-        stillOnDisk.length === resilienceCount, JSON.stringify(stillOnDisk));
+        stillOnDisk.length === filesOnDisk, JSON.stringify(stillOnDisk));
 
     if (resilience.hasPlayable) {
         console.log('render churn');

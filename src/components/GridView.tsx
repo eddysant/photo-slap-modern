@@ -47,6 +47,14 @@ export function GridView({
     const [selectMode, setSelectMode] = useState(false);
     const [selected, setSelected] = useState<Set<string>>(new Set());
     const [batchTag, setBatchTag] = useState('');
+    /**
+     * Thumbnails that failed to load — a file deleted since the grid opened,
+     * most often. They fall back to the same placeholder tile videos use
+     * rather than showing a broken-image icon.
+     */
+    const [failedThumbs, setFailedThumbs] = useState<Set<string>>(new Set());
+    const noteThumbFailed = (path: string) =>
+        setFailedThumbs(prev => prev.has(path) ? prev : new Set(prev).add(path));
 
     const overlayRef = useRef<HTMLDivElement>(null);
     const [scrollTop, setScrollTop] = useState(0);
@@ -239,11 +247,17 @@ export function GridView({
                             else onSelect(index);
                         }}
                     >
-                        {file.type === 'image' ? (
-                            <img src={getDisplayUrl(file.path, 512)} loading="lazy" decoding="async" alt={file.name} />
+                        {file.type === 'image' && !failedThumbs.has(file.path) ? (
+                            <img
+                                src={getDisplayUrl(file.path, 512)}
+                                loading="lazy"
+                                decoding="async"
+                                alt={file.name}
+                                onError={() => noteThumbFailed(file.path)}
+                            />
                         ) : (
                             <div className="grid-video-tile">
-                                <FiFilm size={28} />
+                                {file.type === 'video' ? <FiFilm size={28} /> : <FiAlertTriangle size={28} />}
                                 <span>{file.name}</span>
                             </div>
                         )}
