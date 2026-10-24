@@ -10,6 +10,7 @@ import Store from 'electron-store'
 import sharp from 'sharp'
 import decodeHeic from 'heic-decode'
 import { scanDirectory } from './fileScanner'
+import { DirectoryWatcher } from './dirWatcher'
 import { findExactDuplicates, scanFiles } from './dedupe'
 import { loadLibraryMeta, saveLibraryMeta, removeOrphanedLibraryMeta, LibraryMeta } from './libraryMeta'
 import {
@@ -302,6 +303,12 @@ if (process.env.PHOTO_SLAP_DEBUG_PORT) {
 }
 
 let win: BrowserWindow | null = null
+
+// Media appearing in (or disappearing from) the folders on show while the
+// app runs. The renderer registers the roots over `dir:watch`.
+const mediaWatcher = new DirectoryWatcher(change => {
+  win?.webContents.send('app:filesChanged', change);
+});
 
 // --------- Update check ---------
 // Unsigned macOS builds can't self-install updates (Squirrel requires a
@@ -672,6 +679,13 @@ ipcMain.handle('dir:scan', async (_event, dirPath: string) => {
   return await scanAndAllow(dirPath);
 });
 
+// Keep the folders on show in sync with what is actually on disk. The
+// renderer names the roots (it owns which scan it ingested); they still have
+// to be inside the allowlist like every other path that arrives over IPC.
+ipcMain.handle('dir:watch', async (_event, dirs: string[]) => {
+  await mediaWatcher.watch(assertAllowedPaths(dirs ?? []));
+});
+
 ipcMain.handle('file:delete', async (_event, filePath: string) => {
   try {
     await shell.trashItem(assertAllowedPath(filePath));
@@ -707,6 +721,9 @@ ipcMain.handle('file:move', async (_event, filePath: string, destDir: string) =>
         throw e;
       }
     }
+    // The user filed this photo away; if the target sits inside the library
+    // the watcher must not hand it straight back as new media.
+    mediaWatcher.acknowledge(dest);
     return { ok: true };
   } catch (e) {
     console.error('Failed to move file', e);
@@ -752,6 +769,8 @@ async function saveGuestUpload(name: string, data: Buffer): Promise<{ ok: boolea
   const dest = await findFreeUploadPath(guestsDir, sanitized.stem, sanitized.ext, fileExists);
 
   await fs.writeFile(dest, data);
+  // Announced on its own channel below, so the watcher stays quiet about it.
+  mediaWatcher.acknowledge(dest);
   win?.webContents.send('remote:uploaded', {
     name: path.basename(dest),
     path: dest,
@@ -1041,6 +1060,10 @@ app.on('window-all-closed', () => {
     app.quit()
     win = null
   }
+})
+
+app.on('will-quit', () => {
+  mediaWatcher.close()
 })
 
 app.on('activate', () => {

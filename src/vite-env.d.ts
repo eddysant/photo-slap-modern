@@ -17,6 +17,12 @@ interface ExifData {
     date: string;
 }
 
+/** Files that appeared in, or vanished from, the watched folders. */
+interface WatchChange {
+    added: MediaFile[];
+    removed: string[];
+}
+
 interface ScanResult {
     paths: string[];
     files: MediaFile[];
@@ -73,6 +79,7 @@ interface Window {
         pickDirectory: () => Promise<string | null>;
         getAutoOpen: () => Promise<ScanResult | null>;
         scanPath: (path: string) => Promise<ScanResult | null>;
+        watchDirs: (dirs: string[]) => Promise<void>;
         getPathForFile: (file: File) => string;
         getDates: (paths: string[]) => Promise<Record<string, number>>;
         deleteFile: (path: string) => Promise<boolean>;

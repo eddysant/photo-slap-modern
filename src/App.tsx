@@ -231,6 +231,16 @@ function App() {
   // on a specific file (the survivor of a delete, a guest upload, …)
   const pendingPathRef = useRef<string | null>(null);
 
+  // A mirror of the view state for callbacks that must stay referentially
+  // stable. `files` and `currentIndex` change on every slide, so a callback
+  // closing over them re-registers the IPC listener that owns it several
+  // times a second — the churn `useRemote` and `usePendingDeletes` keep
+  // their callbacks in refs to avoid.
+  const viewRef = useRef({ files, allFiles, currentIndex });
+  useEffect(() => {
+    viewRef.current = { files, allFiles, currentIndex };
+  }, [files, allFiles, currentIndex]);
+
   /** Index to land on for a freshly derived list, consuming any pin. */
   const takePendingIndex = useCallback((list: MediaFile[]) => {
     if (pendingPathRef.current !== null) {
@@ -308,11 +318,25 @@ function App() {
   // Date-taken lookup, fetched lazily the first time a date sort is used
   // and cached until a different folder is opened.
   const fileDatesRef = useRef<Record<string, number> | null>(null);
+  // Paths already asked about, whether or not a date came back. Keying off
+  // the result instead would re-request every file the EXIF reader can't
+  // date, on every re-derive.
+  const datesRequestedRef = useRef<Set<string>>(new Set());
+  const resetDateCache = useCallback(() => {
+    fileDatesRef.current = null;
+    datesRequestedRef.current = new Set();
+  }, []);
   const ensureDates = useCallback(async (fileList: MediaFile[]) => {
-    if (!fileDatesRef.current) {
-      showToast('Reading photo dates…');
-      fileDatesRef.current = await window.api.getDates(fileList.map(f => f.path));
-    }
+    const requested = datesRequestedRef.current;
+    // Only the paths we haven't asked about: files can join the list after
+    // the first fetch (a guest upload, the folder watcher), and leaving them
+    // undated sorted them all to one end of a date sort.
+    const missing = fileList.map(f => f.path).filter(p => !requested.has(p));
+    if (fileDatesRef.current && missing.length === 0) return fileDatesRef.current;
+    if (!fileDatesRef.current) showToast('Reading photo dates…');
+    for (const p of missing) requested.add(p);
+    const fetched = missing.length > 0 ? await window.api.getDates(missing) : {};
+    fileDatesRef.current = { ...(fileDatesRef.current ?? {}), ...fetched };
     return fileDatesRef.current;
   }, [showToast]);
 
@@ -324,7 +348,7 @@ function App() {
     if (result.files.length > 0) {
       setCurrentDirs(result.paths);
       setHealthReport(null);
-      fileDatesRef.current = null;
+      resetDateCache();
       setAllFiles(result.files); // the filter/sort effect below picks this up
       setIsPlaying(autoPlayOnOpen); // photo-frame setups want the show to start immediately
       window.api.setStore('lastDirs', result.paths);
@@ -332,7 +356,7 @@ function App() {
     } else {
       showToast('No media files found in that folder');
     }
-  }, [showToast, autoPlayOnOpen]);
+  }, [showToast, autoPlayOnOpen, resetDateCache]);
 
   // Self-heal an index left past the end of a list that shrank. It used to
   // mean `files[currentIndex]` was undefined, which both killed the advance
@@ -672,6 +696,52 @@ function App() {
     });
   }, []);
 
+  /**
+   * Media that appeared in, or vanished from, the folders on show while the
+   * app was running — the main process watches them and reports the diff.
+   *
+   * Removals take files out of the view only, exactly like a photo that
+   * fails to load: the sidecar metadata is NOT pruned, because a file can go
+   * missing from a scan for reasons that have nothing to do with it being
+   * gone for good (an unmounted volume, a sync in progress).
+   */
+  const applyWatchChange = useCallback(({ added, removed }: WatchChange) => {
+    const { files: shown, allFiles: current, currentIndex: index } = viewRef.current;
+    const known = new Set(current.map(f => f.path));
+    const fresh = added.filter(f => !known.has(f.path));
+    const gone = new Set(removed.filter(p => known.has(p)));
+    if (fresh.length === 0 && gone.size === 0) return;
+
+    // Keep the viewer where it is; the re-derive would otherwise reset to
+    // the first slide.
+    pendingPathRef.current = gone.size > 0
+      ? survivingNeighbourPath(shown, index, gone)
+      : shown[index]?.path ?? null;
+
+    setAllFiles(prev => {
+      const seen = new Set(prev.map(f => f.path));
+      const additions = fresh.filter(f => !seen.has(f.path));
+      const kept = gone.size > 0 ? prev.filter(f => !gone.has(f.path)) : prev;
+      if (additions.length === 0 && kept.length === prev.length) return prev;
+      return [...kept, ...additions];
+    });
+
+    if (fresh.length === 1) showToast(`\u{1F4C2} ${fresh[0].name} joined the show`);
+    else if (fresh.length > 1) showToast(`\u{1F4C2} ${fresh.length} new files joined the show`);
+  }, [showToast]);
+
+  useEffect(() => {
+    return window.api.on('app:filesChanged', (_event, change: WatchChange) => {
+      applyWatchChange(change);
+    });
+  }, [applyWatchChange]);
+
+  // Watch exactly the folders on show. Passing [] when none are open stops
+  // the watcher rather than leaving the previous folder's watch running.
+  useEffect(() => {
+    window.api.watchDirs(currentDirs).catch(e => console.error('Could not watch folders:', e));
+  }, [currentDirs]);
+
   const { pending: pendingDelete, requestDelete, undo: undoDelete } = usePendingDeletes({
     onRemoved: files => removeFromView(files.map(f => f.path)),
     onRestored: restoreToView,
@@ -720,11 +790,11 @@ function App() {
     const results = await Promise.all(currentDirs.map(dir => window.api.scanPath(dir)));
     const valid = results.filter((result): result is ScanResult => result !== null);
     if (valid.length > 0) {
-      fileDatesRef.current = null;
+      resetDateCache();
       setAllFiles(mergeScans(valid).files);
       showToast(`${restored.length} file${restored.length === 1 ? '' : 's'} restored and re-scanned`);
     }
-  }, [currentDirs, files, currentIndex, showToast]);
+  }, [currentDirs, files, currentIndex, showToast, resetDateCache]);
 
   const toggleSettings = () => setIsSettingsOpen(prev => !prev);
 

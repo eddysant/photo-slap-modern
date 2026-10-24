@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('api', {
   pickDirectory: () => ipcRenderer.invoke('dialog:pickDirectory'),
   getAutoOpen: () => ipcRenderer.invoke('app:getAutoOpen'),
   scanPath: (path: string) => ipcRenderer.invoke('dir:scan', path),
+  watchDirs: (dirs: string[]) => ipcRenderer.invoke('dir:watch', dirs),
   // Dropped File objects no longer carry .path; this resolves it
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
   getDates: (paths: string[]) => ipcRenderer.invoke('files:getDates', paths),
