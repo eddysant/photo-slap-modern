@@ -11,6 +11,17 @@ describe('named settings presets', () => {
         expect(SETTINGS_PRESETS.TV).toMatchObject({ controlsPosition: 'left', autoPlayOnOpen: true });
     });
 
+    /**
+     * A preset shapes the show, not the library. Starting or stopping sidecar
+     * writes is a decision about the user's own folders, and picking "Party"
+     * is not consent to either one.
+     */
+    it('does not decide where metadata is stored', () => {
+        for (const preset of Object.values(SETTINGS_PRESETS)) {
+            expect(Object.keys(preset)).not.toContain('metadataStorage');
+        }
+    });
+
     it('decides the backdrop for every preset rather than inheriting it', () => {
         // Applying a preset should fully determine the look; leaving the
         // ambient colour at whatever it happened to be would not.
@@ -28,6 +39,22 @@ describe('culling keyboard workflow', () => {
         expect(cullingActionForKey('Enter')).toBe('keep');
         expect(cullingActionForKey('X')).toBe('reject');
         expect(cullingActionForKey('ArrowRight')).toBeNull();
+    });
+
+    it('takes the key whichever way the shift key fell', () => {
+        expect(cullingActionForKey('K')).toBe('keep');
+        expect(cullingActionForKey('x')).toBe('reject');
+    });
+
+    /**
+     * The review bar does not replace the rest of the keyboard: favorites,
+     * tags and the quick-move slots stay live while culling, so claiming one
+     * of their keys here would quietly break them.
+     */
+    it('leaves the shortcuts that still work during a review alone', () => {
+        for (const key of ['h', 'H', 't', 'T', '1', '2', '3', ' ', 'g', 'p', 'Escape', 'Backspace']) {
+            expect(cullingActionForKey(key)).toBeNull();
+        }
     });
 });
 

@@ -216,6 +216,7 @@ child = launchApp(fixture);
 let cdp = null;
 let brokenFixture = null;
 let shuffleFixture = null;
+let sidecarFixture = null;
 try {
     const page = await waitForPage();
     cdp = await connect(page);
@@ -957,6 +958,64 @@ try {
     const shuffleLeft = (await fs.readdir(shuffleFixture)).filter(n => n.endsWith('.jpg'));
     check('the two committed deletes reached the Trash and the undone one did not',
         shuffleLeft.length === 6, `${shuffleLeft.length} left: ${JSON.stringify(shuffleLeft.sort())}`);
+    // Sidecars are optional. The options panel promises that session-only
+    // metadata writes nothing to the user's folders, and the only way to
+    // believe that is to look at the folder.
+    console.log('session-only metadata writes no sidecar');
+    cdp.close();
+    cdp = null;
+    await shutdownApp(child);
+    sidecarFixture = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-slap-e2e-sidecar-'));
+    for (let i = 1; i <= 3; i++) {
+        await sharp(Buffer.from(`<svg width="320" height="240" xmlns="http://www.w3.org/2000/svg"><rect width="320" height="240" fill="hsl(${i * 90} 70% 50%)"/></svg>`))
+            .jpeg().toFile(path.join(sidecarFixture, `m${i}.jpg`));
+    }
+    await fs.writeFile(cfg, JSON.stringify({
+        transitionStyle: 'fade', isShuffle: false, mediaFilter: 'both', sortOrder: 'name',
+        isKenBurns: false, isExifEnabled: false, isSmart: false, slideDuration: 600000,
+        metadataStorage: 'memory',
+    }));
+    child = launchApp(sidecarFixture);
+    cdp = await attach();
+
+    let sidecarShow = '';
+    for (let i = 0; i < 40; i++) {
+        sidecarShow = await cdp.evaluate(`document.querySelector('.file-info')?.textContent ?? ''`);
+        if (sidecarShow.includes('/ 3')) break;
+        await sleep(500);
+    }
+    check('relaunched with metadata kept in memory', sidecarShow.includes('/ 3'), sidecarShow);
+
+    await cdp.evaluate(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'h', bubbles: true }))`);
+    await sleep(2500);   // comfortably past the 800ms save debounce
+    const afterMemory = await fs.readdir(sidecarFixture);
+    check('a favorite writes nothing to the library while metadata is session-only',
+        !afterMemory.includes('.photo-slap.json'), JSON.stringify(afterMemory));
+
+    // Turning it back on should write what the session is already holding,
+    // which also proves the heart press landed somewhere in the first place.
+    const flipped = await cdp.evaluate(`(async () => {
+        document.querySelector('button[title="Settings"]')?.click();
+        await new Promise(r => setTimeout(r, 800));
+        const select = [...document.querySelectorAll('.settings-menu select')]
+            .find(s => [...s.options].some(o => o.value === 'memory'));
+        if (!select) return 'no storage control in the options panel';
+        const setValue = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
+        setValue.call(select, 'sidecar');
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        await new Promise(r => setTimeout(r, 1200));
+        return 'ok';
+    })()`);
+    check('the options panel offers the storage control', flipped === 'ok', flipped);
+
+    const afterSidecar = await fs.readdir(sidecarFixture);
+    check('turning sidecars on writes the session that was held in memory',
+        afterSidecar.includes('.photo-slap.json'), JSON.stringify(afterSidecar));
+    if (afterSidecar.includes('.photo-slap.json')) {
+        const written = await fs.readFile(path.join(sidecarFixture, '.photo-slap.json'), 'utf8');
+        check('and the favorite pressed while in memory is in it',
+            written.includes('m1.jpg'), written.slice(0, 200));
+    }
 } catch (e) {
     failures++;
     console.error('✗ E2E aborted:', e.message);
@@ -969,6 +1028,7 @@ try {
     await fs.rm(fixture, { recursive: true, force: true });
     if (brokenFixture) await fs.rm(brokenFixture, { recursive: true, force: true });
     if (shuffleFixture) await fs.rm(shuffleFixture, { recursive: true, force: true });
+    if (sidecarFixture) await fs.rm(sidecarFixture, { recursive: true, force: true });
 }
 
 console.log(failures === 0 ? '\nE2E: all checks passed' : `\nE2E: ${failures} check(s) FAILED`);

@@ -14,7 +14,7 @@ import { Toast, ToastAction } from './components/Toast'
 import { ZoomPan } from './components/ZoomPan'
 import { useAmbientColor } from './hooks/useAmbientColor'
 import { useImagePreloader } from './hooks/useImagePreloader'
-import { useLibraryMeta } from './hooks/useLibraryMeta'
+import { useLibraryMeta, type MetadataStorage } from './hooks/useLibraryMeta'
 import { usePendingDeletes, UNDO_WINDOW_MS } from './hooks/usePendingDeletes'
 import { useRemote } from './hooks/useRemote'
 import { useSlidePosition } from './hooks/useSlidePosition'
@@ -102,6 +102,7 @@ function App() {
   const [autoPlayOnOpen, setAutoPlayOnOpen] = usePersistedState('autoPlayOnOpen', false)
   const [remoteEnabled, setRemoteEnabled] = usePersistedState('remoteEnabled', false)
   const [cullingMode, setCullingMode] = usePersistedState('cullingMode', false)
+  const [metadataStorage, setMetadataStorage] = usePersistedState<MetadataStorage>('metadataStorage', 'sidecar')
 
   // Shuffle history is keyed by library roots + media filter. It deliberately
   // lives in app storage (not the library sidecar) so viewed state survives an
@@ -355,8 +356,9 @@ function App() {
     return () => clearTimeout(timer);
   }, [currentIndex, lastDirs, files.length]);
 
-  // Favorites, tags, ratings and culling decisions (sidecar-backed)
-  const meta = useLibraryMeta(currentDirs);
+  // Favorites, tags, ratings and culling decisions. Sidecar-backed unless
+  // the user has asked for this library to be left alone.
+  const meta = useLibraryMeta(currentDirs, metadataStorage);
   const { favorites, fileTags, tagNames, ratings, cullingDecisions } = meta;
 
   // Refs so favorite/tag EDITS don't re-derive the list (which would reset
@@ -1225,6 +1227,13 @@ function App() {
             setMediaFilter('photos');
             setIsPlaying(false);
           }
+        }}
+        metadataStorage={metadataStorage}
+        onMetadataStorageChange={next => {
+          setMetadataStorage(next);
+          showToast(next === 'memory'
+            ? 'Tags and favorites stay in this session only \u2014 nothing is written to your folders'
+            : 'Saving tags and favorites to the library again');
         }}
         onApplyPreset={applyPreset}
         onShowInFinder={() => {

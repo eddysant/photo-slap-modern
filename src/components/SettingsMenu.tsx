@@ -1,6 +1,7 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import { FiActivity, FiFolder, FiLayers, FiX } from 'react-icons/fi';
 import { SETTINGS_PRESETS, type SettingsPresetName } from '../settingsPresets';
+import type { MetadataStorage } from '../hooks/useLibraryMeta';
 import type { TransitionStyle } from '../transitions';
 
 export type MediaFilter = 'both' | 'photos' | 'videos';
@@ -56,6 +57,8 @@ interface SettingsMenuProps {
     tagNames: string[];
     cullingMode: boolean;
     onToggleCullingMode: () => void;
+    metadataStorage: MetadataStorage;
+    onMetadataStorageChange: (storage: MetadataStorage) => void;
     onApplyPreset: (name: SettingsPresetName) => void;
     onShowInFinder: () => void;
     onFindDuplicates: () => void;
@@ -181,6 +184,12 @@ export function SettingsMenu(props: SettingsMenuProps) {
                         <div className="settings-section-title">Review workflow</div>
                         <Toggle checked={props.cullingMode} onChange={props.onToggleCullingMode}>Photo culling mode</Toggle>
                         <p className="settings-help">Culling pauses playback and records Keep (K/Enter) or Reject (X) decisions without deleting files. Assign 1–5 star ratings from the review bar.</p>
+                        <label className="setting-item"><span className="setting-label">Save tags &amp; favorites</span>
+                            <select className="setting-control" value={props.metadataStorage} onChange={e => props.onMetadataStorageChange(e.target.value as MetadataStorage)}>
+                                <option value="sidecar">In the library (.photo-slap.json)</option><option value="memory">This session only</option>
+                            </select>
+                        </label>
+                        <p className="settings-help">Favorites, tags, ratings and culling decisions normally live in a hidden <code>.photo-slap.json</code> beside your photos. Session only writes nothing to your folders — existing files are still read, but anything you change is gone when you quit.</p>
                         <div className="setting-item">
                             <span className="setting-label">Quick-move folders · keys 1–3</span>
                             {props.quickMoveFolders.map((folder, i) => (
