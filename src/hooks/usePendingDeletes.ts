@@ -29,6 +29,28 @@ interface PendingDeletesOptions {
  * Anything still pending when the window closes is flushed, so quitting the
  * app never silently cancels a delete the user asked for.
  */
+/**
+ * Trash each file, returning the ones that did not make it.
+ *
+ * A refusal is ordinary, not exceptional: an external drive formatted exFAT
+ * has no `.Trashes`, so macOS declines every one of them. The caller puts the
+ * survivors back in the slideshow, because they are still on disk.
+ *
+ * Sequential on purpose — `shell.trashItem` against one volume gains nothing
+ * from being run in parallel, and the order files come back in matters.
+ */
+export async function trashFiles(
+    files: MediaFile[],
+    trash: (path: string) => Promise<boolean>,
+): Promise<MediaFile[]> {
+    const failed: MediaFile[] = [];
+    for (const file of files) {
+        const ok = await trash(file.path).catch(() => false);
+        if (!ok) failed.push(file);
+    }
+    return failed;
+}
+
 export function usePendingDeletes({ onRemoved, onRestored }: PendingDeletesOptions) {
     const [pending, setPending] = useState<MediaFile[] | null>(null);
     const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -43,14 +65,9 @@ export function usePendingDeletes({ onRemoved, onRestored }: PendingDeletesOptio
     useEffect(() => { onRemovedRef.current = onRemoved; }, [onRemoved]);
     useEffect(() => { onRestoredRef.current = onRestored; }, [onRestored]);
 
-    const trashNow = useCallback(async (files: MediaFile[]) => {
-        const failed: MediaFile[] = [];
-        for (const file of files) {
-            const ok = await window.api.deleteFile(file.path).catch(() => false);
-            if (!ok) failed.push(file);
-        }
-        return failed;
-    }, []);
+    const trashNow = useCallback(
+        (files: MediaFile[]) => trashFiles(files, path => window.api.deleteFile(path)),
+        []);
 
     /** Commit whatever is pending immediately. */
     const flush = useCallback(async () => {

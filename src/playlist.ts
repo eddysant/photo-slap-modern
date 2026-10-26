@@ -33,3 +33,40 @@ export function survivingNeighbourPath(
     }
     return null;
 }
+
+/**
+ * What the slideshow has been asked to land on once the playable list is
+ * rebuilt. `null` is "nothing asked for".
+ *
+ * One request, not two flags with a precedence rule between them: the list is
+ * re-derived on every delete, restore, quick-move, guest upload, filter and
+ * sort change, and each of those wants exactly one of these answers.
+ */
+export type PendingPosition =
+    | { kind: 'path'; path: string }
+    | { kind: 'index'; index: number }
+    | null;
+
+/**
+ * The index a freshly derived list should sit at.
+ *
+ * The case that matters is the last one. A pinned *path* that is missing from
+ * the new list means something moved under us, and the one answer that is
+ * always wrong there is 0 — "jump to the first slide" is precisely the bug
+ * this machinery exists to prevent. Clamping the position the viewer already
+ * had degrades to "near where you were" instead.
+ *
+ * With no request at all, 0 is right: that is a new folder or a re-sort, where
+ * the list the viewer was looking at no longer means anything.
+ */
+export function resolvePosition(
+    pending: PendingPosition,
+    list: readonly { path: string }[],
+    previousIndex: number,
+): number {
+    if (list.length === 0) return 0;
+    if (pending === null) return 0;
+    if (pending.kind === 'index') return clampIndex(pending.index, list.length);
+    const found = list.findIndex(file => file.path === pending.path);
+    return found >= 0 ? found : clampIndex(previousIndex, list.length);
+}

@@ -17,9 +17,10 @@ import { useImagePreloader } from './hooks/useImagePreloader'
 import { useLibraryMeta } from './hooks/useLibraryMeta'
 import { usePendingDeletes, UNDO_WINDOW_MS } from './hooks/usePendingDeletes'
 import { useRemote } from './hooks/useRemote'
+import { useSlidePosition } from './hooks/useSlidePosition'
 import { useSlideshowPlayback } from './hooks/useSlideshowPlayback'
 import { usePersistedState } from './hooks/usePersistedState'
-import { clampIndex, survivingNeighbourPath } from './playlist'
+import { clampIndex } from './playlist'
 import {
   slideTransitions, presenceModeFor, resolveTransition,
   type ConcreteTransitionStyle, type TransitionStyle,
@@ -52,7 +53,11 @@ const KEN_BURNS_ANIMATIONS = ['kb-pan-left', 'kb-pan-right', 'kb-pan-up', 'kb-pa
 function App() {
   const [files, setFiles] = useState<MediaFile[]>([])
   const [allFiles, setAllFiles] = useState<MediaFile[]>([])
-  const [currentIndex, setCurrentIndex] = useState(0)
+  // `files` is rebuilt constantly; useSlidePosition is what keeps the viewer
+  // in place across that. Nothing here may set the index to 0 by accident.
+  const {
+    index: currentIndex, goTo, pinPath, pinIndex, hold, pinSurvivorOf, resolveFor,
+  } = useSlidePosition(files)
   const [isPlaying, setIsPlaying] = useState(false)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
@@ -225,36 +230,13 @@ function App() {
     setToastAction(null);
   }, []);
 
-  // Set by Resume so the slideshow reopens at the slide it was left on
-  const pendingIndexRef = useRef<number | null>(null);
-  // Set when the list is about to be re-derived but the slideshow should land
-  // on a specific file (the survivor of a delete, a guest upload, …)
-  const pendingPathRef = useRef<string | null>(null);
-
-  // A mirror of the view state for callbacks that must stay referentially
-  // stable. `files` and `currentIndex` change on every slide, so a callback
-  // closing over them re-registers the IPC listener that owns it several
-  // times a second — the churn `useRemote` and `usePendingDeletes` keep
-  // their callbacks in refs to avoid.
-  const viewRef = useRef({ files, allFiles, currentIndex });
-  useEffect(() => {
-    viewRef.current = { files, allFiles, currentIndex };
-  }, [files, allFiles, currentIndex]);
-
-  /** Index to land on for a freshly derived list, consuming any pin. */
-  const takePendingIndex = useCallback((list: MediaFile[]) => {
-    if (pendingPathRef.current !== null) {
-      const idx = list.findIndex(f => f.path === pendingPathRef.current);
-      pendingPathRef.current = null;
-      if (idx >= 0) return idx;
-    }
-    if (pendingIndexRef.current !== null) {
-      const idx = clampIndex(pendingIndexRef.current, list.length);
-      pendingIndexRef.current = null;
-      return idx;
-    }
-    return 0;
-  }, []);
+  // A mirror for callbacks that must stay referentially stable: `allFiles`
+  // changes often, and a callback closing over it re-registers the IPC
+  // listener that owns it — the churn `useRemote` and `usePendingDeletes`
+  // keep their callbacks in refs to avoid. (`files` and `currentIndex` are
+  // mirrored by useSlidePosition, which is why nothing needs them here.)
+  const allFilesRef = useRef(allFiles);
+  useEffect(() => { allFilesRef.current = allFiles; }, [allFiles]);
 
   const applyFiltersAndSort = useCallback((
     unfiltered: MediaFile[],
@@ -312,12 +294,10 @@ function App() {
     }
 
     setFiles(sorted);
-    // Resume on the pinned slide when one is queued (a delete, a quick-move,
-    // a guest upload, Resume). Consuming the pin *here* matters: this is the
-    // one place that would otherwise force index 0, and the effect that used
-    // to restore the pin ran on an earlier render, so the reset always won.
-    setCurrentIndex(takePendingIndex(sorted));
-  }, [persistShuffleHistory, takePendingIndex, seedFor]);
+    // Same batch as the list, so the viewer never sees the new list against
+    // the old index.
+    goTo(resolveFor(sorted));
+  }, [persistShuffleHistory, resolveFor, goTo, seedFor]);
 
 
   // Date-taken lookup, fetched lazily the first time a date sort is used
@@ -363,23 +343,6 @@ function App() {
     }
   }, [showToast, autoPlayOnOpen, resetDateCache]);
 
-  // Self-heal an index left past the end of a list that shrank. It used to
-  // mean `files[currentIndex]` was undefined, which both killed the advance
-  // timer (a permanent freeze) and threw while rendering the slide.
-  useEffect(() => {
-    if (files.length > 0 && currentIndex > files.length - 1) {
-      setCurrentIndex(files.length - 1);
-    }
-  }, [files, currentIndex]);
-
-  // Fallback for lists set outside applyFiltersAndSort (which consumes the
-  // pin itself). A no-op when it already did.
-  useEffect(() => {
-    if (files.length === 0) return;
-    if (pendingPathRef.current === null && pendingIndexRef.current === null) return;
-    setCurrentIndex(takePendingIndex(files));
-  }, [files, takePendingIndex]);
-
   // Remember the current position per folder set (debounced)
   useEffect(() => {
     if (files.length === 0 || lastDirs.length === 0) return;
@@ -412,7 +375,7 @@ function App() {
       // Deleting the last file used to leave it on screen: the derive bailed
       // out here and `files` kept the stale list.
       setFiles([]);
-      setCurrentIndex(0);
+      goTo(0);
       return;
     }
     if (isShuffle && !shuffleHistoryReady) return;
@@ -429,7 +392,7 @@ function App() {
       if (!cancelled) applyFiltersAndSort(source, mediaFilter, isShuffle, sortOrder, dates, shuffleKey);
     })();
     return () => { cancelled = true; };
-  }, [allFiles, mediaFilter, isShuffle, sortOrder, favoritesOnly, tagFilter, currentDirs, shuffleHistoryReady, ensureDates, applyFiltersAndSort, showToast]);
+  }, [allFiles, mediaFilter, isShuffle, sortOrder, favoritesOnly, tagFilter, currentDirs, shuffleHistoryReady, ensureDates, applyFiltersAndSort, goTo, showToast]);
 
   // Viewing a slide records it immediately, so closing the app cannot make
   // the next launch start repeating already-seen media.
@@ -450,9 +413,9 @@ function App() {
     if (!nowFavorite && favoritesOnly) {
       const remaining = files.filter(f => f.path !== file.path);
       setFiles(remaining);
-      setCurrentIndex(ci => clampIndex(ci, remaining.length));
+      goTo(ci => clampIndex(ci, remaining.length));
     }
-  }, [files, currentIndex, favoritesOnly, meta]);
+  }, [files, currentIndex, favoritesOnly, meta, goTo]);
 
   const setTagOnCurrent = useCallback((tag: string, ensureInVocabulary = false) => {
     const file = files[currentIndex];
@@ -482,7 +445,8 @@ function App() {
       const valid = results.filter((r): r is ScanResult => r !== null);
       if (valid.length > 0) {
         const positions = ((await window.api.getStore('resumePositions')) ?? {}) as Record<string, number>;
-        pendingIndexRef.current = positions[lastDirs.join('|')] ?? null;
+        const saved = positions[lastDirs.join('|')];
+        if (saved !== undefined) pinIndex(saved);
         ingestScanResult(mergeScans(valid));
       } else {
         showToast("That folder doesn't exist anymore");
@@ -490,7 +454,7 @@ function App() {
     } finally {
       setIsLoading(false);
     }
-  }, [lastDirs, ingestScanResult, showToast]);
+  }, [lastDirs, ingestScanResult, pinIndex, showToast]);
 
   // Load a directory passed on the command line (or PHOTO_SLAP_DIR in dev)
   const autoOpenedRef = useRef(false);
@@ -576,7 +540,7 @@ function App() {
     // Guest picks come first, ahead of shuffle and normal order alike.
     const queued = takeQueuedIndex(files);
     if (queued !== null) {
-      setCurrentIndex(queued);
+      goTo(queued);
       return;
     }
     // Start a new cycle only once everything really has been seen. Keying off
@@ -590,17 +554,17 @@ function App() {
         const reshuffled = orderForNoRepeatShuffle(files, [], seedFor(key, true)).items;
         shuffleOrderRef.current[key] = reshuffled.map(file => file.path);
         setFiles(reshuffled);
-        setCurrentIndex(0);
+        goTo(0);
         return;
       }
     }
-    setCurrentIndex(prev => (prev + 1) % files.length);
-  }, [files, isShuffle, currentDirs, mediaFilter, persistShuffleHistory, takeQueuedIndex, seedFor]);
+    goTo(prev => (prev + 1) % files.length);
+  }, [files, isShuffle, currentDirs, mediaFilter, persistShuffleHistory, takeQueuedIndex, goTo, seedFor]);
 
   const prevSlide = useCallback(() => {
     setDirection(-1);
-    setCurrentIndex(prev => files.length === 0 ? prev : (prev - 1 + files.length) % files.length);
-  }, [files.length]);
+    goTo(prev => files.length === 0 ? prev : (prev - 1 + files.length) % files.length);
+  }, [files.length, goTo]);
 
   const togglePlay = useCallback(() => {
     if (!cullingMode) setIsPlaying(prev => !prev);
@@ -622,10 +586,10 @@ function App() {
       const reshuffled = orderForNoRepeatShuffle(files, [], seedFor(key, true)).items;
       shuffleOrderRef.current[key] = reshuffled.map(file => file.path);
       setFiles(reshuffled);
-      setCurrentIndex(0);
+      goTo(0);
     }
     showToast('Shuffle history reset');
-  }, [currentDirs, mediaFilter, files, isShuffle, persistShuffleHistory, showToast, seedFor]);
+  }, [currentDirs, mediaFilter, files, isShuffle, persistShuffleHistory, showToast, goTo, seedFor]);
   const handleMediaFilterChange = (newFilter: MediaFilter) => setMediaFilter(newFilter);
 
   useEffect(() => {
@@ -669,37 +633,27 @@ function App() {
   }, [currentDirs]);
 
   /**
-   * Pin the nearest surviving slide before a removal. Changing `allFiles`
-   * re-derives the playable list, and that derive resets the index to 0 — so
-   * without this every delete threw the user back to the first photo.
-   */
-  const pinSurvivingNeighbour = useCallback((removedPaths: string[]) => {
-    pendingPathRef.current = survivingNeighbourPath(files, currentIndex, new Set(removedPaths));
-  }, [files, currentIndex]);
-
-  /**
    * Take files out of the slideshow without touching disk. Only `allFiles` is
    * touched: the derive effect is the single owner of the playable list, and
-   * setting `files` here too would race it (and would consume the pin on an
-   * earlier render than the derive's own reset).
+   * setting `files` here too would race it.
    */
   const removeFromView = useCallback((paths: string[]) => {
     if (paths.length === 0) return;
     const gone = new Set(paths);
-    pinSurvivingNeighbour(paths);
+    pinSurvivorOf(gone);
     setAllFiles(prev => prev.filter(f => !gone.has(f.path)));
-  }, [pinSurvivingNeighbour]);
+  }, [pinSurvivorOf]);
 
   /** Put files back after an undo, or after a trash that failed. */
   const restoreToView = useCallback((restored: MediaFile[]) => {
     if (restored.length === 0) return;
-    pendingPathRef.current = restored[0].path;
+    pinPath(restored[0].path);
     setAllFiles(prev => {
       const known = new Set(prev.map(f => f.path));
       const missing = restored.filter(f => !known.has(f.path));
       return missing.length === 0 ? prev : [...prev, ...missing];
     });
-  }, []);
+  }, [pinPath]);
 
   /**
    * Media that appeared in, or vanished from, the folders on show while the
@@ -711,17 +665,13 @@ function App() {
    * gone for good (an unmounted volume, a sync in progress).
    */
   const applyWatchChange = useCallback(({ added, removed }: WatchChange) => {
-    const { files: shown, allFiles: current, currentIndex: index } = viewRef.current;
-    const known = new Set(current.map(f => f.path));
+    const known = new Set(allFilesRef.current.map(f => f.path));
     const fresh = added.filter(f => !known.has(f.path));
     const gone = new Set(removed.filter(p => known.has(p)));
     if (fresh.length === 0 && gone.size === 0) return;
 
-    // Keep the viewer where it is; the re-derive would otherwise reset to
-    // the first slide.
-    pendingPathRef.current = gone.size > 0
-      ? survivingNeighbourPath(shown, index, gone)
-      : shown[index]?.path ?? null;
+    // Keep the viewer where it is; the re-derive would otherwise start over.
+    if (gone.size > 0) pinSurvivorOf(gone); else hold();
 
     setAllFiles(prev => {
       const seen = new Set(prev.map(f => f.path));
@@ -733,7 +683,7 @@ function App() {
 
     if (fresh.length === 1) showToast(`\u{1F4C2} ${fresh[0].name} joined the show`);
     else if (fresh.length > 1) showToast(`\u{1F4C2} ${fresh.length} new files joined the show`);
-  }, [showToast]);
+  }, [showToast, pinSurvivorOf, hold]);
 
   useEffect(() => {
     return window.api.on('app:filesChanged', (_event, change: WatchChange) => {
@@ -801,7 +751,7 @@ function App() {
 
   const handleFilesRestored = useCallback(async (restored: string[]) => {
     if (restored.length === 0 || currentDirs.length === 0) return;
-    pendingPathRef.current = files[currentIndex]?.path ?? null;
+    hold();
     const results = await Promise.all(currentDirs.map(dir => window.api.scanPath(dir)));
     const valid = results.filter((result): result is ScanResult => result !== null);
     if (valid.length > 0) {
@@ -809,7 +759,7 @@ function App() {
       setAllFiles(mergeScans(valid).files);
       showToast(`${restored.length} file${restored.length === 1 ? '' : 's'} restored and re-scanned`);
     }
-  }, [currentDirs, files, currentIndex, showToast, resetDateCache]);
+  }, [currentDirs, hold, showToast, resetDateCache]);
 
   const toggleSettings = () => setIsSettingsOpen(prev => !prev);
 
@@ -985,10 +935,10 @@ function App() {
   // Phone remote, party reactions, guest uploads and the join QR code
   const handleGuestUpload = useCallback((file: MediaFile) => {
     // Keep the current slide in place; the re-derive would otherwise reset it
-    pendingPathRef.current = files[currentIndex]?.path ?? null;
+    hold();
     setAllFiles(prev => prev.some(f => f.path === file.path) ? prev : [...prev, file]);
     showToast(`\u{1F4F8} ${file.name} joined the show`);
-  }, [files, currentIndex, showToast]);
+  }, [hold, showToast]);
 
   const currentFile: MediaFile | null = files[currentIndex] ?? null;
 
@@ -1543,7 +1493,7 @@ function App() {
           quickMoveFolders={quickMoveFolders}
           onSelect={(i) => {
             setDirection(i >= currentIndex ? 1 : -1);
-            setCurrentIndex(i);
+            goTo(i);
             setIsGridOpen(false);
           }}
           onClose={() => setIsGridOpen(false)}

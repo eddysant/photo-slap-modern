@@ -247,6 +247,32 @@ try {
     check('slideshow auto-opened the fixture', base.counter === `1 / ${fixtureCount}`, base.counter);
     check('image rendered through media://', base.naturalWidth > 0, `naturalWidth=${base.naturalWidth}`);
     check('path outside allowed roots is 403', base.forbidden === 403, `status=${base.forbidden}`);
+
+    // A symlink inside the opened folder is the other way out of it, and
+    // `resolve()` alone never caught it. Unit tests cover isAllowedPath;
+    // this is the protocol the renderer actually goes through.
+    const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-slap-e2e-outside-'));
+    try {
+        await fs.writeFile(path.join(outsideDir, 'secret.jpg'), 'not yours');
+        await fs.symlink(path.join(outsideDir, 'secret.jpg'), path.join(fixture, 'escape.jpg'));
+        await fs.symlink(outsideDir, path.join(fixture, 'elsewhere'));
+        const url = p => `media://local${p.split('/').map(encodeURIComponent).join('/')}`;
+        const linked = await cdp.evaluate(`(async () => {
+            const status = async u => { try { return (await fetch(u)).status; } catch { return -1; } };
+            return JSON.stringify({
+                viaFileLink: await status(${JSON.stringify(url(path.join(fixture, 'escape.jpg')))}),
+                viaDirLink: await status(${JSON.stringify(url(path.join(fixture, 'elsewhere', 'secret.jpg')))}),
+                real: await status(${JSON.stringify(jpgUrl)}),
+            });
+        })()`).then(JSON.parse);
+        check('a file linked out of the opened folder is 403', linked.viaFileLink === 403, `status=${linked.viaFileLink}`);
+        check('a directory linked out of the opened folder is 403', linked.viaDirLink === 403, `status=${linked.viaDirLink}`);
+        check('and real files are still served', linked.real === 200, `status=${linked.real}`);
+    } finally {
+        await fs.rm(path.join(fixture, 'escape.jpg'), { force: true });
+        await fs.rm(path.join(fixture, 'elsewhere'), { force: true });
+        await fs.rm(outsideDir, { recursive: true, force: true });
+    }
     check('byte-range requests get 206 partial content',
         base.range.status === 206 && base.range.length === 100 && /^bytes 0-99\//.test(base.range.contentRange ?? ''),
         `${base.range.status} ${base.range.contentRange}`);
