@@ -228,6 +228,55 @@ describe('scanForChanges', () => {
     });
 });
 
+describe('scanForChanges on a root it cannot fully read', () => {
+    let dir: string;
+
+    beforeEach(async () => {
+        dir = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-slap-unreadable-'));
+        await fs.writeFile(path.join(dir, 'existing.jpg'), 'x');
+        await fs.mkdir(path.join(dir, 'locked'));
+        await fs.writeFile(path.join(dir, 'locked', 'inside.jpg'), 'x');
+        await fs.chmod(path.join(dir, 'locked'), 0o000);
+    });
+
+    afterEach(async () => {
+        await fs.chmod(path.join(dir, 'locked'), 0o755).catch(() => {});
+        await fs.rm(dir, { recursive: true, force: true });
+    });
+
+    /**
+     * Libraries live on external drives and network shares. A transient read
+     * error would otherwise report the whole library as gone, empty the show,
+     * and then re-announce all of it as new media when the volume came back.
+     */
+    it('reports nothing as removed while any directory is unreadable', async () => {
+        const known = new Set([
+            path.join(dir, 'existing.jpg'),
+            path.join(dir, 'locked', 'inside.jpg'),
+        ]);
+        const change = await scanForChanges(dir, known);
+        expect(change.removed).toEqual([]);
+    });
+
+    it('still reports what it could actually see', async () => {
+        await fs.writeFile(path.join(dir, 'fresh.jpg'), 'xx');
+        const known = new Set([path.join(dir, 'existing.jpg')]);
+        const change = await scanForChanges(dir, known);
+        expect(change.added.map(f => f.name)).toEqual(['fresh.jpg']);
+    });
+
+    it('reports removals again once the directory is readable', async () => {
+        await fs.chmod(path.join(dir, 'locked'), 0o755);
+        await fs.rm(path.join(dir, 'locked'), { recursive: true });
+        const known = new Set([
+            path.join(dir, 'existing.jpg'),
+            path.join(dir, 'locked', 'inside.jpg'),
+        ]);
+        const change = await scanForChanges(dir, known);
+        expect(change.removed).toEqual([path.join(dir, 'locked', 'inside.jpg')]);
+    });
+});
+
 describe('DirectoryWatcher', () => {
     let dir: string;
     let changes: WatchChange[];

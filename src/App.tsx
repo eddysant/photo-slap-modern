@@ -29,7 +29,7 @@ import { cullingActionForKey } from './culling'
 import { SETTINGS_PRESETS, type SettingsPresetName } from './settingsPresets'
 import {
   getShuffleProgress, hasSeenEverything, makeShuffleHistoryKey, newShuffleSeed,
-  orderForNoRepeatShuffle, reconcileShuffleOrder, recordViewed,
+  orderForNoRepeatShuffle, reconcileShuffleOrder, recordViewed, retainShuffleOrder,
   type ShuffleHistory, type ShuffleSeeds,
 } from './shuffleHistory'
 import { healthIssuesByPath } from './gridFilters'
@@ -301,7 +301,12 @@ function App() {
         // would replay the previous one exactly.
         if (ordered.cycleReset) seedFor(shuffleKey, true);
       }
-      shuffleOrderRef.current[shuffleKey] = sorted.map(file => file.path);
+      // Keep paths that have dropped out of the list, at their positions: a
+      // photo that comes back (an undone delete, one that could not be
+      // trashed) must return to where it was rather than being treated as
+      // new media and sent to the front, dragging the viewer to slide 1.
+      shuffleOrderRef.current[shuffleKey] =
+        retainShuffleOrder(established ?? [], sorted.map(file => file.path));
     } else {
       setShuffleProgress({ viewed: 0, total: sorted.length });
     }
@@ -744,7 +749,17 @@ function App() {
 
   const { pending: pendingDelete, requestDelete, undo: undoDelete } = usePendingDeletes({
     onRemoved: files => removeFromView(files.map(f => f.path)),
-    onRestored: restoreToView,
+    onRestored: (restored, reason) => {
+      restoreToView(restored);
+      // A file that could not be trashed reappearing with no explanation is
+      // indistinguishable from a bug. It happens for real: an external drive
+      // formatted exFAT has no .Trashes, so macOS refuses to trash at all.
+      if (reason === 'trash-failed') {
+        showToast(restored.length === 1
+          ? `Couldn't move ${restored[0].name} to the Trash \u2014 it's still in the show`
+          : `Couldn't move ${restored.length} files to the Trash \u2014 they're still in the show`);
+      }
+    },
   });
 
   // Deleting also forgets the files' sidecar metadata, so favorites and tags

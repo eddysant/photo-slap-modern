@@ -87,6 +87,28 @@ export function reconcileShuffleOrder<T extends { path: string }>(
     return [...added, ...known];
 }
 
+/**
+ * The order to remember for the next re-derive: the one now in play, plus any
+ * path that has dropped out of the list, kept where it was.
+ *
+ * Forgetting a dropped path is what made a photo that comes back — an undone
+ * delete, or one that could not be moved to the Trash — look brand new to
+ * `reconcileShuffleOrder`, which puts anything it has not seen at the front.
+ * The slideshow's pin followed it there, so the viewer was thrown to slide 1.
+ *
+ * `current` already takes its order from `previous` for every path the two
+ * share, so the paths `current` introduces are exactly the genuinely new ones
+ * (a guest upload, a file copied into the folder) and keep their lead.
+ *
+ * It only ever grows within a cycle, and a new cycle replaces it outright.
+ */
+export function retainShuffleOrder(previous: string[], current: string[]): string[] {
+    if (previous.length === 0) return [...current];
+    const known = new Set(previous);
+    const fresh = current.filter(path => !known.has(path));
+    return fresh.length === 0 ? previous : [...fresh, ...previous];
+}
+
 export function recordViewed(history: ShuffleHistory, key: string, path: string): ShuffleHistory {
     const current = history[key] ?? [];
     if (current.includes(path)) return history;

@@ -3,11 +3,18 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 /** How long a delete can be taken back before it actually reaches the Trash. */
 export const UNDO_WINDOW_MS = 7_000;
 
+/**
+ * Why files are going back into the slideshow. The caller needs to tell these
+ * apart: an undo is what the user just asked for, while a trash that failed is
+ * a surprise they have had no explanation for.
+ */
+export type RestoreReason = 'undo' | 'trash-failed';
+
 interface PendingDeletesOptions {
     /** Take these files out of the slideshow right away. */
     onRemoved: (files: MediaFile[]) => void;
-    /** Put them back — the user changed their mind inside the window. */
-    onRestored: (files: MediaFile[]) => void;
+    /** Put them back — the user changed their mind, or the Trash refused them. */
+    onRestored: (files: MediaFile[], reason: RestoreReason) => void;
 }
 
 /**
@@ -56,7 +63,7 @@ export function usePendingDeletes({ onRemoved, onRestored }: PendingDeletesOptio
         const failed = await trashNow(files);
         // A file that could not be trashed is still gone from the slideshow;
         // put it back so the list matches the disk.
-        if (failed.length > 0) onRestoredRef.current(failed);
+        if (failed.length > 0) onRestoredRef.current(failed, 'trash-failed');
         return failed;
     }, [trashNow]);
 
@@ -69,7 +76,7 @@ export function usePendingDeletes({ onRemoved, onRestored }: PendingDeletesOptio
             if (timerRef.current) clearTimeout(timerRef.current);
             pendingRef.current = null;
             void trashNow(previous).then(failed => {
-                if (failed.length > 0) onRestoredRef.current(failed);
+                if (failed.length > 0) onRestoredRef.current(failed, 'trash-failed');
             });
         }
 
@@ -86,7 +93,7 @@ export function usePendingDeletes({ onRemoved, onRestored }: PendingDeletesOptio
         timerRef.current = null;
         pendingRef.current = null;
         setPending(null);
-        onRestoredRef.current(files);
+        onRestoredRef.current(files, 'undo');
     }, []);
 
     // Never let a quit or reload cancel a delete the user asked for.

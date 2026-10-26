@@ -215,6 +215,7 @@ child = launchApp(fixture);
 
 let cdp = null;
 let brokenFixture = null;
+let shuffleFixture = null;
 try {
     const page = await waitForPage();
     cdp = await connect(page);
@@ -857,6 +858,79 @@ try {
     })()`).then(JSON.parse);
     check('? opens the shortcut list', help.opened && help.rows > 10, `${help.rows} shortcuts`);
     check('Escape closes it', help.closed);
+
+    // ---------- repeated deletes under shuffle ----------
+    // Its own library and launch again, all healthy images: a broken file's
+    // skip toast would race the delete toast and make the counts ambiguous.
+    //
+    // Shuffle is the case that mattered and the one the single name-sorted
+    // delete above could never catch. The running order used to be pruned to
+    // the current list, so a photo that came back — an undone delete, or one
+    // the Trash refused — looked like new media, went to the FRONT, and took
+    // the viewer to slide 1 with it.
+    console.log('repeated deletes under shuffle keep your place');
+    shuffleFixture = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-slap-e2e-shuffle-'));
+    for (let i = 1; i <= 8; i++) {
+        await sharp(Buffer.from(`<svg width="320" height="240" xmlns="http://www.w3.org/2000/svg"><rect width="320" height="240" fill="hsl(${i * 40} 80% 55%)"/></svg>`))
+            .jpeg().toFile(path.join(shuffleFixture, `s${i}.jpg`));
+    }
+    cdp.close();
+    cdp = null;
+    await shutdownApp(child);
+    // Seeded rather than toggled in the UI: the setting hydrates on mount, so
+    // writing it here is what makes the launch deterministic.
+    await fs.writeFile(cfg, JSON.stringify({
+        transitionStyle: 'fade', isShuffle: true, mediaFilter: 'both', sortOrder: 'name',
+        isKenBurns: false, isExifEnabled: false, isSmart: false, slideDuration: 600000,
+        shuffleHistory: {}, shuffleSeeds: {},
+    }));
+    child = launchApp(shuffleFixture);
+    cdp = await attach();
+
+    let shuffled = '';
+    for (let i = 0; i < 40; i++) {
+        shuffled = await cdp.evaluate(`document.querySelector('.file-info')?.textContent ?? ''`);
+        if (shuffled.includes('/ 8')) break;
+        await sleep(500);
+    }
+    check('relaunched into a shuffled library', shuffled.includes('/ 8'), shuffled);
+
+    const walk = await cdp.evaluate(`(async () => {
+        const key = k => window.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true }));
+        const pos = () => (document.querySelector('.file-info')?.textContent ?? '').split('\u00b7')[0].trim();
+        for (let i = 0; i < 4; i++) { key('ArrowRight'); await new Promise(r => setTimeout(r, 350)); }
+        return pos();
+    })()`);
+    check('walked into the middle of the shuffle', walk === '5 / 8', walk);
+
+    // Three deletes back to back, all inside the 7s undo window — which is
+    // what commits the previous one early, the path a failing Trash takes.
+    const repeated = await cdp.evaluate(`(async () => {
+        const key = k => window.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true }));
+        const pos = () => (document.querySelector('.file-info')?.textContent ?? '').split('\u00b7')[0].trim();
+        const steps = [];
+        for (let i = 0; i < 3; i++) {
+            key('Backspace');
+            await new Promise(r => setTimeout(r, 1100));
+            steps.push(pos());
+        }
+        const undoBtn = document.querySelector('.toast-action');
+        const hadUndo = !!undoBtn;
+        undoBtn?.click();
+        await new Promise(r => setTimeout(r, 1400));
+        return JSON.stringify({ steps, hadUndo, afterUndo: pos() });
+    })()`).then(JSON.parse);
+
+    check('every delete holds the position, not just the first',
+        JSON.stringify(repeated.steps) === JSON.stringify(['5 / 7', '5 / 6', '5 / 5']),
+        JSON.stringify(repeated.steps));
+    check('an undo puts the photo back where it was, not at slide 1',
+        repeated.hadUndo && repeated.afterUndo === '5 / 6', `${repeated.afterUndo} (undo offered: ${repeated.hadUndo})`);
+
+    await sleep(UNDO_WINDOW_MS + 1500);
+    const shuffleLeft = (await fs.readdir(shuffleFixture)).filter(n => n.endsWith('.jpg'));
+    check('the two committed deletes reached the Trash and the undone one did not',
+        shuffleLeft.length === 6, `${shuffleLeft.length} left: ${JSON.stringify(shuffleLeft.sort())}`);
 } catch (e) {
     failures++;
     console.error('✗ E2E aborted:', e.message);
@@ -868,6 +942,7 @@ try {
     else await fs.rm(cfg, { force: true });
     await fs.rm(fixture, { recursive: true, force: true });
     if (brokenFixture) await fs.rm(brokenFixture, { recursive: true, force: true });
+    if (shuffleFixture) await fs.rm(shuffleFixture, { recursive: true, force: true });
 }
 
 console.log(failures === 0 ? '\nE2E: all checks passed' : `\nE2E: ${failures} check(s) FAILED`);

@@ -182,8 +182,18 @@ export async function scanForChanges(
     options: ScanForChangesOptions = {},
 ): Promise<WatchChange & { writing: number; sizes: Map<string, number> }> {
     const settle = options.settle ?? settleFiles;
-    const { files } = await scanDirectory(root);
-    const { added, removed } = diffScan(known, files);
+    const { files, errors } = await scanDirectory(root);
+    // A root we could not read through is no evidence that anything is gone.
+    // Libraries live on external drives and network shares, where a transient
+    // error would otherwise empty the show — and then, when the volume came
+    // back, re-announce the whole library as new media. Additions are still
+    // safe: they are files we actually saw.
+    const scanned = diffScan(known, files);
+    const removed = errors.length > 0 ? [] : scanned.removed;
+    if (errors.length > 0 && scanned.removed.length > 0) {
+        console.error(`Not reporting ${scanned.removed.length} missing file(s) under ${root}: ${errors.length} unreadable director${errors.length === 1 ? 'y' : 'ies'}`);
+    }
+    const added = scanned.added;
     const grown = options.recent ? new Set(await findGrownFiles(options.recent)) : new Set<string>();
     // A grown file is still in `known`, so the diff passed over it — but what
     // is on disk now is not the file we admitted.

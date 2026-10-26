@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
     getShuffleProgress, hasSeenEverything, makeShuffleHistoryKey, newShuffleSeed,
-    orderForNoRepeatShuffle, recordViewed, reconcileShuffleOrder,
+    orderForNoRepeatShuffle, recordViewed, reconcileShuffleOrder, retainShuffleOrder,
 } from '../src/shuffleHistory';
 
 const lib = (n: number) => Array.from({ length: n }, (_, i) => ({ path: `/lib/photo-${i}.jpg` }));
@@ -194,5 +194,59 @@ describe('reconcileShuffleOrder', () => {
 
     it('handles an empty library', () => {
         expect(reconcileShuffleOrder([], order, 7)).toEqual([]);
+    });
+});
+
+/**
+ * The running order must not forget a path just because it left the list.
+ * It did, and `reconcileShuffleOrder` then treated a photo that came back —
+ * an undone delete, or one the Trash refused — as new media, putting it at
+ * the front; the slideshow's pin followed it there and the viewer was thrown
+ * to slide 1 on every such restore.
+ */
+describe('retainShuffleOrder', () => {
+    const file = (p: string) => ({ path: p });
+
+    it('keeps a path that dropped out of the list, where it was', () => {
+        const previous = ['/a', '/b', '/c', '/d'];
+        const current = ['/a', '/b', '/d']; // /c deleted
+        expect(retainShuffleOrder(previous, current)).toEqual(previous);
+    });
+
+    it('keeps genuinely new paths at the front, ahead of the old order', () => {
+        expect(retainShuffleOrder(['/a', '/b'], ['/new', '/a', '/b']))
+            .toEqual(['/new', '/a', '/b']);
+    });
+
+    it('is the current order when there is no previous one', () => {
+        expect(retainShuffleOrder([], ['/a', '/b'])).toEqual(['/a', '/b']);
+    });
+
+    it('returns the previous array unchanged when nothing is new', () => {
+        const previous = ['/a', '/b'];
+        // Same reference, so a ref holding it does not churn.
+        expect(retainShuffleOrder(previous, ['/a'])).toBe(previous);
+    });
+
+    it('does not accumulate duplicates over repeated deletes', () => {
+        let order = ['/a', '/b', '/c'];
+        order = retainShuffleOrder(order, ['/a', '/c']);
+        order = retainShuffleOrder(order, ['/a']);
+        expect(order).toEqual(['/a', '/b', '/c']);
+    });
+
+    // The whole point: delete, then restore, and end up where you started.
+    it('puts a restored file back at its own position, not the front', () => {
+        const seed = 99;
+        const all = ['/a', '/b', '/c', '/d', '/e'].map(file);
+        const cycle = orderForNoRepeatShuffle(all, [], seed).items.map(f => f.path);
+        const victim = cycle[3];
+
+        const afterDelete = reconcileShuffleOrder(all.filter(f => f.path !== victim), cycle, seed);
+        const retained = retainShuffleOrder(cycle, afterDelete.map(f => f.path));
+
+        const afterRestore = reconcileShuffleOrder(all, retained, seed).map(f => f.path);
+        expect(afterRestore.indexOf(victim)).toBe(3);
+        expect(afterRestore).toEqual(cycle);
     });
 });
