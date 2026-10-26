@@ -3,8 +3,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {
-    DirectoryWatcher, diffScan, isIgnoredWatchPath, scanForChanges, settleFiles,
-    type WatchChange,
+    DirectoryWatcher, RecentAdmissions, diffScan, findGrownFiles, isIgnoredWatchPath,
+    scanForChanges, settleFiles, type WatchChange,
 } from '../electron/dirWatcher';
 
 const file = (p: string) => ({ name: path.basename(p), path: p, type: 'image' as const });
@@ -50,26 +50,89 @@ describe('isIgnoredWatchPath', () => {
 
 describe('settleFiles', () => {
     const wait = async () => {};
+    const settled = async (stat: () => Promise<{ size: number }>) =>
+        [...(await settleFiles(['/lib/a.jpg'], { stat, wait })).entries()];
 
-    it('admits a file whose size held still', async () => {
-        const stat = async () => ({ size: 1024 });
-        expect(await settleFiles(['/lib/a.jpg'], { stat, wait })).toEqual(['/lib/a.jpg']);
+    it('admits a file whose size held still, and says how big it was', async () => {
+        // The size is what makes a stalled copy recoverable later.
+        expect(await settled(async () => ({ size: 1024 }))).toEqual([['/lib/a.jpg', 1024]]);
     });
 
     it('holds back a file that is still growing', async () => {
         let size = 100;
-        const stat = async () => ({ size: (size += 900) });
-        expect(await settleFiles(['/lib/a.jpg'], { stat, wait })).toEqual([]);
+        expect(await settled(async () => ({ size: (size += 900) }))).toEqual([]);
     });
 
     it('holds back an empty file', async () => {
-        const stat = async () => ({ size: 0 });
-        expect(await settleFiles(['/lib/a.jpg'], { stat, wait })).toEqual([]);
+        expect(await settled(async () => ({ size: 0 }))).toEqual([]);
     });
 
     it('holds back a file that cannot be stat-ed', async () => {
-        const stat = async () => { throw new Error('ENOENT'); };
-        expect(await settleFiles(['/lib/a.jpg'], { stat, wait })).toEqual([]);
+        expect(await settled(async () => { throw new Error('ENOENT'); })).toEqual([]);
+    });
+});
+
+describe('RecentAdmissions', () => {
+    it('remembers the size a file was admitted at', () => {
+        const recent = new RecentAdmissions();
+        recent.record('/lib/a.jpg', 2048);
+        expect(recent.admittedSize('/lib/a.jpg')).toBe(2048);
+        expect(recent.paths()).toEqual(['/lib/a.jpg']);
+    });
+
+    // The cap is what keeps a pass a handful of stats on a library of
+    // thousands, however long the app has been running.
+    it('keeps only the most recent admissions', () => {
+        const recent = new RecentAdmissions(2);
+        recent.record('/a.jpg', 1);
+        recent.record('/b.jpg', 2);
+        recent.record('/c.jpg', 3);
+        expect(recent.paths()).toEqual(['/b.jpg', '/c.jpg']);
+        expect(recent.admittedSize('/a.jpg')).toBeUndefined();
+    });
+
+    it('re-recording a file makes it the newest again', () => {
+        const recent = new RecentAdmissions(2);
+        recent.record('/a.jpg', 1);
+        recent.record('/b.jpg', 2);
+        recent.record('/a.jpg', 9);
+        recent.record('/c.jpg', 3);
+        expect(recent.paths()).toEqual(['/a.jpg', '/c.jpg']);
+        expect(recent.admittedSize('/a.jpg')).toBe(9);
+    });
+
+    it('forgets a file on request', () => {
+        const recent = new RecentAdmissions();
+        recent.record('/a.jpg', 1);
+        recent.forget('/a.jpg');
+        expect(recent.paths()).toEqual([]);
+    });
+});
+
+describe('findGrownFiles', () => {
+    const recent = () => {
+        const r = new RecentAdmissions();
+        r.record('/lib/a.jpg', 1000);
+        return r;
+    };
+
+    it('reports a file bigger than the one we admitted', async () => {
+        expect(await findGrownFiles(recent(), async () => ({ size: 5000 }))).toEqual(['/lib/a.jpg']);
+    });
+
+    it('says nothing about a file that has not changed', async () => {
+        expect(await findGrownFiles(recent(), async () => ({ size: 1000 }))).toEqual([]);
+    });
+
+    it('says nothing about a file that shrank or vanished', async () => {
+        expect(await findGrownFiles(recent(), async () => ({ size: 400 }))).toEqual([]);
+        expect(await findGrownFiles(recent(), async () => { throw new Error('ENOENT'); })).toEqual([]);
+    });
+
+    it('stats nothing when there is nothing recent', async () => {
+        let stats = 0;
+        await findGrownFiles(new RecentAdmissions(), async () => { stats++; return { size: 1 }; });
+        expect(stats).toBe(0);
     });
 });
 
@@ -118,9 +181,50 @@ describe('scanForChanges', () => {
         const known = new Set([path.join(dir, 'existing.jpg')]);
         await fs.writeFile(path.join(dir, 'copying.jpg'), 'x');
 
-        const change = await scanForChanges(dir, known, async () => []);
+        const change = await scanForChanges(dir, known, { settle: async () => new Map() });
         expect(change.added).toEqual([]);
         expect(change.writing).toBe(1);
+    });
+
+    it('reports what each admitted file settled at', async () => {
+        const known = new Set([path.join(dir, 'existing.jpg')]);
+        await fs.writeFile(path.join(dir, 'fresh.jpg'), 'xxxxx');
+
+        const change = await scanForChanges(dir, known);
+        expect(change.sizes.get(path.join(dir, 'fresh.jpg'))).toBe(5);
+    });
+
+    /**
+     * Two size samples a beat apart catch a copy that is actively writing,
+     * but not one that pauses across both — the partial file is admitted and
+     * is `known` from then on, so the diff alone would never see it finish.
+     */
+    it('re-opens a known file that has grown since it was admitted', async () => {
+        const truncated = path.join(dir, 'copying.jpg');
+        await fs.writeFile(truncated, 'xx');
+        const known = new Set([path.join(dir, 'existing.jpg'), truncated]);
+        const recent = new RecentAdmissions();
+        recent.record(truncated, 2);
+
+        // Unchanged: the diff passed over it and so does the growth check.
+        expect((await scanForChanges(dir, known, { recent })).added).toEqual([]);
+
+        await fs.writeFile(truncated, 'xxxxxxxxxx');
+        const change = await scanForChanges(dir, known, { recent });
+        expect(change.added.map(f => f.name)).toEqual(['copying.jpg']);
+        expect(change.sizes.get(truncated)).toBe(10);
+    });
+
+    it('leaves a grown file alone while it is still being written', async () => {
+        const truncated = path.join(dir, 'copying.jpg');
+        await fs.writeFile(truncated, 'xx');
+        const known = new Set([path.join(dir, 'existing.jpg'), truncated]);
+        const recent = new RecentAdmissions();
+        recent.record(truncated, 1);
+
+        const change = await scanForChanges(dir, known, { recent, settle: async () => new Map() });
+        expect(change.added).toEqual([]);
+        expect(change.writing).toBe(1); // so the caller comes round again
     });
 });
 
@@ -188,6 +292,28 @@ describe('DirectoryWatcher', () => {
 
         await watcher.rescan(dir);
         expect(changes).toHaveLength(1);
+    });
+
+    /**
+     * A copy that pauses across both size samples is admitted truncated, and
+     * is `known` from then on. Only the growth check brings the finished
+     * file back; before it, the file stayed broken until the next launch.
+     */
+    it('re-announces a file that grew after it was admitted', async () => {
+        await watcher.watch([dir]);
+        await fs.writeFile(path.join(dir, 'copying.jpg'), 'xx');
+
+        await watcher.rescan(dir);
+        expect(changes).toHaveLength(1);
+
+        await fs.writeFile(path.join(dir, 'copying.jpg'), 'xxxxxxxxxx');
+        await watcher.rescan(dir);
+        expect(changes).toHaveLength(2);
+        expect(changes[1].added.map(f => f.name)).toEqual(['copying.jpg']);
+
+        // Once it is the whole file, it goes quiet again.
+        await watcher.rescan(dir);
+        expect(changes).toHaveLength(2);
     });
 
     it('says nothing for a root it is no longer watching', async () => {

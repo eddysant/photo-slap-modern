@@ -1,4 +1,6 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import fsp from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import {
     allowRoot, isAllowedPath, assertAllowedPath, assertAllowedPaths, filterAllowedPaths,
@@ -69,6 +71,60 @@ describe('assertAllowedPath', () => {
     it('filterAllowedPaths drops disallowed entries instead of throwing', () => {
         const kept = filterAllowedPaths([path.join(ROOT, 'a.jpg'), '/etc/passwd', '']);
         expect(kept).toEqual([path.join(ROOT, 'a.jpg')]);
+    });
+});
+
+/**
+ * resolve() collapses "../" but knows nothing about links, so the allowlist
+ * compares where a path really goes. Nothing legitimate is lost: the scanner
+ * never offers a file reached through a symlink (see fileScanner.test.ts).
+ */
+describe('symlink escapes', () => {
+    let root: string;
+    let outside: string;
+
+    beforeEach(async () => {
+        __resetAllowedRoots();
+        root = await fsp.mkdtemp(path.join(os.tmpdir(), 'photo-slap-root-'));
+        outside = await fsp.mkdtemp(path.join(os.tmpdir(), 'photo-slap-outside-'));
+        await fsp.writeFile(path.join(outside, 'secret.jpg'), 'x');
+        allowRoot(root);
+    });
+
+    afterEach(async () => {
+        await fsp.rm(root, { recursive: true, force: true });
+        await fsp.rm(outside, { recursive: true, force: true });
+    });
+
+    it('refuses a file linked out of the opened folder', async () => {
+        const link = path.join(root, 'innocent.jpg');
+        await fsp.symlink(path.join(outside, 'secret.jpg'), link);
+        expect(isAllowedPath(link)).toBe(false);
+        expect(() => assertAllowedPath(link)).toThrow(/outside the folders/);
+    });
+
+    it('refuses a whole directory linked out of the opened folder', async () => {
+        await fsp.symlink(outside, path.join(root, 'elsewhere'));
+        expect(isAllowedPath(path.join(root, 'elsewhere', 'secret.jpg'))).toBe(false);
+    });
+
+    it('still serves real files, and paths that do not exist yet', async () => {
+        await fsp.writeFile(path.join(root, 'real.jpg'), 'x');
+        expect(isAllowedPath(path.join(root, 'real.jpg'))).toBe(true);
+        // file:move names its destination before creating it.
+        expect(isAllowedPath(path.join(root, 'keep', 'moved.jpg'))).toBe(true);
+    });
+
+    it('accepts a root that is itself a symlink, by either name', async () => {
+        const linkedRoot = path.join(outside, 'library');
+        await fsp.symlink(root, linkedRoot);
+        await fsp.writeFile(path.join(root, 'real.jpg'), 'x');
+        __resetAllowedRoots();
+        allowRoot(linkedRoot);
+
+        expect(isAllowedPath(path.join(linkedRoot, 'real.jpg'))).toBe(true);
+        expect(isAllowedPath(path.join(root, 'real.jpg'))).toBe(true);
+        expect(isAllowedPath(path.join(outside, 'secret.jpg'))).toBe(false);
     });
 });
 

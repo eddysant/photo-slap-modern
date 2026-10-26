@@ -21,7 +21,7 @@ Images: `.jpg` `.jpeg` `.png` `.webp` `.gif` `.bmp` `.heic` `.heif` — Videos: 
 ## Watching
 
 - **Slideshow** — open folders by dialog, drag-and-drop, or a command-line argument. Photos advance on a timer (2s–1min); videos play through, then advance. A video that can't be decoded is skipped rather than stalling the show.
-- **Live folders** — the folders you have open are watched, so photos you copy, AirDrop or sync in join the show within a couple of seconds, and ones that disappear drop out quietly. A file still being copied is left alone until it has finished writing. Nothing to turn on, and no need to relaunch.
+- **Live folders** — the folders you have open are watched, so photos you copy, AirDrop or sync in join the show within a couple of seconds, and ones that disappear drop out quietly. A file still being copied is left alone until it has finished writing, even if the copy stalls part-way and picks up again later. Nothing to turn on, and no need to relaunch.
 - **Transitions** — Fade, Slide, Zoom, Flip, a classic **Star Wipe** (the new slide revealed through a growing star over the old one), a **CRT Power-On** that collapses the slide to a glowing line and snaps it back out, or **Surprise Me**, which picks a different one for every slide. Directional styles mirror when you navigate backwards.
 - **Ken Burns** — slow random pan/zoom on photos.
 - **Smart Background** — a blurred, darkened copy of the current media fills the letterbox area, optionally for videos too.

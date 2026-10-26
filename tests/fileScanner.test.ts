@@ -5,6 +5,7 @@ import path from 'node:path';
 import { scanDirectory } from '../electron/fileScanner';
 
 let dir: string;
+let outside: string;
 
 beforeAll(async () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-slap-scan-'));
@@ -17,10 +18,19 @@ beforeAll(async () => {
     await fs.writeFile(path.join(dir, 'nested', 'deep.png'), 'x');
     await fs.mkdir(path.join(dir, '.git'));
     await fs.writeFile(path.join(dir, '.git', 'sneaky.jpg'), 'x'); // dot-dir
+
+    // Symlinks pointing out of the library. pathAccess refuses to serve
+    // anything reached through one, which is only safe because the scanner
+    // never offers such a file in the first place — pin that here.
+    outside = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-slap-outside-'));
+    await fs.writeFile(path.join(outside, 'secret.jpg'), 'x');
+    await fs.symlink(path.join(outside, 'secret.jpg'), path.join(dir, 'linked.jpg'));
+    await fs.symlink(outside, path.join(dir, 'elsewhere'));
 });
 
 afterAll(async () => {
     await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(outside, { recursive: true, force: true });
 });
 
 describe('scanDirectory', () => {
@@ -29,6 +39,12 @@ describe('scanDirectory', () => {
         const names = files.map(f => f.name).sort();
         expect(names).toEqual(['clip.mp4', 'deep.png', 'photo.HEIC', 'photo.jpg']);
         expect(errors).toEqual([]);
+    });
+
+    it('does not follow symlinks, so nothing outside the folder is offered', async () => {
+        const { files } = await scanDirectory(dir);
+        expect(files.map(f => f.name)).not.toContain('linked.jpg');
+        expect(files.map(f => f.path).some(p => p.includes('elsewhere'))).toBe(false);
     });
 
     it('classifies images and videos', async () => {

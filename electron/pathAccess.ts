@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 
 /**
@@ -34,18 +35,51 @@ export function isWithin(dir: string, filePath: string): boolean {
     return filePath === dir || filePath.startsWith(dir + path.sep);
 }
 
+/**
+ * Where `p` really is, with every symlink along the way followed.
+ *
+ * `resolve()` collapses `../` but knows nothing about links, so a lexical
+ * comparison would let a symlink *inside* an opened folder point anywhere on
+ * disk. Nothing legitimate is lost by following them: `scanDirectory` skips
+ * symlinks outright (a `Dirent` for one is neither `isFile()` nor
+ * `isDirectory()`), so no file the slideshow plays is ever reached through
+ * one — and a root that is itself a symlink still works, because the roots
+ * are stored in the same real form.
+ *
+ * A path that does not exist yet has no real path of its own, and `file:move`
+ * names its destination before creating it. So the nearest existing ancestor
+ * is resolved and the remainder re-joined: that is where the file would land.
+ */
+function realPathOf(p: string): string {
+    let head = p;
+    const tail: string[] = [];
+    for (;;) {
+        try {
+            return path.join(fs.realpathSync(head), ...tail);
+        } catch {
+            const parent = path.dirname(head);
+            if (parent === head) return p; // nothing along the way resolves
+            tail.unshift(path.basename(head));
+            head = parent;
+        }
+    }
+}
+
 /** Permit reads/writes under `dir`. Returns the resolved root. */
 export function allowRoot(dir: string): string {
     const resolved = path.resolve(dir);
-    allowedRoots.add(resolved);
+    // Stored in real form, because that is the form paths are compared in.
+    // The caller still gets back the path it named.
+    allowedRoots.add(realPathOf(resolved));
     return resolved;
 }
 
 export function isAllowedPath(filePath: string): boolean {
     if (!filePath) return false;
-    // resolve() collapses ../ segments, so a traversal attempt is compared in
-    // its real form rather than the literal string that was sent.
-    const target = forCompare(path.resolve(filePath));
+    // resolve() collapses ../ segments and realPathOf follows symlinks, so
+    // both kinds of escape are compared in their real form rather than the
+    // literal string that was sent.
+    const target = forCompare(realPathOf(path.resolve(filePath)));
     for (const root of allowedRoots) {
         const candidate = forCompare(root);
         if (target === candidate || target.startsWith(candidate + path.sep)) return true;
