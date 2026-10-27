@@ -9,6 +9,7 @@ import {
     toggleTag,
     type LibraryMetaState,
     type MetadataStorage,
+    type MetaSnapshot,
 } from '../src/hooks/useLibraryMeta';
 
 const state = (): LibraryMetaState => ({
@@ -118,11 +119,15 @@ describe('sidecarAction', () => {
 
 describe('createSidecarSaver', () => {
     const DELAY = 800;
-    let writes: LibraryMeta[];
+    const ROOTS = ['/lib'];
+    let writes: { roots: string[]; payload: LibraryMeta }[];
     let saver: ReturnType<typeof createSidecarSaver>;
 
+    const snap = (overrides: Partial<MetaSnapshot> = {}): MetaSnapshot =>
+        ({ state: state(), roots: ROOTS, ...overrides });
+
     const saverFor = (storage: MetadataStorage) =>
-        createSidecarSaver(payload => writes.push(payload), DELAY, storage);
+        createSidecarSaver((roots, payload) => writes.push({ roots, payload }), DELAY, storage);
 
     beforeEach(() => {
         vi.useFakeTimers();
@@ -138,34 +143,57 @@ describe('createSidecarSaver', () => {
     });
 
     it('writes an edit once the debounce elapses', () => {
-        saver.edit(state());
+        saver.edit(snap());
         expect(writes).toHaveLength(0);
         vi.advanceTimersByTime(DELAY);
         expect(writes).toHaveLength(1);
-        expect(writes[0].favorites).toEqual(['/lib/a.jpg', '/lib/b.jpg']);
+        expect(writes[0].payload.favorites).toEqual(['/lib/a.jpg', '/lib/b.jpg']);
+        expect(writes[0].roots).toEqual(ROOTS);
+    });
+
+    /**
+     * The bug this pairing exists to prevent: an edit in one library, a
+     * different library opened inside the debounce, and the write lands with
+     * the first library's entries against the second library's roots. Every
+     * entry belongs to neither root, so the buckets come out empty — and
+     * `saveLibraryMeta` rewrites an existing sidecar even when emptied, so
+     * unfavorites stick. The newly opened library is erased.
+     */
+    it('writes to the roots the edit was made in, not the ones open when it lands', () => {
+        saver.edit(snap({ roots: ['/library-a'] }));
+        // the user opens another library; a later snapshot would say /library-b
+        vi.advanceTimersByTime(DELAY);
+        expect(writes).toHaveLength(1);
+        expect(writes[0].roots).toEqual(['/library-a']);
+    });
+
+    it('writes nothing when there are no roots to write to', () => {
+        saver.edit(snap({ roots: [] }));
+        vi.advanceTimersByTime(DELAY);
+        expect(writes).toEqual([]);
     });
 
     it('coalesces a burst of edits into one write', () => {
-        saver.edit(state());
+        saver.edit(snap());
         vi.advanceTimersByTime(DELAY - 1);
-        saver.edit(state());
+        saver.edit(snap());
         vi.advanceTimersByTime(DELAY - 1);
-        saver.edit(state());
+        saver.edit(snap());
         vi.advanceTimersByTime(DELAY);
         expect(writes).toHaveLength(1);
     });
 
-    it('writes the newest state, not the state of the first edit', () => {
-        saver.edit(state());
-        saver.edit({ ...state(), tagNames: ['beach', 'dog', 'sunset'] });
+    it('writes the newest snapshot, not the one from the first edit', () => {
+        saver.edit(snap());
+        saver.edit(snap({ state: { ...state(), tagNames: ['beach', 'dog', 'sunset'] } }));
         vi.advanceTimersByTime(DELAY);
-        expect(writes[0].tagNames).toEqual(['beach', 'dog', 'sunset']);
+        expect(writes[0].payload.tagNames).toEqual(['beach', 'dog', 'sunset']);
     });
 
     /** The whole point of the setting: an edit must touch nothing on disk. */
     it('never writes while metadata is kept in memory', () => {
         const memory = saverFor('memory');
-        memory.edit(state());
+        memory.edit(snap());
         vi.advanceTimersByTime(DELAY * 10);
         expect(writes).toEqual([]);
         expect(memory.pending).toBe(false);
@@ -178,46 +206,46 @@ describe('createSidecarSaver', () => {
      * just asked to leave alone.
      */
     it('drops a write that was queued before sidecars were turned off', () => {
-        saver.edit(state());
+        saver.edit(snap());
         expect(saver.pending).toBe(true);
-        saver.setStorage('memory', state());
+        saver.setStorage('memory', snap());
         vi.advanceTimersByTime(DELAY * 10);
         expect(writes).toEqual([]);
         expect(saver.pending).toBe(false);
     });
 
     it('keeps writing nothing for every edit after the switch', () => {
-        saver.setStorage('memory', state());
-        saver.edit(state());
-        saver.edit(state());
+        saver.setStorage('memory', snap());
+        saver.edit(snap());
+        saver.edit(snap());
         vi.advanceTimersByTime(DELAY * 10);
         expect(writes).toEqual([]);
     });
 
     it('writes the session immediately when sidecars are turned on', () => {
         const memory = saverFor('memory');
-        memory.edit(state());
-        memory.setStorage('sidecar', state());
+        memory.edit(snap());
+        memory.setStorage('sidecar', snap());
         expect(writes).toHaveLength(1);
         expect(memory.storage).toBe('sidecar');
     });
 
     it('does not write when the mode was set to what it already was', () => {
-        saver.setStorage('sidecar', state());
+        saver.setStorage('sidecar', snap());
         expect(writes).toEqual([]);
     });
 
     /** Quitting inside the debounce used to lose the last heart press. */
     it('flushes a pending write on the way out', () => {
-        saver.edit(state());
-        saver.flush(state());
+        saver.edit(snap());
+        saver.flush(snap());
         expect(writes).toHaveLength(1);
         vi.advanceTimersByTime(DELAY * 10);
         expect(writes).toHaveLength(1);
     });
 
     it('flushes nothing when nothing is pending', () => {
-        saver.flush(state());
+        saver.flush(snap());
         expect(writes).toEqual([]);
     });
 
@@ -228,14 +256,14 @@ describe('createSidecarSaver', () => {
      */
     it('has nothing to flush while in memory', () => {
         const memory = saverFor('memory');
-        memory.edit(state());
+        memory.edit(snap());
         expect(memory.pending).toBe(false);
-        memory.flush(state());
+        memory.flush(snap());
         expect(writes).toEqual([]);
     });
 
     it('cancel leaves nothing pending', () => {
-        saver.edit(state());
+        saver.edit(snap());
         expect(saver.pending).toBe(true);
         saver.cancel();
         expect(saver.pending).toBe(false);

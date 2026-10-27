@@ -109,13 +109,28 @@ export function sidecarAction(event: MetadataEvent, storage: MetadataStorage): S
     return storage === 'sidecar' ? 'write-now' : 'cancel';
 }
 
+/**
+ * What to write, and where — taken together, always.
+ *
+ * A debounced save used to pair the metadata it captured when it was queued
+ * with whatever roots were open when it fired. Open a second library inside
+ * the debounce and the first library's entries belong to none of the new
+ * roots, so every bucket came out empty — and `saveLibraryMeta` rewrites an
+ * existing sidecar even when it empties, so unfavorites stick. The newly
+ * opened library's favorites, tags and vocabulary were erased.
+ */
+export interface MetaSnapshot {
+    state: LibraryMetaState;
+    roots: string[];
+}
+
 export interface SidecarSaver {
     /** Metadata changed. Schedules a write, or doesn't. */
-    edit(state: LibraryMetaState): void;
+    edit(snapshot: MetaSnapshot): void;
     /** Where metadata should live from now on. */
-    setStorage(storage: MetadataStorage, state: LibraryMetaState): void;
+    setStorage(storage: MetadataStorage, snapshot: MetaSnapshot): void;
     /** Write anything still pending, now — the hook is going away. */
-    flush(state: LibraryMetaState): void;
+    flush(snapshot: MetaSnapshot): void;
     cancel(): void;
     readonly storage: MetadataStorage;
     readonly pending: boolean;
@@ -129,7 +144,7 @@ export interface SidecarSaver {
  * caller, so a queued write and the setting it depends on can never disagree.
  */
 export function createSidecarSaver(
-    write: (payload: LibraryMeta) => void,
+    write: (roots: string[], payload: LibraryMeta) => void,
     delayMs: number = SAVE_DEBOUNCE_MS,
     initialStorage: MetadataStorage = 'sidecar',
 ): SidecarSaver {
@@ -141,33 +156,35 @@ export function createSidecarSaver(
         timer = null;
     };
 
-    const writeNow = (state: LibraryMetaState) => {
+    const writeNow = ({ state, roots }: MetaSnapshot) => {
         cancel();
-        write(sidecarPayload(state));
+        if (roots.length > 0) write(roots, sidecarPayload(state));
     };
 
     return {
-        edit(state) {
+        edit(snapshot) {
             if (sidecarAction({ kind: 'edit' }, storage) !== 'schedule') return;
             cancel();
+            // The snapshot is taken now, roots included: when this fires the
+            // user may be looking at a different library entirely.
             timer = setTimeout(() => {
                 timer = null;
-                write(sidecarPayload(state));
+                if (snapshot.roots.length > 0) write(snapshot.roots, sidecarPayload(snapshot.state));
             }, delayMs);
         },
-        setStorage(next, state) {
+        setStorage(next, snapshot) {
             const action = sidecarAction({ kind: 'storage-changed', from: storage }, next);
             storage = next;
             // A write queued a moment ago must not land in a folder the user
             // has just asked to leave alone.
             if (action === 'cancel') cancel();
-            else if (action === 'write-now') writeNow(state);
+            else if (action === 'write-now') writeNow(snapshot);
         },
-        flush(state) {
+        flush(snapshot) {
             // A timer can only exist in sidecar mode — switching away cancels
             // — so there is no mode to re-check here.
             if (!timer) return;
-            writeNow(state);
+            writeNow(snapshot);
         },
         cancel,
         get storage() { return storage; },
@@ -183,70 +200,88 @@ export function useLibraryMeta(currentDirs: string[], storage: MetadataStorage =
     // double-invokes updaters, and an impure one here would double-save.
     const stateRef = useRef(state);
 
-    // Latest roots, so a debounced save that lands after a folder change
-    // still writes to the folders it was queued for.
+    // The roots an edit belongs to, read when the edit happens rather than
+    // when its debounced write lands — see `MetaSnapshot`.
     const dirsRef = useRef(currentDirs);
     useEffect(() => { dirsRef.current = currentDirs; }, [currentDirs]);
 
+    const snapshot = useCallback((state = stateRef.current): MetaSnapshot =>
+        ({ state, roots: dirsRef.current }), []);
+
     // Built in an effect, not in render: it closes over refs, and nothing it
-    // does is needed to produce a frame.
+    // does is needed to produce a frame. Created and configured by the SAME
+    // effect — splitting them left the saver's mode depending on the order
+    // two effects happened to be declared in, and getting that wrong turns
+    // memory mode off at launch while every test still passes.
     const saverRef = useRef<SidecarSaver | null>(null);
     useEffect(() => {
-        const saver = createSidecarSaver(payload => {
-            const dirs = dirsRef.current;
-            if (dirs.length === 0) return;
-            window.api.librarySave(dirs, payload)
+        saverRef.current ??= createSidecarSaver((roots, payload) => {
+            window.api.librarySave(roots, payload)
                 .catch(e => console.error('Failed to save library metadata:', e));
         });
-        saverRef.current = saver;
-        // A save queued within the debounce of a quit used to be dropped on
-        // the way out, silently losing the last heart press.
-        return () => {
-            saver.flush(stateRef.current);
-            saverRef.current = null;
-        };
-    }, []);
+        // Turning saving on writes what the session has; turning it off stops
+        // a queued write from landing afterwards.
+        saverRef.current.setStorage(storage, snapshot());
+    }, [storage, snapshot]);
+
+    // A save queued within the debounce of a quit used to be dropped on the
+    // way out, silently losing the last heart press.
+    useEffect(() => () => {
+        saverRef.current?.flush(snapshot());
+        saverRef.current = null;
+    }, [snapshot]);
 
     const commit = useCallback((next: LibraryMetaState) => {
         stateRef.current = next;
         setState(next);
     }, []);
 
+    /**
+     * Edits made while a sidecar load is still in flight.
+     *
+     * The load arrives and replaces the whole state, so a heart press during
+     * one was silently thrown away — and the load is a glob of the entire
+     * library, which is slow enough to notice on a network volume. Updaters
+     * here are pure by construction (the same reason setState updaters are
+     * never used), so replaying them over the loaded state is safe.
+     */
+    const replayRef = useRef<((prev: LibraryMetaState) => LibraryMetaState)[] | null>(null);
+
     // Load from the sidecars whenever the opened folders change
     useEffect(() => {
         if (currentDirs.length === 0) return;
         let cancelled = false;
+        const replay: ((prev: LibraryMetaState) => LibraryMetaState)[] = [];
+        replayRef.current = replay;
+        const done = () => { if (replayRef.current === replay) replayRef.current = null; };
         window.api.libraryLoad(currentDirs)
             .then(meta => {
                 if (cancelled) return;
-                commit({
+                let loaded: LibraryMetaState = {
                     favorites: new Set(meta.favorites),
                     fileTags: meta.tags,
                     tagNames: meta.tagNames,
                     ratings: meta.ratings,
                     cullingDecisions: meta.culling,
-                });
+                };
+                for (const updater of replay) loaded = updater(loaded);
+                commit(loaded);
             })
-            .catch(e => console.error('Failed to load library metadata:', e));
-        return () => { cancelled = true; };
+            .catch(e => console.error('Failed to load library metadata:', e))
+            .finally(done);
+        return () => { cancelled = true; done(); };
     }, [currentDirs, commit]);
-
-    // Turning saving on writes what the session has; turning it off stops a
-    // queued write from landing afterwards. Declared after the effect that
-    // builds the saver, so it is there by the time this runs.
-    useEffect(() => {
-        saverRef.current?.setStorage(storage, stateRef.current);
-    }, [storage]);
 
     /** Apply a pure update to the current state and persist the result. */
     const apply = useCallback((updater: (prev: LibraryMetaState) => LibraryMetaState) => {
         const prev = stateRef.current;
         const next = updater(prev);
         if (next === prev) return prev;
+        replayRef.current?.push(updater);
         commit(next);
-        saverRef.current?.edit(next);
+        saverRef.current?.edit(snapshot(next));
         return next;
-    }, [commit]);
+    }, [commit, snapshot]);
 
     const setFavorite = useCallback((paths: string[], favorite: boolean) => {
         apply(prev => {

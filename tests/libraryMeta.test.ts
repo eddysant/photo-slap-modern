@@ -124,3 +124,55 @@ describe('save/load round trip', () => {
         expect(loaded).toEqual({ favorites: [], tags: {}, tagNames: ['gone'], ratings: {}, culling: {} });
     });
 });
+
+/**
+ * `saveLibraryMeta` rewrites an existing sidecar even when the entries for
+ * that root come out empty, because that is how clearing the last favorite
+ * sticks. It cannot tell that apart from being handed another library's
+ * metadata, so the caller has to pair the metadata with the roots it came
+ * from. `MetaSnapshot` in `useLibraryMeta` is what guarantees that; this
+ * pins the behaviour it is guarding against.
+ */
+describe('metadata must be saved against the roots it came from', () => {
+    let here: string;
+    let elsewhere: string;
+
+    beforeEach(async () => {
+        here = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-slap-here-'));
+        elsewhere = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-slap-elsewhere-'));
+        await fs.writeFile(path.join(here, 'mine.jpg'), 'x');
+        await fs.writeFile(path.join(elsewhere, 'theirs.jpg'), 'x');
+    });
+
+    afterEach(async () => {
+        await fs.rm(here, { recursive: true, force: true });
+        await fs.rm(elsewhere, { recursive: true, force: true });
+    });
+
+    it('erases a library handed metadata that belongs to a different one', async () => {
+        await saveLibraryMeta([here], {
+            favorites: [path.join(here, 'mine.jpg')], tags: {}, tagNames: ['holiday'], ratings: {}, culling: {},
+        });
+        expect((await loadLibraryMeta([here])).favorites).toEqual([path.join(here, 'mine.jpg')]);
+
+        await saveLibraryMeta([here], {
+            favorites: [path.join(elsewhere, 'theirs.jpg')], tags: {}, tagNames: [], ratings: {}, culling: {},
+        });
+
+        const after = await loadLibraryMeta([here]);
+        expect(after.favorites).toEqual([]);
+        expect(after.tagNames).toEqual([]);
+    });
+
+    it('keeps both libraries intact when each is saved against its own root', async () => {
+        await saveLibraryMeta([here], {
+            favorites: [path.join(here, 'mine.jpg')], tags: {}, tagNames: ['holiday'], ratings: {}, culling: {},
+        });
+        await saveLibraryMeta([elsewhere], {
+            favorites: [path.join(elsewhere, 'theirs.jpg')], tags: {}, tagNames: ['work'], ratings: {}, culling: {},
+        });
+
+        expect((await loadLibraryMeta([here])).favorites).toEqual([path.join(here, 'mine.jpg')]);
+        expect((await loadLibraryMeta([elsewhere])).favorites).toEqual([path.join(elsewhere, 'theirs.jpg')]);
+    });
+});
