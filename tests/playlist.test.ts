@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { clampIndex, resolvePosition, survivingNeighbourPath } from '../src/playlist';
+import fs from 'node:fs';
+import path from 'node:path';
+import { clampIndex, needsDateLookup, resolvePosition, survivingNeighbourPath } from '../src/playlist';
 
 const file = (name: string): MediaFile => ({ name, path: `/lib/${name}`, type: 'image' });
 const files = ['a.jpg', 'b.jpg', 'c.jpg', 'd.jpg'].map(file);
@@ -107,5 +109,40 @@ describe('resolvePosition', () => {
         }
         expect(list.map(f => f.name)).toEqual(['a.jpg']);
         expect(index).toBe(0); // only because nothing else survives
+    });
+});
+
+describe('needsDateLookup', () => {
+    it('reads dates for a date sort', () => {
+        expect(needsDateLookup('date-desc', false)).toBe(true);
+        expect(needsDateLookup('date-asc', false)).toBe(true);
+    });
+
+    it('does not read them for a name sort', () => {
+        expect(needsDateLookup('name', false)).toBe(false);
+    });
+
+    /**
+     * Shuffle throws the sorted order away, so reading the first 256 KB of
+     * every file in the library to produce it is a gigabyte of I/O and a
+     * "Reading photo dates…" toast spent on an order nobody will see.
+     */
+    it('does not read them under shuffle, whatever the sort says', () => {
+        expect(needsDateLookup('date-desc', true)).toBe(false);
+        expect(needsDateLookup('date-asc', true)).toBe(false);
+        expect(needsDateLookup('name', true)).toBe(false);
+    });
+});
+
+/** The saving is only real if App actually asks before fetching. */
+describe('the derive asks before reading dates', () => {
+    const app = fs.readFileSync(path.join(import.meta.dirname, '../src/App.tsx'), 'utf8');
+
+    it('gates ensureDates on needsDateLookup', () => {
+        expect(app).toMatch(/needsDateLookup\(sortOrder,\s*isShuffle\)\s*\?\s*await ensureDates\(/);
+    });
+
+    it('has no other call to ensureDates in the derive', () => {
+        expect([...app.matchAll(/await ensureDates\(/g)]).toHaveLength(1);
     });
 });

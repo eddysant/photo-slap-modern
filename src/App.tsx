@@ -20,7 +20,7 @@ import { useRemote } from './hooks/useRemote'
 import { useSlidePosition } from './hooks/useSlidePosition'
 import { useSlideshowPlayback } from './hooks/useSlideshowPlayback'
 import { usePersistedState } from './hooks/usePersistedState'
-import { clampIndex } from './playlist'
+import { clampIndex, needsDateLookup } from './playlist'
 import {
   slideTransitions, presenceModeFor, resolveTransition,
   type ConcreteTransitionStyle, type TransitionStyle,
@@ -389,7 +389,7 @@ function App() {
       if (source.length === 0) {
         showToast(favoritesOnly || tagFilter ? 'No files match the filters' : 'No media files');
       }
-      const dates = sortOrder !== 'name' ? await ensureDates(allFiles) : null;
+      const dates = needsDateLookup(sortOrder, isShuffle) ? await ensureDates(allFiles) : null;
       const shuffleKey = makeShuffleHistoryKey(currentDirs, mediaFilter);
       if (!cancelled) applyFiltersAndSort(source, mediaFilter, isShuffle, sortOrder, dates, shuffleKey);
     })();

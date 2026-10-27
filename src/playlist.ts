@@ -70,3 +70,19 @@ export function resolvePosition(
     const found = list.findIndex(file => file.path === pending.path);
     return found >= 0 ? found : clampIndex(previousIndex, list.length);
 }
+
+/**
+ * Whether the playable list actually needs date-taken data.
+ *
+ * A date sort does — but shuffle replaces the order outright afterwards
+ * (`reconcileShuffleOrder` and the seeded rank depend on nothing but the
+ * paths and the seed), so under shuffle the sort is discarded and reading
+ * dates is pure waste. It is not cheap waste: `files:getDates` reads the
+ * first 256 KB of every file in the library looking for an EXIF
+ * `DateTimeOriginal`, which is over a gigabyte of I/O on a few thousand
+ * photos, and it puts a "Reading photo dates…" toast in front of someone
+ * whose order is about to be randomised anyway.
+ */
+export function needsDateLookup(sortOrder: string, isShuffle: boolean): boolean {
+    return sortOrder !== 'name' && !isShuffle;
+}
