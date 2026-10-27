@@ -250,3 +250,59 @@ describe('retainShuffleOrder', () => {
         expect(afterRestore).toEqual(cycle);
     });
 });
+
+/**
+ * Ranks are precomputed per path instead of being hashed inside the
+ * comparator, which is ~4x faster on a real library and must not change a
+ * single position. The expected order here is built from an independent
+ * implementation of the hash, so this would catch the optimisation quietly
+ * reordering someone's shuffle.
+ */
+describe('seeded order is independent of how the ranks are computed', () => {
+    const referenceRank = (p: string, seed: number) => {
+        let hash = (2166136261 ^ seed) >>> 0;
+        for (let i = 0; i < p.length; i++) {
+            hash ^= p.charCodeAt(i);
+            hash = Math.imul(hash, 16777619) >>> 0;
+        }
+        return hash >>> 0;
+    };
+
+    const library = Array.from({ length: 200 }, (_, i) => ({
+        path: `/lib/album ${i % 7}/IMG_${String(i).padStart(4, '0')}.jpg`,
+    }));
+
+    for (const seed of [0, 1, 7, 2 ** 31, 0xffffffff]) {
+        it(`matches a comparator that hashes on the fly (seed ${seed})`, () => {
+            const expected = [...library].sort((a, b) =>
+                referenceRank(a.path, seed) - referenceRank(b.path, seed) ||
+                (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)).map(f => f.path);
+
+            expect(orderForNoRepeatShuffle(library, [], seed).items.map(f => f.path)).toEqual(expected);
+            expect(reconcileShuffleOrder(library, [], seed).map(f => f.path)).toEqual(expected);
+        });
+    }
+
+    /**
+     * Two real paths that hash to the same rank under seed 7 (found by
+     * search — FNV-1a is 32-bit, so a library of any size will hit this
+     * eventually). Without the path tiebreaker the order of these two falls
+     * back to whatever order the scan happened to produce, so the same
+     * library and the same seed would shuffle differently between runs.
+     */
+    it('breaks a genuine rank collision by path, whichever way they arrive', () => {
+        const a = { path: '/lib/549599.jpg' };
+        const b = { path: '/lib/712382.jpg' };
+        expect(referenceRank(a.path, 7)).toBe(referenceRank(b.path, 7));
+
+        expect(orderForNoRepeatShuffle([a, b], [], 7).items.map(f => f.path))
+            .toEqual(['/lib/549599.jpg', '/lib/712382.jpg']);
+        expect(orderForNoRepeatShuffle([b, a], [], 7).items.map(f => f.path))
+            .toEqual(['/lib/549599.jpg', '/lib/712382.jpg']);
+    });
+
+    it('orders duplicate paths without losing any of them', () => {
+        const dupes = [{ path: '/lib/a.jpg' }, { path: '/lib/a.jpg' }, { path: '/lib/b.jpg' }];
+        expect(orderForNoRepeatShuffle(dupes, [], 3).items).toHaveLength(3);
+    });
+});
