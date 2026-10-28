@@ -10,14 +10,16 @@ import { LibraryHealthModal } from './components/LibraryHealthModal'
 import { TagEditor } from './components/TagEditor'
 import { SettingsMenu, MediaFilter, ControlsPosition, SortOrder } from './components/SettingsMenu'
 import { ShortcutsOverlay } from './components/ShortcutsOverlay'
-import { Toast, ToastAction } from './components/Toast'
+import { Toast } from './components/Toast'
 import { ZoomPan } from './components/ZoomPan'
 import { useAmbientColor } from './hooks/useAmbientColor'
 import { useImagePreloader } from './hooks/useImagePreloader'
 import { useLibraryMeta, type MetadataStorage } from './hooks/useLibraryMeta'
 import { usePendingDeletes, UNDO_WINDOW_MS } from './hooks/usePendingDeletes'
 import { useRemote } from './hooks/useRemote'
+import { useShuffleCycle } from './hooks/useShuffleCycle'
 import { useSlidePosition } from './hooks/useSlidePosition'
+import { useToast } from './hooks/useToast'
 import { useSlideshowPlayback } from './hooks/useSlideshowPlayback'
 import { usePersistedState } from './hooks/usePersistedState'
 import { clampIndex, needsDateLookup } from './playlist'
@@ -29,9 +31,8 @@ import { getFileUrl, getDisplayUrl } from './utils'
 import { cullingActionForKey } from './culling'
 import { SETTINGS_PRESETS, type SettingsPresetName } from './settingsPresets'
 import {
-  getShuffleProgress, hasSeenEverything, makeShuffleHistoryKey, newShuffleSeed,
-  orderForNoRepeatShuffle, reconcileShuffleOrder, recordViewed, retainShuffleOrder,
-  type ShuffleHistory, type ShuffleSeeds,
+  getShuffleProgress, hasSeenEverything, makeShuffleHistoryKey,
+  orderForNoRepeatShuffle, reconcileShuffleOrder, retainShuffleOrder,
 } from './shuffleHistory'
 import { healthIssuesByPath } from './gridFilters'
 
@@ -45,8 +46,6 @@ const mergeScans = (results: ScanResult[]): ScanResult => ({
 // which matters when sorting libraries with tens of thousands of files.
 const nameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
 
-/** Viewed-history disk writes are coalesced over this window. */
-const SHUFFLE_HISTORY_WRITE_DEBOUNCE_MS = 5000;
 
 const KEN_BURNS_ANIMATIONS = ['kb-pan-left', 'kb-pan-right', 'kb-pan-up', 'kb-pan-down', 'kb-zoom-in', 'kb-zoom-out'];
 
@@ -104,82 +103,10 @@ function App() {
   const [cullingMode, setCullingMode] = usePersistedState('cullingMode', false)
   const [metadataStorage, setMetadataStorage] = usePersistedState<MetadataStorage>('metadataStorage', 'sidecar')
 
-  // Shuffle history is keyed by library roots + media filter. It deliberately
-  // lives in app storage (not the library sidecar) so viewed state survives an
-  // app restart without modifying the user's photo folders.
-  const shuffleHistoryRef = useRef<ShuffleHistory>({})
-  const [shuffleHistoryReady, setShuffleHistoryReady] = useState(false)
-  const [shuffleProgress, setShuffleProgress] = useState({ viewed: 0, total: 0 })
-  /**
-   * The seed fixing the order of the current cycle, per library. Stored beside
-   * the viewed list rather than inside it so an older saved history (a bare
-   * array of paths) still loads; a library without a seed simply gets one.
-   */
-  const shuffleSeedsRef = useRef<ShuffleSeeds>({})
-  useEffect(() => {
-    Promise.all([
-      window.api.getStore('shuffleHistory'),
-      window.api.getStore('shuffleSeeds'),
-    ])
-      .then(([history, seeds]) => {
-        if (history && typeof history === 'object') shuffleHistoryRef.current = history as ShuffleHistory;
-        if (seeds && typeof seeds === 'object') shuffleSeedsRef.current = seeds as ShuffleSeeds;
-      })
-      .finally(() => setShuffleHistoryReady(true));
-  }, []);
-
-  /**
-   * The order currently in play, per library. Session-only: on a fresh launch
-   * we deliberately re-partition so anything unseen comes first again.
-   */
-  const shuffleOrderRef = useRef<Record<string, string[]>>({})
-  const forgetShuffleOrder = useCallback((key?: string) => {
-    if (key) delete shuffleOrderRef.current[key];
-    else shuffleOrderRef.current = {};
-  }, []);
-
-  /** The cycle seed for a library, minting and persisting one when needed. */
-  const seedFor = useCallback((key: string, fresh = false) => {
-    const existing = shuffleSeedsRef.current[key];
-    if (!fresh && typeof existing === 'number') return existing;
-    const seed = newShuffleSeed();
-    shuffleSeedsRef.current = { ...shuffleSeedsRef.current, [key]: seed };
-    window.api.setStore('shuffleSeeds', shuffleSeedsRef.current);
-    return seed;
-  }, []);
-
-  /**
-   * Record the history in memory immediately, but write it to disk on a
-   * debounce. Every slide adds one path, and writing on each of them meant
-   * serialising the whole (library-sized) viewed list to electron-store every
-   * few seconds — for a photo frame left running, that is constant disk churn
-   * for data only read at startup.
-   */
-  const shuffleWriteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const flushShuffleHistory = useCallback(() => {
-    if (!shuffleWriteTimer.current) return;
-    clearTimeout(shuffleWriteTimer.current);
-    shuffleWriteTimer.current = null;
-    window.api.setStore('shuffleHistory', shuffleHistoryRef.current);
-  }, []);
-
-  const persistShuffleHistory = useCallback((history: ShuffleHistory) => {
-    shuffleHistoryRef.current = history;
-    if (shuffleWriteTimer.current) clearTimeout(shuffleWriteTimer.current);
-    shuffleWriteTimer.current = setTimeout(() => {
-      shuffleWriteTimer.current = null;
-      window.api.setStore('shuffleHistory', shuffleHistoryRef.current);
-    }, SHUFFLE_HISTORY_WRITE_DEBOUNCE_MS);
-  }, []);
-
-  // Don't lose the tail of a session on quit or reload
-  useEffect(() => {
-    window.addEventListener('beforeunload', flushShuffleHistory);
-    return () => {
-      window.removeEventListener('beforeunload', flushShuffleHistory);
-      flushShuffleHistory();
-    };
-  }, [flushShuffleHistory]);
+  // Shuffle bookkeeping: what has been seen, in what order, under which
+  // seed, and when a cycle is over. Keyed by library roots + media filter.
+  const shuffle = useShuffleCycle()
+  const shuffleProgress = shuffle.progress
 
   /**
    * The style the next slide change will actually use. With `random` this is
@@ -205,31 +132,7 @@ function App() {
   }, []);
 
   // Toast — optionally with a single action button (used by undo)
-  const [toast, setToast] = useState<string | null>(null)
-  const [toastAction, setToastAction] = useState<ToastAction | null>(null)
-  const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  // While a toast carries an action, that toast is the only way to reach it.
-  // A passing status message ("Skipping X — it won't play") must not replace
-  // it and silently take Undo away mid-window.
-  const actionToastUntilRef = useRef(0);
-  const showToast = useCallback((message: string, action: ToastAction | null = null, durationMs = 4000) => {
-    if (!action && Date.now() < actionToastUntilRef.current) return;
-    actionToastUntilRef.current = action ? Date.now() + durationMs : 0;
-    setToast(message);
-    setToastAction(action);
-    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
-    toastTimeoutRef.current = setTimeout(() => {
-      actionToastUntilRef.current = 0;
-      setToast(null);
-      setToastAction(null);
-    }, durationMs);
-  }, []);
-  const dismissToast = useCallback(() => {
-    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
-    actionToastUntilRef.current = 0;
-    setToast(null);
-    setToastAction(null);
-  }, []);
+  const { toast, showToast, dismissToast } = useToast()
 
   // A mirror for callbacks that must stay referentially stable: `allFiles`
   // changes often, and a callback closing over it re-registers the IPC
@@ -266,39 +169,39 @@ function App() {
     }
 
     if (isShuffled) {
-      const previousHistory = shuffleHistoryRef.current[shuffleKey] ?? [];
-      const established = shuffleOrderRef.current[shuffleKey];
+      const previousHistory = shuffle.viewedIn(shuffleKey);
+      const established = shuffle.orderIn(shuffleKey);
       if (established) {
         // Mid-cycle re-derive (a delete, a guest upload): keep the running
         // order rather than re-partitioning the user's position away.
-        sorted.splice(0, sorted.length, ...reconcileShuffleOrder(sorted, established, seedFor(shuffleKey)));
-        setShuffleProgress(getShuffleProgress(sorted, previousHistory));
+        sorted.splice(0, sorted.length, ...reconcileShuffleOrder(sorted, established, shuffle.seedFor(shuffleKey)));
+        shuffle.setProgress(getShuffleProgress(sorted, previousHistory));
       } else {
-        const ordered = orderForNoRepeatShuffle(sorted, previousHistory, seedFor(shuffleKey));
+        const ordered = orderForNoRepeatShuffle(sorted, previousHistory, shuffle.seedFor(shuffleKey));
         sorted.splice(0, sorted.length, ...ordered.items);
-        setShuffleProgress(getShuffleProgress(sorted, ordered.viewedPaths));
+        shuffle.setProgress(getShuffleProgress(sorted, ordered.viewedPaths));
         if (ordered.cycleReset || ordered.viewedPaths.length !== previousHistory.length) {
-          persistShuffleHistory({ ...shuffleHistoryRef.current, [shuffleKey]: ordered.viewedPaths });
+          shuffle.setViewed(shuffleKey, ordered.viewedPaths);
         }
         // A finished cycle earns a new order; without a new seed the next pass
         // would replay the previous one exactly.
-        if (ordered.cycleReset) seedFor(shuffleKey, true);
+        if (ordered.cycleReset) shuffle.seedFor(shuffleKey, true);
       }
       // Keep paths that have dropped out of the list, at their positions: a
       // photo that comes back (an undone delete, one that could not be
       // trashed) must return to where it was rather than being treated as
       // new media and sent to the front, dragging the viewer to slide 1.
-      shuffleOrderRef.current[shuffleKey] =
-        retainShuffleOrder(established ?? [], sorted.map(file => file.path));
+      shuffle.rememberOrder(shuffleKey,
+        retainShuffleOrder(established ?? [], sorted.map(file => file.path)));
     } else {
-      setShuffleProgress({ viewed: 0, total: sorted.length });
+      shuffle.setProgress({ viewed: 0, total: sorted.length });
     }
 
     setFiles(sorted);
     // Same batch as the list, so the viewer never sees the new list against
     // the old index.
     goTo(resolveFor(sorted));
-  }, [persistShuffleHistory, resolveFor, goTo, seedFor]);
+  }, [shuffle, resolveFor, goTo]);
 
 
   // Date-taken lookup, fetched lazily the first time a date sort is used
@@ -380,7 +283,7 @@ function App() {
       goTo(0);
       return;
     }
-    if (isShuffle && !shuffleHistoryReady) return;
+    if (isShuffle && !shuffle.ready) return;
     let cancelled = false;
     (async () => {
       let source = allFiles;
@@ -394,18 +297,15 @@ function App() {
       if (!cancelled) applyFiltersAndSort(source, mediaFilter, isShuffle, sortOrder, dates, shuffleKey);
     })();
     return () => { cancelled = true; };
-  }, [allFiles, mediaFilter, isShuffle, sortOrder, favoritesOnly, tagFilter, currentDirs, shuffleHistoryReady, ensureDates, applyFiltersAndSort, goTo, showToast]);
+  }, [allFiles, mediaFilter, isShuffle, sortOrder, favoritesOnly, tagFilter, currentDirs, shuffle.ready, ensureDates, applyFiltersAndSort, goTo, showToast]);
 
   // Viewing a slide records it immediately, so closing the app cannot make
   // the next launch start repeating already-seen media.
   useEffect(() => {
     const file = files[currentIndex];
-    if (!isShuffle || !shuffleHistoryReady || !file || currentDirs.length === 0) return;
-    const key = makeShuffleHistoryKey(currentDirs, mediaFilter);
-    const next = recordViewed(shuffleHistoryRef.current, key, file.path);
-    if (next !== shuffleHistoryRef.current) persistShuffleHistory(next);
-    setShuffleProgress(getShuffleProgress(files, next[key] ?? []));
-  }, [files, currentIndex, isShuffle, shuffleHistoryReady, currentDirs, mediaFilter, persistShuffleHistory]);
+    if (!isShuffle || !shuffle.ready || !file || currentDirs.length === 0) return;
+    shuffle.recordView(makeShuffleHistoryKey(currentDirs, mediaFilter), file.path, files);
+  }, [files, currentIndex, isShuffle, currentDirs, mediaFilter, shuffle]);
 
   const toggleFavorite = useCallback(() => {
     const file = files[currentIndex];
@@ -550,18 +450,14 @@ function App() {
     // on the last slide, and the next press then reshuffled the whole library.
     if (isShuffle) {
       const key = makeShuffleHistoryKey(currentDirs, mediaFilter);
-      if (hasSeenEverything(files, shuffleHistoryRef.current[key] ?? [])) {
-        persistShuffleHistory({ ...shuffleHistoryRef.current, [key]: [] });
-        setShuffleProgress({ viewed: 0, total: files.length });
-        const reshuffled = orderForNoRepeatShuffle(files, [], seedFor(key, true)).items;
-        shuffleOrderRef.current[key] = reshuffled.map(file => file.path);
-        setFiles(reshuffled);
+      if (hasSeenEverything(files, shuffle.viewedIn(key))) {
+        setFiles(shuffle.startNewCycle(key, files));
         goTo(0);
         return;
       }
     }
     goTo(prev => (prev + 1) % files.length);
-  }, [files, isShuffle, currentDirs, mediaFilter, persistShuffleHistory, takeQueuedIndex, goTo, seedFor]);
+  }, [files, isShuffle, currentDirs, mediaFilter, shuffle, takeQueuedIndex, goTo]);
 
   const prevSlide = useCallback(() => {
     setDirection(-1);
@@ -574,24 +470,22 @@ function App() {
 
   // List-shaping settings just persist; the effect above re-derives the list
   const toggleShuffle = () => {
-    if (isShuffle) forgetShuffleOrder(); // re-partition when it comes back on
+    if (isShuffle) shuffle.forgetOrder(); // re-partition when it comes back on
     setIsShuffle(!isShuffle);
   };
   const resetShuffleHistory = useCallback(() => {
     if (currentDirs.length === 0) return;
     const key = makeShuffleHistoryKey(currentDirs, mediaFilter);
-    persistShuffleHistory({ ...shuffleHistoryRef.current, [key]: [] });
-    setShuffleProgress({ viewed: 0, total: files.length });
     if (isShuffle) {
       // An explicit reset should give a genuinely different order, not the
       // same one the finished cycle used.
-      const reshuffled = orderForNoRepeatShuffle(files, [], seedFor(key, true)).items;
-      shuffleOrderRef.current[key] = reshuffled.map(file => file.path);
-      setFiles(reshuffled);
+      setFiles(shuffle.startNewCycle(key, files));
       goTo(0);
+    } else {
+      shuffle.clearViewed(key, files.length);
     }
     showToast('Shuffle history reset');
-  }, [currentDirs, mediaFilter, files, isShuffle, persistShuffleHistory, showToast, goTo, seedFor]);
+  }, [currentDirs, mediaFilter, files, isShuffle, shuffle, showToast, goTo]);
   const handleMediaFilterChange = (newFilter: MediaFilter) => setMediaFilter(newFilter);
 
   useEffect(() => {
@@ -1313,7 +1207,7 @@ function App() {
       )}
 
       {isExifEnabled && exifData && (
-        <div className={`exif-overlay ${controlsPosition === 'left' ? 'position-left' : ''} ${toast ? 'toast-visible' : ''}`}>
+        <div className={`exif-overlay ${controlsPosition === 'left' ? 'position-left' : ''} ${toast.message ? 'toast-visible' : ''}`}>
           {exifData.make && <div>CAM: {exifData.make} {exifData.model}</div>}
           {exifData.lens && <div>LENS: {exifData.lens}</div>}
           <div style={{ display: 'flex', gap: '10px' }}>
@@ -1546,7 +1440,7 @@ function App() {
         onFilesRestored={handleFilesRestored}
       />
 
-      <Toast message={toast} action={toastAction} positionLeft={controlsPosition === 'left'} />
+      <Toast message={toast.message} action={toast.action} positionLeft={controlsPosition === 'left'} />
 
       {isShortcutsOpen && <ShortcutsOverlay onClose={() => setIsShortcutsOpen(false)} />}
 

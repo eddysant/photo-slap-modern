@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { act, renderHook } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { act, cleanup, renderHook } from '@testing-library/react';
+import { afterEach, describe, expect, it } from 'vitest';
 import { useSlidePosition } from '../src/hooks/useSlidePosition';
 
 /**
@@ -15,6 +15,8 @@ import { useSlidePosition } from '../src/hooks/useSlidePosition';
 
 const file = (name: string): MediaFile => ({ name, path: `/lib/${name}`, type: 'image' });
 const four = ['a.jpg', 'b.jpg', 'c.jpg', 'd.jpg'].map(file);
+
+afterEach(cleanup);
 
 const mount = (files: MediaFile[] = four) =>
     renderHook(({ f }: { f: MediaFile[] }) => useSlidePosition(f), { initialProps: { f: files } });

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, renderHook, waitFor } from '@testing-library/react';
+import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useLibraryMeta, type MetadataStorage } from '../src/hooks/useLibraryMeta';
@@ -27,7 +27,9 @@ beforeEach(() => {
     };
 });
 
-afterEach(() => { vi.useRealTimers(); });
+// Vitest runs without globals, so testing-library registers no cleanup of
+// its own and hooks would outlive their tests.
+afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 const mount = (dirs = ['/lib'], storage: MetadataStorage = 'sidecar') =>
     renderHook(
