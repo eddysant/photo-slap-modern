@@ -147,3 +147,20 @@ describe('useSlidePosition', () => {
         expect(resolved).toBe(2);
     });
 });
+
+describe('identity', () => {
+    it('is unchanged by a render against the same list', () => {
+        const { result, rerender } = mount();
+        const before = result.current;
+        rerender({ f: four });
+        expect(result.current).toBe(before);
+    });
+
+    it('keeps its callbacks when the index moves', () => {
+        const { result } = mount();
+        const before = result.current.resolveFor;
+        act(() => { result.current.goTo(2); });
+        expect(result.current.index).toBe(2);
+        expect(result.current.resolveFor).toBe(before);
+    });
+});

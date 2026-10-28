@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { resolvePosition, survivingNeighbourPath, type PendingPosition } from '../playlist';
 
 /**
@@ -87,5 +87,8 @@ export function useSlidePosition(files: readonly MediaFile[]) {
         pending.current = null;
     }, [files]);
 
-    return { index, goTo, pinPath, pinIndex, hold, pinSurvivorOf, resolveFor };
+    return useMemo(
+        () => ({ index, goTo, pinPath, pinIndex, hold, pinSurvivorOf, resolveFor }),
+        [index, goTo, pinPath, pinIndex, hold, pinSurvivorOf, resolveFor],
+    );
 }

@@ -18,11 +18,11 @@ import { useLibraryMeta, type MetadataStorage } from './hooks/useLibraryMeta'
 import { usePendingDeletes, UNDO_WINDOW_MS } from './hooks/usePendingDeletes'
 import { useRemote } from './hooks/useRemote'
 import { useShuffleCycle } from './hooks/useShuffleCycle'
-import { useSlidePosition } from './hooks/useSlidePosition'
+import { usePlayableList } from './hooks/usePlayableList'
 import { useToast } from './hooks/useToast'
 import { useSlideshowPlayback } from './hooks/useSlideshowPlayback'
 import { usePersistedState } from './hooks/usePersistedState'
-import { clampIndex, needsDateLookup } from './playlist'
+import { clampIndex } from './playlist'
 import {
   slideTransitions, presenceModeFor, resolveTransition,
   type ConcreteTransitionStyle, type TransitionStyle,
@@ -30,10 +30,7 @@ import {
 import { getFileUrl, getDisplayUrl } from './utils'
 import { cullingActionForKey } from './culling'
 import { SETTINGS_PRESETS, type SettingsPresetName } from './settingsPresets'
-import {
-  getShuffleProgress, hasSeenEverything, makeShuffleHistoryKey,
-  orderForNoRepeatShuffle, reconcileShuffleOrder, retainShuffleOrder,
-} from './shuffleHistory'
+import { hasSeenEverything, makeShuffleHistoryKey } from './shuffleHistory'
 import { healthIssuesByPath } from './gridFilters'
 
 const mergeScans = (results: ScanResult[]): ScanResult => ({
@@ -42,21 +39,12 @@ const mergeScans = (results: ScanResult[]): ScanResult => ({
   errors: results.flatMap(r => r.errors),
 })
 
-// A reused Collator is ~20x faster than per-call localeCompare(…, options),
-// which matters when sorting libraries with tens of thousands of files.
-const nameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
 
 
 const KEN_BURNS_ANIMATIONS = ['kb-pan-left', 'kb-pan-right', 'kb-pan-up', 'kb-pan-down', 'kb-zoom-in', 'kb-zoom-out'];
 
 function App() {
-  const [files, setFiles] = useState<MediaFile[]>([])
   const [allFiles, setAllFiles] = useState<MediaFile[]>([])
-  // `files` is rebuilt constantly; useSlidePosition is what keeps the viewer
-  // in place across that. Nothing here may set the index to 0 by accident.
-  const {
-    index: currentIndex, goTo, pinPath, pinIndex, hold, pinSurvivorOf, resolveFor,
-  } = useSlidePosition(files)
   const [isPlaying, setIsPlaying] = useState(false)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
@@ -142,92 +130,24 @@ function App() {
   const allFilesRef = useRef(allFiles);
   useEffect(() => { allFilesRef.current = allFiles; }, [allFiles]);
 
-  const applyFiltersAndSort = useCallback((
-    unfiltered: MediaFile[],
-    currentFilter: string,
-    isShuffled: boolean,
-    sort: SortOrder,
-    dates: Record<string, number> | null,
-    shuffleKey: string,
-  ) => {
-    let filtered = unfiltered;
-    if (currentFilter === 'photos') {
-      filtered = unfiltered.filter(f => f.type === 'image');
-    } else if (currentFilter === 'videos') {
-      filtered = unfiltered.filter(f => f.type === 'video');
-    }
-
-    // Natural name sort first — it's also the tiebreaker for equal dates
-    const sorted = [...filtered].sort((a, b) => nameCollator.compare(a.name, b.name));
-
-    if (sort !== 'name' && dates) {
-      sorted.sort((a, b) => {
-        const da = dates[a.path] ?? 0;
-        const db = dates[b.path] ?? 0;
-        return sort === 'date-desc' ? db - da : da - db;
-      });
-    }
-
-    if (isShuffled) {
-      const previousHistory = shuffle.viewedIn(shuffleKey);
-      const established = shuffle.orderIn(shuffleKey);
-      if (established) {
-        // Mid-cycle re-derive (a delete, a guest upload): keep the running
-        // order rather than re-partitioning the user's position away.
-        sorted.splice(0, sorted.length, ...reconcileShuffleOrder(sorted, established, shuffle.seedFor(shuffleKey)));
-        shuffle.setProgress(getShuffleProgress(sorted, previousHistory));
-      } else {
-        const ordered = orderForNoRepeatShuffle(sorted, previousHistory, shuffle.seedFor(shuffleKey));
-        sorted.splice(0, sorted.length, ...ordered.items);
-        shuffle.setProgress(getShuffleProgress(sorted, ordered.viewedPaths));
-        if (ordered.cycleReset || ordered.viewedPaths.length !== previousHistory.length) {
-          shuffle.setViewed(shuffleKey, ordered.viewedPaths);
-        }
-        // A finished cycle earns a new order; without a new seed the next pass
-        // would replay the previous one exactly.
-        if (ordered.cycleReset) shuffle.seedFor(shuffleKey, true);
-      }
-      // Keep paths that have dropped out of the list, at their positions: a
-      // photo that comes back (an undone delete, one that could not be
-      // trashed) must return to where it was rather than being treated as
-      // new media and sent to the front, dragging the viewer to slide 1.
-      shuffle.rememberOrder(shuffleKey,
-        retainShuffleOrder(established ?? [], sorted.map(file => file.path)));
-    } else {
-      shuffle.setProgress({ viewed: 0, total: sorted.length });
-    }
-
-    setFiles(sorted);
-    // Same batch as the list, so the viewer never sees the new list against
-    // the old index.
-    goTo(resolveFor(sorted));
-  }, [shuffle, resolveFor, goTo]);
 
 
-  // Date-taken lookup, fetched lazily the first time a date sort is used
-  // and cached until a different folder is opened.
-  const fileDatesRef = useRef<Record<string, number> | null>(null);
-  // Paths already asked about, whether or not a date came back. Keying off
-  // the result instead would re-request every file the EXIF reader can't
-  // date, on every re-derive.
-  const datesRequestedRef = useRef<Set<string>>(new Set());
-  const resetDateCache = useCallback(() => {
-    fileDatesRef.current = null;
-    datesRequestedRef.current = new Set();
-  }, []);
-  const ensureDates = useCallback(async (fileList: MediaFile[]) => {
-    const requested = datesRequestedRef.current;
-    // Only the paths we haven't asked about: files can join the list after
-    // the first fetch (a guest upload, the folder watcher), and leaving them
-    // undated sorted them all to one end of a date sort.
-    const missing = fileList.map(f => f.path).filter(p => !requested.has(p));
-    if (fileDatesRef.current && missing.length === 0) return fileDatesRef.current;
-    if (!fileDatesRef.current) showToast('Reading photo dates…');
-    for (const p of missing) requested.add(p);
-    const fetched = missing.length > 0 ? await window.api.getDates(missing) : {};
-    fileDatesRef.current = { ...(fileDatesRef.current ?? {}), ...fetched };
-    return fileDatesRef.current;
-  }, [showToast]);
+
+  // Favorites, tags, ratings and culling decisions. Sidecar-backed unless
+  // the user has asked for this library to be left alone.
+  const meta = useLibraryMeta(currentDirs, metadataStorage);
+  const { favorites, fileTags, tagNames, ratings, cullingDecisions } = meta;
+
+  // The playable list: everything the open folders hold, narrowed by the
+  // filters and put in order, with the viewer's position resolved against it
+  // in the same batch. It owns the date-taken cache the date sorts need.
+  const { files, position, replaceFiles, resetDateCache } = usePlayableList({
+    allFiles, currentDirs, mediaFilter, sortOrder, isShuffle,
+    favoritesOnly, tagFilter, favorites, fileTags, shuffle, showToast,
+  });
+  const {
+    index: currentIndex, goTo, pinPath, pinIndex, hold, pinSurvivorOf,
+  } = position;
 
   const ingestScanResult = useCallback((result: ScanResult) => {
     if (result.errors.length > 0) {
@@ -259,45 +179,7 @@ function App() {
     return () => clearTimeout(timer);
   }, [currentIndex, lastDirs, files.length]);
 
-  // Favorites, tags, ratings and culling decisions. Sidecar-backed unless
-  // the user has asked for this library to be left alone.
-  const meta = useLibraryMeta(currentDirs, metadataStorage);
-  const { favorites, fileTags, tagNames, ratings, cullingDecisions } = meta;
 
-  // Refs so favorite/tag EDITS don't re-derive the list (which would reset
-  // the slide index); the favorites/tag FILTER toggles are real deps below.
-  const favoritesRef = useRef(favorites);
-  const fileTagsRef = useRef(fileTags);
-  useEffect(() => {
-    favoritesRef.current = favorites;
-    fileTagsRef.current = fileTags;
-  }, [favorites, fileTags]);
-
-  // Derive the playable list whenever the source files or any list-shaping
-  // setting changes (also handles persisted settings hydrating after launch).
-  useEffect(() => {
-    if (allFiles.length === 0) {
-      // Deleting the last file used to leave it on screen: the derive bailed
-      // out here and `files` kept the stale list.
-      setFiles([]);
-      goTo(0);
-      return;
-    }
-    if (isShuffle && !shuffle.ready) return;
-    let cancelled = false;
-    (async () => {
-      let source = allFiles;
-      if (favoritesOnly) source = source.filter(f => favoritesRef.current.has(f.path));
-      if (tagFilter) source = source.filter(f => fileTagsRef.current[f.path]?.includes(tagFilter));
-      if (source.length === 0) {
-        showToast(favoritesOnly || tagFilter ? 'No files match the filters' : 'No media files');
-      }
-      const dates = needsDateLookup(sortOrder, isShuffle) ? await ensureDates(allFiles) : null;
-      const shuffleKey = makeShuffleHistoryKey(currentDirs, mediaFilter);
-      if (!cancelled) applyFiltersAndSort(source, mediaFilter, isShuffle, sortOrder, dates, shuffleKey);
-    })();
-    return () => { cancelled = true; };
-  }, [allFiles, mediaFilter, isShuffle, sortOrder, favoritesOnly, tagFilter, currentDirs, shuffle.ready, ensureDates, applyFiltersAndSort, goTo, showToast]);
 
   // Viewing a slide records it immediately, so closing the app cannot make
   // the next launch start repeating already-seen media.
@@ -314,10 +196,10 @@ function App() {
     // Un-favoriting while the favorites filter is on removes it from view
     if (!nowFavorite && favoritesOnly) {
       const remaining = files.filter(f => f.path !== file.path);
-      setFiles(remaining);
+      replaceFiles(remaining);
       goTo(ci => clampIndex(ci, remaining.length));
     }
-  }, [files, currentIndex, favoritesOnly, meta, goTo]);
+  }, [files, currentIndex, favoritesOnly, meta, goTo, replaceFiles]);
 
   const setTagOnCurrent = useCallback((tag: string, ensureInVocabulary = false) => {
     const file = files[currentIndex];
@@ -451,13 +333,13 @@ function App() {
     if (isShuffle) {
       const key = makeShuffleHistoryKey(currentDirs, mediaFilter);
       if (hasSeenEverything(files, shuffle.viewedIn(key))) {
-        setFiles(shuffle.startNewCycle(key, files));
+        replaceFiles(shuffle.startNewCycle(key, files));
         goTo(0);
         return;
       }
     }
     goTo(prev => (prev + 1) % files.length);
-  }, [files, isShuffle, currentDirs, mediaFilter, shuffle, takeQueuedIndex, goTo]);
+  }, [files, isShuffle, currentDirs, mediaFilter, shuffle, takeQueuedIndex, goTo, replaceFiles]);
 
   const prevSlide = useCallback(() => {
     setDirection(-1);
@@ -479,13 +361,13 @@ function App() {
     if (isShuffle) {
       // An explicit reset should give a genuinely different order, not the
       // same one the finished cycle used.
-      setFiles(shuffle.startNewCycle(key, files));
+      replaceFiles(shuffle.startNewCycle(key, files));
       goTo(0);
     } else {
       shuffle.clearViewed(key, files.length);
     }
     showToast('Shuffle history reset');
-  }, [currentDirs, mediaFilter, files, isShuffle, shuffle, showToast, goTo]);
+  }, [currentDirs, mediaFilter, files, isShuffle, shuffle, showToast, goTo, replaceFiles]);
   const handleMediaFilterChange = (newFilter: MediaFilter) => setMediaFilter(newFilter);
 
   useEffect(() => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     getShuffleProgress,
     newShuffleSeed,
@@ -44,9 +44,12 @@ export function useShuffleCycle() {
     const [progress, setProgress] = useState<ShuffleProgress>({ viewed: 0, total: 0 });
 
     useEffect(() => {
+        // Each read catches for itself: `Promise.all` reports the first
+        // rejection and leaves the second unhandled, which crashes a process
+        // that treats unhandled rejections as fatal.
         Promise.all([
-            window.api.getStore('shuffleHistory'),
-            window.api.getStore('shuffleSeeds'),
+            window.api.getStore('shuffleHistory').catch(() => null),
+            window.api.getStore('shuffleSeeds').catch(() => null),
         ])
             .then(([history, seeds]) => {
                 if (history && typeof history === 'object') historyRef.current = history as ShuffleHistory;
@@ -143,7 +146,12 @@ export function useShuffleCycle() {
         return reshuffled;
     }, [clearViewed, rememberOrder, seedFor]);
 
-    return {
+    // Every callback above is stable; the object holding them must be too, or
+    // the derive that depends on it re-runs on every render and sets a fresh
+    // list each time — a render loop. `progress` and `ready` do change, so
+    // consumers inside a dependency array name the callbacks they use rather
+    // than the whole object.
+    return useMemo(() => ({
         ready,
         progress,
         setProgress,
@@ -156,5 +164,8 @@ export function useShuffleCycle() {
         recordView,
         clearViewed,
         startNewCycle,
-    };
+    }), [
+        ready, progress, viewedIn, orderIn, rememberOrder, forgetOrder,
+        seedFor, setViewed, recordView, clearViewed, startNewCycle,
+    ]);
 }

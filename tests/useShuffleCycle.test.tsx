@@ -266,3 +266,25 @@ describe('clearing without reshuffling', () => {
         expect(result.current.orderIn(KEY)).toEqual(['/lib/b.jpg']);
     });
 });
+
+/**
+ * The derive depends on this object. A fresh one per render makes the
+ * callback that reads it unstable, the derive re-runs, it sets a new list,
+ * that renders — a loop that never settles.
+ */
+describe('identity', () => {
+    it('is unchanged by a render that changes nothing', async () => {
+        const { result, rerender } = await mount();
+        const before = result.current;
+        rerender();
+        expect(result.current).toBe(before);
+    });
+
+    it('keeps its callbacks when progress changes', async () => {
+        const { result } = await mount();
+        const before = result.current.recordView;
+        act(() => { result.current.setProgress({ viewed: 3, total: 9 }); });
+        expect(result.current.progress.viewed).toBe(3);
+        expect(result.current.recordView).toBe(before);
+    });
+});

@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
-import { clampIndex, needsDateLookup, resolvePosition, survivingNeighbourPath } from '../src/playlist';
+import {
+    applyLibraryFilters, clampIndex, filterByMediaType, needsDateLookup,
+    resolvePosition, sortPlayable, survivingNeighbourPath,
+} from '../src/playlist';
 
 const file = (name: string): MediaFile => ({ name, path: `/lib/${name}`, type: 'image' });
 const files = ['a.jpg', 'b.jpg', 'c.jpg', 'd.jpg'].map(file);
@@ -136,13 +139,127 @@ describe('needsDateLookup', () => {
 
 /** The saving is only real if App actually asks before fetching. */
 describe('the derive asks before reading dates', () => {
-    const app = fs.readFileSync(path.join(import.meta.dirname, '../src/App.tsx'), 'utf8');
+    const hook = fs.readFileSync(path.join(import.meta.dirname, '../src/hooks/usePlayableList.ts'), 'utf8');
 
     it('gates ensureDates on needsDateLookup', () => {
-        expect(app).toMatch(/needsDateLookup\(sortOrder,\s*isShuffle\)\s*\?\s*await ensureDates\(/);
+        expect(hook).toMatch(/needsDateLookup\(sortOrder,\s*isShuffle\)\s*\?\s*await ensureDates\(/);
     });
 
     it('has no other call to ensureDates in the derive', () => {
-        expect([...app.matchAll(/await ensureDates\(/g)]).toHaveLength(1);
+        expect([...hook.matchAll(/await ensureDates\(/g)]).toHaveLength(1);
+    });
+});
+
+const media = (name: string, type: 'image' | 'video' = 'image'): MediaFile =>
+    ({ name, path: `/lib/${name}`, type });
+
+describe('filterByMediaType', () => {
+    const mixed = [media('a.jpg'), media('b.mp4', 'video'), media('c.png')];
+
+    it('admits everything when no type is asked for', () => {
+        expect(filterByMediaType(mixed, 'all')).toHaveLength(3);
+    });
+
+    it('keeps only images for photos', () => {
+        expect(filterByMediaType(mixed, 'photos').map(f => f.name)).toEqual(['a.jpg', 'c.png']);
+    });
+
+    it('keeps only videos for videos', () => {
+        expect(filterByMediaType(mixed, 'videos').map(f => f.name)).toEqual(['b.mp4']);
+    });
+});
+
+describe('applyLibraryFilters', () => {
+    const list = [media('a.jpg'), media('b.jpg'), media('c.jpg')];
+    const base = {
+        favoritesOnly: false,
+        favorites: new Set<string>(['/lib/b.jpg']),
+        tagFilter: '',
+        fileTags: { '/lib/a.jpg': ['trip'], '/lib/b.jpg': ['trip', 'dog'] },
+    };
+
+    it('passes everything through when nothing is on', () => {
+        expect(applyLibraryFilters(list, base)).toEqual(list);
+    });
+
+    it('narrows to favorites', () => {
+        expect(applyLibraryFilters(list, { ...base, favoritesOnly: true }).map(f => f.name))
+            .toEqual(['b.jpg']);
+    });
+
+    it('narrows to a tag', () => {
+        expect(applyLibraryFilters(list, { ...base, tagFilter: 'trip' }).map(f => f.name))
+            .toEqual(['a.jpg', 'b.jpg']);
+    });
+
+    // Both, not whichever is checked first: a favorite that lacks the tag
+    // must drop out, and so must a tagged file that is not a favorite.
+    it('applies both filters together, not either', () => {
+        const both = {
+            ...base,
+            favorites: new Set(['/lib/a.jpg', '/lib/b.jpg']),
+            favoritesOnly: true,
+            tagFilter: 'dog',
+        };
+        expect(applyLibraryFilters(list, both).map(f => f.name)).toEqual(['b.jpg']);
+    });
+
+    it('can narrow to nothing', () => {
+        expect(applyLibraryFilters(list, { ...base, tagFilter: 'cat' })).toEqual([]);
+    });
+
+    it('treats a file with no tags as matching no tag filter', () => {
+        expect(applyLibraryFilters(list, { ...base, tagFilter: 'trip' }).map(f => f.name))
+            .not.toContain('c.jpg');
+    });
+});
+
+describe('sortPlayable', () => {
+    const unsorted = [media('IMG_10.jpg'), media('IMG_2.jpg'), media('IMG_1.jpg')];
+
+    it('sorts by name naturally, not lexically', () => {
+        expect(sortPlayable(unsorted, 'all', 'name', null).map(f => f.name))
+            .toEqual(['IMG_1.jpg', 'IMG_2.jpg', 'IMG_10.jpg']);
+    });
+
+    it('does not mutate its input', () => {
+        const before = unsorted.map(f => f.name);
+        sortPlayable(unsorted, 'all', 'name', null);
+        expect(unsorted.map(f => f.name)).toEqual(before);
+    });
+
+    it('filters by media type before sorting', () => {
+        const mixed = [media('b.mp4', 'video'), media('a.jpg')];
+        expect(sortPlayable(mixed, 'photos', 'name', null).map(f => f.name)).toEqual(['a.jpg']);
+    });
+
+    it('sorts oldest first for date-asc', () => {
+        const dates = { '/lib/IMG_1.jpg': 300, '/lib/IMG_2.jpg': 100, '/lib/IMG_10.jpg': 200 };
+        expect(sortPlayable(unsorted, 'all', 'date-asc', dates).map(f => f.name))
+            .toEqual(['IMG_2.jpg', 'IMG_10.jpg', 'IMG_1.jpg']);
+    });
+
+    it('sorts newest first for date-desc', () => {
+        const dates = { '/lib/IMG_1.jpg': 300, '/lib/IMG_2.jpg': 100, '/lib/IMG_10.jpg': 200 };
+        expect(sortPlayable(unsorted, 'all', 'date-desc', dates).map(f => f.name))
+            .toEqual(['IMG_1.jpg', 'IMG_10.jpg', 'IMG_2.jpg']);
+    });
+
+    // The name pass is not redundant: without it two photos taken in the same
+    // second order by whatever sequence the scan happened to return.
+    it('breaks equal dates by name', () => {
+        const dates = { '/lib/IMG_1.jpg': 100, '/lib/IMG_2.jpg': 100, '/lib/IMG_10.jpg': 100 };
+        expect(sortPlayable(unsorted, 'all', 'date-desc', dates).map(f => f.name))
+            .toEqual(['IMG_1.jpg', 'IMG_2.jpg', 'IMG_10.jpg']);
+    });
+
+    it('treats a file with no date as the oldest there is', () => {
+        const dates = { '/lib/IMG_1.jpg': 300, '/lib/IMG_2.jpg': 100 };
+        expect(sortPlayable(unsorted, 'all', 'date-asc', dates).map(f => f.name)[0]).toBe('IMG_10.jpg');
+    });
+
+    it('keeps the name order when a date sort has no dates to use', () => {
+        expect(sortPlayable(unsorted, 'all', 'date-desc', null).map(f => f.name))
+            .toEqual(['IMG_1.jpg', 'IMG_2.jpg', 'IMG_10.jpg']);
     });
 });

@@ -86,3 +86,59 @@ export function resolvePosition(
 export function needsDateLookup(sortOrder: string, isShuffle: boolean): boolean {
     return sortOrder !== 'name' && !isShuffle;
 }
+
+// A reused Collator is ~20x faster than per-call localeCompare(…, options),
+// which matters when sorting libraries with tens of thousands of files.
+const nameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+/** Which files a media-type filter admits. */
+export function filterByMediaType<T extends { type: string }>(files: readonly T[], mediaFilter: string): readonly T[] {
+    if (mediaFilter === 'photos') return files.filter(f => f.type === 'image');
+    if (mediaFilter === 'videos') return files.filter(f => f.type === 'video');
+    return files;
+}
+
+export interface LibraryFilters {
+    favoritesOnly: boolean;
+    favorites: ReadonlySet<string>;
+    tagFilter: string;
+    fileTags: Readonly<Record<string, string[]>>;
+}
+
+/** The favourites / tag filters, which narrow what the show draws from. */
+export function applyLibraryFilters<T extends { path: string }>(
+    files: readonly T[],
+    { favoritesOnly, favorites, tagFilter, fileTags }: LibraryFilters,
+): readonly T[] {
+    let visible = files;
+    if (favoritesOnly) visible = visible.filter(f => favorites.has(f.path));
+    if (tagFilter) visible = visible.filter(f => fileTags[f.path]?.includes(tagFilter));
+    return visible;
+}
+
+/**
+ * The playable list in order, before shuffle gets a say.
+ *
+ * Name order runs first unconditionally: for a name sort it is the answer,
+ * and for a date sort it is the tiebreaker, so two photos taken in the same
+ * second are not ordered by whatever sequence the scan happened to return.
+ * Without dates a date sort cannot be applied, and the name order stands.
+ */
+export function sortPlayable<T extends { path: string; name: string; type: string }>(
+    unfiltered: readonly T[],
+    mediaFilter: string,
+    sort: string,
+    dates: Readonly<Record<string, number>> | null,
+): T[] {
+    const sorted = [...filterByMediaType(unfiltered, mediaFilter)]
+        .sort((a, b) => nameCollator.compare(a.name, b.name));
+
+    if (sort !== 'name' && dates) {
+        sorted.sort((a, b) => {
+            const da = dates[a.path] ?? 0;
+            const db = dates[b.path] ?? 0;
+            return sort === 'date-desc' ? db - da : da - db;
+        });
+    }
+    return sorted;
+}
