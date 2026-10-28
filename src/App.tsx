@@ -19,6 +19,7 @@ import { usePendingDeletes, UNDO_WINDOW_MS } from './hooks/usePendingDeletes'
 import { useRemote } from './hooks/useRemote'
 import { useShuffleCycle } from './hooks/useShuffleCycle'
 import { usePlayableList } from './hooks/usePlayableList'
+import { useSlideSource } from './hooks/useSlideSource'
 import { useToast } from './hooks/useToast'
 import { useSlideshowPlayback } from './hooks/useSlideshowPlayback'
 import { usePersistedState } from './hooks/usePersistedState'
@@ -752,7 +753,10 @@ function App() {
     }
   };
 
-  useImagePreloader(files, currentIndex);
+  // Never fetch or decode more pixels than the window can show; zooming is
+  // the one thing that can, and upgrades on demand.
+  const slide = useSlideSource(currentFile?.path ?? null, currentFile?.type, isZoomed);
+  useImagePreloader(files, currentIndex, slide.dim);
 
   // Auto-hide controls logic
   const [showControls, setShowControls] = useState(false);
@@ -1179,7 +1183,7 @@ function App() {
             ) : (
               <ZoomPan resetKey={currentFile.path} onZoomChange={setIsZoomed}>
                 <img
-                  src={getDisplayUrl(currentFile.path)}
+                  src={slide.src ?? getDisplayUrl(currentFile.path, slide.dim)}
                   className={`media-element ${isKenBurns && !isZoomed ? `ken-burns-active ${kenBurnsClass}` : ''}`}
                   alt={currentFile.name}
                   onError={() => handleImageError(currentFile)}

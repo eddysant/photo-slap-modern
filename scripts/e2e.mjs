@@ -22,6 +22,8 @@ const PORT = 9333;
 const UNDO_WINDOW_MS = 7000;
 const PROJECT_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const HEIC_SAMPLE_URL = 'https://nokiatech.github.io/heif/content/images/autumn_1440x960.heic';
+const HEIC_W = 1440;
+const HEIC_H = 960;
 
 const configPath = () => {
     const home = os.homedir();
@@ -60,17 +62,31 @@ async function makeFixture() {
     await fs.utimes(path.join(dir, 'a-small.jpg'), new Date('2002-01-01'), new Date('2002-01-01'));
     await fs.utimes(path.join(dir, 'b.png'), new Date('2099-01-01'), new Date('2099-01-01'));
 
-    // HEIC sample (optional — skipped if offline)
+    // HEIC sample. Generated locally with `sips` where that exists, because
+    // the remote sample has gone 404 once already and took the HEIC checks
+    // with it silently — the one path in the app Chromium cannot decode by
+    // itself deserves better than coverage that depends on someone else's
+    // web server.
     let heicPath = null;
-    try {
-        const res = await fetch(HEIC_SAMPLE_URL, { signal: AbortSignal.timeout(15000) });
-        if (res.ok) {
-            heicPath = path.join(dir, 'autumn.heic');
-            await fs.writeFile(heicPath, Buffer.from(await res.arrayBuffer()));
-        }
-    } catch {
-        console.log('  (offline — skipping HEIC checks)');
+    const localHeic = path.join(dir, 'autumn.heic');
+    if (process.platform === 'darwin') {
+        const seed = path.join(dir, '.heic-seed.jpg');
+        await sharp({ create: { width: HEIC_W, height: HEIC_H, channels: 3, background: { r: 200, g: 90, b: 40 } } })
+            .jpeg().toFile(seed);
+        const conv = spawnSync('sips', ['-s', 'format', 'heic', seed, '--out', localHeic]);
+        await fs.rm(seed, { force: true });
+        if (conv.status === 0) heicPath = localHeic;
     }
+    if (!heicPath) {
+        try {
+            const res = await fetch(HEIC_SAMPLE_URL, { signal: AbortSignal.timeout(15000) });
+            if (res.ok) {
+                heicPath = localHeic;
+                await fs.writeFile(heicPath, Buffer.from(await res.arrayBuffer()));
+            }
+        } catch { /* offline */ }
+    }
+    if (!heicPath) console.log('  (no HEIC sample — skipping HEIC checks)');
 
     // Two encodes of the same clip, for video frame-matching (optional — needs ffmpeg)
     let hasVideos = false;
@@ -289,7 +305,7 @@ try {
             return JSON.stringify({ status: res.status, type: res.headers.get('content-type'), w: bmp.width, h: bmp.height });
         })()`).then(JSON.parse);
         check('HEIC served as JPEG', heic.status === 200 && heic.type === 'image/jpeg', `${heic.status} ${heic.type}`);
-        check('HEIC decodes to full-size image', heic.w === 1440 && heic.h === 960, `${heic.w}x${heic.h}`);
+        check('HEIC decodes to full-size image', heic.w === HEIC_W && heic.h === HEIC_H, `${heic.w}x${heic.h}`);
     }
 
     console.log('star wipe');

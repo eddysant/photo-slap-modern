@@ -113,6 +113,18 @@ async function evictImageCache() {
   }
 }
 
+// libvips sizes its thread pool to the CPU and keeps an operation cache, and
+// neither earns its memory here. Every derived image is already cached on
+// disk keyed by path+mtime+size, so a second in-memory copy of the same
+// result buys nothing; and each worker thread holds its own tile buffers for
+// a photo that can be 48MP, multiplied again by the four derive jobs that
+// run at once. One thread per pipeline keeps the aggregate parallelism
+// (`DERIVE_CONCURRENCY` already saturates the cores) at a fraction of the
+// peak allocation. A photo frame runs for weeks; resident size beats a few
+// milliseconds on a decode.
+sharp.cache(false);
+sharp.concurrency(1);
+
 const isHeic = (p: string) => /\.(heic|heif)$/i.test(p);
 // Formats safe to downscale server-side (GIFs would lose animation)
 const isScalableImage = (p: string) => /\.(jpe?g|png|webp|bmp|heic|heif)$/i.test(p);
@@ -121,7 +133,11 @@ const isScalableImage = (p: string) => /\.(jpe?g|png|webp|bmp|heic|heif)$/i.test
 // Scrolling a fresh grid can request hundreds of thumbnails at once, so
 // derivations are capped to a small concurrency (the rest queue) and
 // identical in-flight requests are coalesced into one job.
-const DERIVE_CONCURRENCY = 4;
+// Each job decodes a whole photo — 36MB of raw pixels for a 12MP JPEG, more
+// for a 48MP one — and the allocator does not hand that back to the OS when
+// the job ends, so the resident set settles at roughly the high-water mark.
+// Two at a time still keeps a grid scroll ahead of the eye.
+const DERIVE_CONCURRENCY = 2;
 const withDeriveSlot = createConcurrencyLimit(DERIVE_CONCURRENCY);
 const deriveInFlight = new Map<string, Promise<{ buffer: Buffer; type: string }>>();
 
@@ -162,7 +178,13 @@ async function deriveImage(filePath: string, maxDim: number | null): Promise<{ b
       // heic-decode (WASM libheif) does the HEVC decode — prebuilt sharp
       // binaries can't, HEVC being patent-encumbered
       const { width, height, data } = await decodeHeic({ buffer: await fs.readFile(filePath) });
-      pipeline = sharp(Buffer.from(data), { raw: { width, height, channels: 4 } });
+      // `Buffer.from(typedArray)` copies: a second full-size RGBA buffer —
+      // 48MB for a 12MP photo — on top of the one libheif just handed over.
+      // A view over the same bytes costs nothing.
+      const raw = ArrayBuffer.isView(data)
+        ? Buffer.from(data.buffer, data.byteOffset, data.byteLength)
+        : Buffer.from(data as ArrayBuffer);
+      pipeline = sharp(raw, { raw: { width, height, channels: 4 } });
     } else {
       pipeline = sharp(filePath).rotate(); // bake EXIF orientation
     }
@@ -185,6 +207,44 @@ async function deriveImage(filePath: string, maxDim: number | null): Promise<{ b
   return job;
 }
 
+/**
+ * Longest side and whether EXIF says the pixels still need rotating, read
+ * from the file header rather than by decoding it.
+ *
+ * Memoised by path+mtime and bounded, the same shape as the ambient colour
+ * cache: a pass-through answer has no disk cache behind it, so without this
+ * every request for an already-small photo would re-open the file.
+ */
+const IMAGE_SHAPE_CACHE_MAX = 2000;
+const imageShapeCache = new Map<string, { longest: number; rotated: boolean }>();
+
+async function imageShape(filePath: string) {
+  let key: string;
+  try {
+    const stat = await fs.stat(filePath);
+    key = `${filePath}:${stat.mtimeMs}:${stat.size}`;
+  } catch {
+    return null;
+  }
+  const cached = imageShapeCache.get(key);
+  if (cached) return cached;
+  try {
+    const { width, height, orientation } = await sharp(filePath).metadata();
+    if (!width || !height) return null;
+    const shape = {
+      longest: Math.max(width, height),
+      rotated: orientation !== undefined && orientation > 1,
+    };
+    if (imageShapeCache.size >= IMAGE_SHAPE_CACHE_MAX) {
+      imageShapeCache.delete(imageShapeCache.keys().next().value!);
+    }
+    imageShapeCache.set(key, shape);
+    return shape;
+  } catch {
+    return null;
+  }
+}
+
 async function handleMediaRequest(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const filePath = mediaUrlToPath(url);
@@ -196,11 +256,24 @@ async function handleMediaRequest(request: Request): Promise<Response> {
   // Derived variants: HEIC always needs transcoding (Chromium can't decode
   // it); any scalable image can request a display-sized version via ?w=.
   const requestedDim = Number(url.searchParams.get('w')) || null;
-  const maxDim = requestedDim && isScalableImage(filePath) ? requestedDim : null;
+  let maxDim = requestedDim && isScalableImage(filePath) ? requestedDim : null;
+
+  // A photo already no larger than what was asked for has nothing to gain
+  // from the pipeline: the downscale is a no-op, so all it does is decode
+  // the file and re-encode it at quality 90 — often to a *bigger* file,
+  // always at the cost of a full-resolution bitmap in main. Serving the
+  // original bytes skips the decode entirely. Only when EXIF orientation is
+  // a no-op too, since baking that in is the pipeline's other job.
+  if (maxDim && !isHeic(filePath)) {
+    const shape = await imageShape(filePath);
+    if (shape && !shape.rotated && shape.longest <= maxDim) maxDim = null;
+  }
+
   if (maxDim || isHeic(filePath)) {
     try {
       const { buffer, type } = await deriveImage(filePath, maxDim);
-      return new Response(new Uint8Array(buffer), {
+      // A view, not `new Uint8Array(buffer)`, which copies every byte.
+      return new Response(new Uint8Array(buffer.buffer as ArrayBuffer, buffer.byteOffset, buffer.byteLength), {
         // The URL is only path + ?w=, so a time-based cache would keep
         // serving a stale render after the file is edited in place. The disk
         // cache already keys on mtime+size, so re-deriving a hit is cheap.

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { FiAlertTriangle, FiFilm, FiHeart, FiSearch, FiCheckSquare, FiTrash2, FiX } from 'react-icons/fi';
-import { getDisplayUrl } from '../utils';
+import { getDisplayUrl, thumbDisplayDim } from '../utils';
 import { filterGridFiles, type GridCullingFilter, type GridHealthFilter, type GridRatingFilter } from '../gridFilters';
 
 interface GridViewProps {
@@ -90,6 +90,7 @@ export function GridView({
     const cols = Math.max(2, Math.floor((innerWidth + GAP) / (CELL_MIN + GAP)));
     const cellSize = cols > 0 ? (innerWidth - (cols - 1) * GAP) / cols : CELL_MIN;
     const rowHeight = cellSize + GAP;
+    const thumbDim = thumbDisplayDim(cellSize);
     const totalRows = Math.ceil(visible.length / cols);
     const firstRow = Math.max(0, Math.floor((scrollTop - TOOLBAR_ALLOWANCE) / rowHeight) - 2);
     const lastRow = Math.min(totalRows, Math.ceil((scrollTop + viewport.height) / rowHeight) + 2);
@@ -249,7 +250,7 @@ export function GridView({
                     >
                         {file.type === 'image' && !failedThumbs.has(file.path) ? (
                             <img
-                                src={getDisplayUrl(file.path, 512)}
+                                src={getDisplayUrl(file.path, thumbDim)}
                                 loading="lazy"
                                 decoding="async"
                                 alt={file.name}

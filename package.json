@@ -14,7 +14,8 @@
     "test:e2e": "node scripts/e2e.mjs",
     "test:smoke": "node scripts/smoke-packaged.mjs",
     "preview": "vite preview",
-    "start": "open release/0.0.0/mac-arm64/photo-slap.app"
+    "start": "open release/0.0.0/mac-arm64/photo-slap.app",
+    "test:memory": "node scripts/memory.mjs"
   },
   "dependencies": {
     "blockhash-core": "^0.1.0",
