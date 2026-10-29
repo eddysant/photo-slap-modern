@@ -8,7 +8,6 @@ import { Readable } from 'node:stream'
 import crypto from 'node:crypto'
 import Store from 'electron-store'
 import sharp from 'sharp'
-import decodeHeic from 'heic-decode'
 import { scanDirectory } from './fileScanner'
 import { DirectoryWatcher } from './dirWatcher'
 import { findExactDuplicates, scanFiles } from './dedupe'
@@ -23,6 +22,7 @@ import {
 } from './pathAccess'
 import { sanitizeUploadName, findFreeUploadPath } from './guestUpload'
 import { createConcurrencyLimit } from './concurrencyLimit'
+import { loadHeicDecoder } from './lazyDeps'
 import ExifReader from 'exifreader';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -177,6 +177,7 @@ async function deriveImage(filePath: string, maxDim: number | null): Promise<{ b
     if (isHeic(filePath)) {
       // heic-decode (WASM libheif) does the HEVC decode — prebuilt sharp
       // binaries can't, HEVC being patent-encumbered
+      const decodeHeic = await loadHeicDecoder();
       const { width, height, data } = await decodeHeic({ buffer: await fs.readFile(filePath) });
       // `Buffer.from(typedArray)` copies: a second full-size RGBA buffer —
       // 48MB for a 12MP photo — on top of the one libheif just handed over.
@@ -865,6 +866,9 @@ async function thumbnailFor(filePath: string | null) {
 ipcMain.handle('remote:setEnabled', async (_event, enabled: boolean) => {
   if (!enabled) {
     stopRemoteServer();
+    // Nothing can read the mirror once the server is down, and a
+    // library-sized copy of the list has no business outliving it.
+    remoteLibrary = [];
     return null;
   }
   try {
@@ -1090,10 +1094,44 @@ ipcMain.handle('file:getAmbientColor', async (_event, filePath: string) => {
   }
 });
 
+/**
+ * EXIF for the info panel, without reading the whole photo to get it.
+ *
+ * This used to `readFile` the entire file — a 12 MP HEIC or a RAW-sized JPEG
+ * allocated in full so a few dozen tags could be read off the front of it.
+ * Every container puts its metadata ahead of the pixel data, and 256 KB is
+ * the same window `fileDateTaken` has always read dates through: measured on
+ * a 12 MB JPEG and a 6.5 MB HEIC, the head yields byte-identical tags.
+ *
+ * A format that trails its metadata would yield nothing, so an empty or
+ * failed head parse falls back to the whole file rather than reporting a
+ * photo as having no EXIF.
+ */
+const EXIF_HEAD_BYTES = 256 * 1024;
+
+async function readExifTags(resolved: string) {
+  const fh = await fs.open(resolved, 'r');
+  let head: Buffer;
+  try {
+    const buf = Buffer.alloc(EXIF_HEAD_BYTES);
+    const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+    head = buf.subarray(0, bytesRead);
+  } finally {
+    await fh.close();
+  }
+
+  try {
+    const tags = ExifReader.load(head);
+    if (Object.keys(tags).length > 0) return tags;
+  } catch {
+    // fall through to the whole file
+  }
+  return ExifReader.load(await fs.readFile(resolved));
+}
+
 ipcMain.handle('file:getExif', async (_event, filePath: string) => {
   try {
-    const fileBuffer = await fs.readFile(assertAllowedPath(filePath));
-    const tags = await ExifReader.load(fileBuffer);
+    const tags = await readExifTags(assertAllowedPath(filePath));
     // console.log('EXIF Tags for', filePath, Object.keys(tags)); // Debug log
 
     // Helper to get clean string

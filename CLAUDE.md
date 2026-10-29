@@ -173,7 +173,11 @@ photos, sampling the whole process tree by role as the slideshow walks and
 again with the grid open. Dev mode is deliberately not measured — Vite, the
 devtools and an unminified bundle put a floor under it that has nothing to
 do with what ships. Measured on a 1200x800 @2x window, the work below took
-the peak from 1045MB to ~600MB and the settled figure from 927MB to ~540MB.
+the peak from 1045MB to 600-650MB and the settled figure from 927MB to
+545-560MB. Read those as a range on purpose: the walk-and-grid figures
+move ~50MB between runs on the same build, so a single sample cannot
+attribute 10MB to a change. Main at rest is the stable one (+/-1MB across
+runs) and is the number to compare when a change is a startup cost.
 
 - **Nothing is fetched larger than the window can show** (`slideDisplayDim`
   in `utils.ts`). The slideshow used to ask for `?w=4096` whatever it was
@@ -215,6 +219,24 @@ the peak from 1045MB to ~600MB and the settled figure from 927MB to ~540MB.
   since the runtime type is a `Uint8ClampedArray` and not an `ArrayBuffer`;
   it is a view now. So is the `Uint8Array` the derived response is built
   from, which was copying each derived image on its way out.
+- **The HEIC decoder loads on first HEIC, not at launch**
+  (`electron/lazyDeps.ts`). `heic-decode` instantiates a WASM build of
+  libheif + libde265, measured at 12MB of RSS on import alone, and most
+  libraries contain no HEIC at all. Both `main.ts` and `libraryHealth.ts`
+  go through the memoised loader; `tests/lazyDeps.test.ts` fails if either
+  one reintroduces a static import, which nothing else in the suite would
+  notice. It is externalised in the bundler config, so the dynamic import
+  stays a runtime import rather than becoming a code-split chunk.
+- **EXIF is read from the head of the file, not all of it.** `file:getExif`
+  used to `readFile` the whole photo so a few dozen tags could be parsed off
+  the front. It reads the same 256KB window `fileDateTaken` has always used
+  — measured as byte-identical tags on a 12MB JPEG and a 6.5MB HEIC — and
+  falls back to the whole file if that yields nothing, so a format that
+  trailed its metadata would still report it rather than appear to have none.
+- **The remote's library mirror does not outlive the server.** `remoteLibrary`
+  in main is a copy of the playable list, kept so phones can browse by index
+  without a path ever leaving the process. Turning the remote off now clears
+  it; it used to stay resident for the rest of the session.
 
 What is left is mostly a floor: the Electron main process sits around 200MB
 before any photo is touched (measured with a fixture small enough that no

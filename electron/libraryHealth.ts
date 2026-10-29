@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import glob from 'fast-glob';
 import sharp from 'sharp';
-import decodeHeic from 'heic-decode';
+import { loadHeicDecoder } from './lazyDeps';
 import ExifReader from 'exifreader';
 import { loadLibraryMeta } from './libraryMeta';
 import { isWithin } from './pathAccess';
@@ -123,6 +123,7 @@ async function inspectMediaFile(file: { path: string; type: 'image' | 'video' })
     let height = 0;
     try {
         if (ext === '.heic' || ext === '.heif') {
+            const decodeHeic = await loadHeicDecoder();
             const decoded = await decodeHeic({ buffer: await fs.readFile(file.path) });
             width = decoded.width;
             height = decoded.height;
