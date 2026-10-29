@@ -16,6 +16,47 @@ Standard three-part Electron app built with `vite-plugin-electron`:
 
 **Vite 8 uses Rolldown**: bundler options for the main process live under `build.rolldownOptions` (NOT `rollupOptions` — those are silently ignored). `sharp` (native) and `heic-decode` (WASM) are externalized there and shipped via explicit `files` globs + `asarUnpack` in `electron-builder.json5`.
 
+## Project layout
+
+```
+electron/                 Main & preload (bundled to dist-electron/)
+  main.ts                 Window, menu, CSP, media:// protocol, IPC handlers
+  preload.ts              contextBridge -> window.api
+  pathAccess.ts           The allowlist every path-touching handler checks
+  fileScanner.ts          Recursive scanner; owns the supported-format list
+  dirWatcher.ts           Watches open folders; debounced re-scan and diff
+  libraryMeta.ts          .photo-slap.json sidecar load/merge/save
+  libraryHealth.ts        Diagnostics, repair, quarantine manifest
+  dedupe.ts               Exact duplicates (size grouping + SHA-256)
+  remoteServer.ts         LAN remote: transport, browse/queue, reactions, uploads
+  remoteGuard.ts          Session token, auth throttle, upload budget
+  guestUpload.ts          Filename sanitizing and collision-free naming
+  concurrencyLimit.ts     Caps simultaneous image derivations
+  lazyDeps.ts             Deferred heic-decode import (see Memory)
+src/                      React renderer
+  App.tsx                 Slideshow state, viewer, video controls
+  components/             SettingsMenu, GridView, DedupeModal, LibraryHealthModal,
+                          QuarantineManager, IntroScreen, ShortcutsOverlay,
+                          FrameOverlay, TagEditor, ZoomPan, Toast
+  hooks/                  usePlayableList, useSlidePosition, useSlideshowPlayback,
+                          useLibraryMeta, useShuffleCycle, usePendingDeletes,
+                          useImagePreloader, useSlideSource, useAmbientColor,
+                          useRemote, useToast, usePersistedState
+  workers/phashWorker.ts  Perceptual hashing off the main thread
+  playlist.ts             Filters, sort, and the position maths
+  shuffleHistory.ts       No-repeat shuffle cycles
+  similarity.ts           Transitive perceptual-hash grouping (union-find)
+  transitions.ts          Transition variants, the star wipe, random selection
+  gridFilters.ts          Composable grid filters
+  settingsPresets.ts      Photo Frame / Party / Culling / TV presets
+  shortcuts.ts            The shortcut list, shared with the help overlay
+  utils.ts                media:// URLs and display-size bucketing
+tests/                    Vitest unit tests
+scripts/e2e.mjs           End-to-end test (CDP-driven)
+scripts/smoke-packaged.mjs  Smoke test for the shipped configuration
+scripts/memory.mjs        Resident-set measurement against the packaged app
+```
+
 ## The media:// protocol
 
 Local media is served through a privileged custom scheme (`protocol.handle('media', ...)` in `electron/main.ts`) instead of `file://` — `webSecurity` stays enabled.
@@ -257,6 +298,34 @@ puts decodes back inside the transition.
 - `scanDirectory` skips dotfiles, collects per-directory errors (e.g. macOS `EPERM` on `Photos Library.photoslibrary`) into `errors`, and still returns the partial scan; the renderer surfaces the count in a toast.
 - ESLint: flat config in `eslint.config.js`; `react-hooks/set-state-in-effect` is intentionally off (the slideshow resets per-slide state in effects), `no-explicit-any` off for the IPC boundary.
 - `npm run build` requires the Electron binary; if `node_modules/electron/dist` is missing (npm `allow-scripts` blocking install scripts), run `node node_modules/electron/install.js`.
+
+## Development
+
+| Command | What it does |
+|---|---|
+| `npm run dev` | Vite + Electron with hot reload |
+| `npm run lint` | ESLint (flat config, `eslint.config.js`) |
+| `npx tsc` | Type-check only |
+| `npm test` | Unit tests (vitest) |
+| `npm run test:smoke` | The built renderer over `file://` under the production CSP |
+| `npm run test:e2e` | Launches the real app and drives it over CDP |
+| `npm run test:memory -- --app <path>` | Resident set of the packaged app (see **Memory**) |
+| `npm run build` | Type-check, bundle, and package with electron-builder |
+
+`test:smoke`, `test:e2e` and `test:memory` are **not headless** — a window
+appears — and all three need any running photo-slap closed first, since the app
+is single-instance. `test:e2e` backs up and restores the user's settings.
+`test:smoke` takes an optional `-- --app <path>` to run against a packaged
+`.app`, and CI runs it that way before publishing a release; `test:memory`
+requires one, since dev-mode numbers mean nothing. Packaged
+installers land in `release/<version>/` (macOS DMG, Windows NSIS — see
+`electron-builder.json5`).
+
+**All settings persist through `electron-store` in the main process**, over the
+`store:get` / `store:set` channels; the renderer never touches disk. The
+no-repeat shuffle history, its seeds and the resume positions use the same
+store, keyed by the sorted library roots plus the active media filter, and are
+written on a debounce rather than on every slide.
 
 ## Testing
 
