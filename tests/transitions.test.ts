@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     starPolygon, slideTransitions, resolveTransition, presenceModeFor, CONCRETE_TRANSITIONS,
+    scaleSlideTransition, TRANSITION_SPEEDS, TRANSITION_SPEED_NAMES, type TransitionSpeed,
 } from '../src/transitions';
 
 const parsePoints = (polygon: string): [number, number][] => {
@@ -146,5 +147,68 @@ describe('presenceModeFor', () => {
         for (const style of CONCRETE_TRANSITIONS) {
             expect(['sync', 'wait']).toContain(presenceModeFor(style));
         }
+    });
+});
+
+describe('transition speed', () => {
+    it('leaves the normal speed object untouched, by identity', () => {
+        // The default must not hand framer-motion a fresh variants object on
+        // every render just to multiply by one.
+        for (const name of CONCRETE_TRANSITIONS) {
+            expect(scaleSlideTransition(slideTransitions[name], 'normal'))
+                .toBe(slideTransitions[name]);
+        }
+    });
+
+    it('scales the top-level duration', () => {
+        const fade = scaleSlideTransition(slideTransitions.fade, 'fast');
+        expect(fade.transition.duration).toBeCloseTo(0.3 * TRANSITION_SPEEDS.fast);
+    });
+
+    it('gets faster with every step', () => {
+        const durations = TRANSITION_SPEED_NAMES.map(
+            speed => scaleSlideTransition(slideTransitions.slide, speed).transition.duration as number,
+        );
+        for (let i = 1; i < durations.length; i++) {
+            expect(durations[i]).toBeLessThan(durations[i - 1]);
+        }
+    });
+
+    it('scales a nested variant timing, not just the shared one', () => {
+        const star = scaleSlideTransition(slideTransitions.star, 'faster');
+        const exit = star.variants.exit as { transition: { duration: number; delay: number } };
+        expect(exit.transition.delay).toBeCloseTo(0.65 * TRANSITION_SPEEDS.faster);
+        expect(exit.transition.duration).toBeCloseTo(0.01 * TRANSITION_SPEEDS.faster);
+    });
+
+    /**
+     * The invariant the star wipe depends on: the outgoing slide may only
+     * hide itself once the growing clip-path has covered it. Scaling the wipe
+     * without scaling that delay would uncover the slide underneath mid-wipe,
+     * which is exactly the crossfade the star variant exists to avoid.
+     */
+    it('keeps the star wipe covered before the old slide disappears', () => {
+        for (const speed of TRANSITION_SPEED_NAMES) {
+            const star = scaleSlideTransition(slideTransitions.star, speed);
+            const exit = star.variants.exit as { transition: { delay: number } };
+            expect(exit.transition.delay, speed).toBeGreaterThanOrEqual(star.transition.duration as number);
+        }
+    });
+
+    it('preserves easing and type while retiming', () => {
+        const slide = scaleSlideTransition(slideTransitions.slide, 'instant');
+        expect(slide.transition).toMatchObject({ type: 'tween', ease: 'easeInOut' });
+        const crt = scaleSlideTransition(slideTransitions.crt, 'instant');
+        expect(crt.transition.ease).toEqual(slideTransitions.crt.transition.ease);
+    });
+
+    it('passes a directional function variant through unchanged', () => {
+        const slide = scaleSlideTransition(slideTransitions.slide, 'fast');
+        expect(slide.variants.enter).toBe(slideTransitions.slide.variants.enter);
+    });
+
+    it('still produces a usable transition for an unknown speed', () => {
+        const base = slideTransitions.fade;
+        expect(scaleSlideTransition(base, 'nonsense' as TransitionSpeed)).toBe(base);
     });
 });

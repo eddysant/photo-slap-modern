@@ -2,7 +2,10 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { FiActivity, FiFolder, FiLayers, FiX } from 'react-icons/fi';
 import { SETTINGS_PRESETS, type SettingsPresetName } from '../settingsPresets';
 import type { MetadataStorage } from '../hooks/useLibraryMeta';
-import type { TransitionStyle } from '../transitions';
+import {
+    TRANSITION_SPEED_LABELS, TRANSITION_SPEED_NAMES,
+    type TransitionSpeed, type TransitionStyle,
+} from '../transitions';
 
 export type MediaFilter = 'both' | 'photos' | 'videos';
 export type ControlsPosition = 'bottom' | 'left';
@@ -32,6 +35,8 @@ interface SettingsMenuProps {
     onToggleExif: () => void;
     transitionStyle: TransitionStyle;
     onTransitionChange: (style: TransitionStyle) => void;
+    transitionSpeed: TransitionSpeed;
+    onTransitionSpeedChange: (speed: TransitionSpeed) => void;
     sortOrder: SortOrder;
     onSortChange: (order: SortOrder) => void;
     slideDuration: number;
@@ -155,6 +160,13 @@ export function SettingsMenu(props: SettingsMenuProps) {
                             <label className="setting-item"><span className="setting-label">Transition</span>
                                 <select className="setting-control" value={props.transitionStyle} onChange={e => props.onTransitionChange(e.target.value as TransitionStyle)}>
                                     <option value="fade">Fade</option><option value="slide">Slide</option><option value="zoom">Zoom</option><option value="flip">Flip</option><option value="star">Star Wipe</option><option value="crt">CRT Power-On</option><option value="random">Surprise Me</option>
+                                </select>
+                            </label>
+                            <label className="setting-item"><span className="setting-label">Transition speed</span>
+                                <select className="setting-control" value={props.transitionSpeed} onChange={e => props.onTransitionSpeedChange(e.target.value as TransitionSpeed)}>
+                                    {TRANSITION_SPEED_NAMES.map(speed => (
+                                        <option key={speed} value={speed}>{TRANSITION_SPEED_LABELS[speed]}</option>
+                                    ))}
                                 </select>
                             </label>
                             <label className="setting-item"><span className="setting-label">Photo duration</span>

@@ -25,8 +25,8 @@ import { useSlideshowPlayback } from './hooks/useSlideshowPlayback'
 import { usePersistedState } from './hooks/usePersistedState'
 import { clampIndex } from './playlist'
 import {
-  slideTransitions, presenceModeFor, resolveTransition,
-  type ConcreteTransitionStyle, type TransitionStyle,
+  slideTransitions, presenceModeFor, resolveTransition, scaleSlideTransition,
+  type ConcreteTransitionStyle, type TransitionStyle, type TransitionSpeed,
 } from './transitions'
 import { getFileUrl, getDisplayUrl } from './utils'
 import { cullingActionForKey } from './culling'
@@ -80,6 +80,7 @@ function App() {
   const [isKenBurns, setIsKenBurns] = usePersistedState('isKenBurns', false)
   const [isExifEnabled, setIsExifEnabled] = usePersistedState('isExifEnabled', false)
   const [transitionStyle, setTransitionStyle] = usePersistedState<TransitionStyle>('transitionStyle', 'fade')
+  const [transitionSpeed, setTransitionSpeed] = usePersistedState<TransitionSpeed>('transitionSpeed', 'normal')
   const [volume, setVolume] = usePersistedState('volume', 1)
   const [isMuted, setIsMuted] = usePersistedState('isMuted', false)
   const [controlsPosition, setControlsPosition] = usePersistedState<ControlsPosition>('controlsPosition', 'bottom')
@@ -386,6 +387,7 @@ function App() {
     setIsKenBurns(preset.isKenBurns);
     setIsExifEnabled(preset.isExifEnabled);
     setTransitionStyle(preset.transitionStyle);
+    setTransitionSpeed(preset.transitionSpeed);
     setSortOrder(preset.sortOrder);
     setSlideDuration(preset.slideDuration);
     setControlsPosition(preset.controlsPosition);
@@ -396,7 +398,7 @@ function App() {
     setCullingMode(preset.cullingMode);
     if (preset.cullingMode) setIsPlaying(false);
     showToast(`${name} preset applied`);
-  }, [setMediaFilter, setIsShuffle, setIsSmart, setIsSmartVideoEnabled, setIsAmbientColor, setIsStretch, setIsKenBurns, setIsExifEnabled, setTransitionStyle, setSortOrder, setSlideDuration, setControlsPosition, setShowSlideTimer, setFrameMode, setAutoPlayOnOpen, setRemoteEnabled, setCullingMode, showToast]);
+  }, [setMediaFilter, setIsShuffle, setIsSmart, setIsSmartVideoEnabled, setIsAmbientColor, setIsStretch, setIsKenBurns, setIsExifEnabled, setTransitionStyle, setTransitionSpeed, setSortOrder, setSlideDuration, setControlsPosition, setShowSlideTimer, setFrameMode, setAutoPlayOnOpen, setRemoteEnabled, setCullingMode, showToast]);
 
   const openHealthScan = useCallback(async () => {
     let roots = currentDirs;
@@ -941,7 +943,13 @@ function App() {
   }, [handleOpenDirectory, showCurrentInFinder, nextSlide, prevSlide, togglePlay, seekVideoBy, deleteCurrentFile, toggleFavorite, frameMode, setFrameMode, markCurrentCulling]);
 
   const fileUrl = currentFile ? getFileUrl(currentFile.path) : '';
-  const currentTransition = slideTransitions[activeTransition];
+  // Memoized because framer-motion reads `variants` when the incoming slide
+  // mounts: a fresh object on every render (and a video drives ~4 a second)
+  // is churn for an identical animation.
+  const currentTransition = useMemo(
+    () => scaleSlideTransition(slideTransitions[activeTransition], transitionSpeed),
+    [activeTransition, transitionSpeed],
+  );
   const healthIssues = useMemo(() => healthIssuesByPath(healthReport), [healthReport]);
 
   // Settings, dedupe, and toasts are available in both states — you can
@@ -972,6 +980,8 @@ function App() {
         onToggleExif={() => setIsExifEnabled(!isExifEnabled)}
         transitionStyle={transitionStyle}
         onTransitionChange={setTransitionStyle}
+        transitionSpeed={transitionSpeed}
+        onTransitionSpeedChange={setTransitionSpeed}
         sortOrder={sortOrder}
         onSortChange={setSortOrder}
         slideDuration={slideDuration}

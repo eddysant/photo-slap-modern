@@ -94,6 +94,83 @@ export const slideTransitions: Record<ConcreteTransitionStyle, SlideTransition> 
     },
 };
 
+/**
+ * How fast a transition runs, as a multiplier on every duration and delay in
+ * it. The styles above carry the timings that look right at `normal`; a
+ * faster setting scales them rather than replacing them, so a new style only
+ * has to state its own natural timing once.
+ *
+ * Scaling **everything** is the point. The star wipe's outgoing slide hides
+ * itself on a delay that has to outlast the wipe covering it (see the `star`
+ * variant); scaling the duration alone would uncover the slide underneath
+ * mid-wipe, which is the crossfade bug the star was written to avoid.
+ */
+export const TRANSITION_SPEEDS = {
+    normal: 1,
+    fast: 0.6,
+    faster: 0.35,
+    instant: 0.15,
+} as const;
+
+export type TransitionSpeed = keyof typeof TRANSITION_SPEEDS;
+
+export const TRANSITION_SPEED_NAMES = Object.keys(TRANSITION_SPEEDS) as TransitionSpeed[];
+
+/**
+ * How each speed reads in the options panel. It lives beside the multipliers
+ * rather than in the component, both because a component file may not export
+ * values (react-refresh) and because a speed then cannot be added without
+ * being named.
+ */
+export const TRANSITION_SPEED_LABELS: Record<TransitionSpeed, string> = {
+    normal: 'Normal',
+    fast: 'Fast',
+    faster: 'Faster',
+    instant: 'Nearly instant',
+};
+
+/** Scale the timings of one timing object, leaving easing and type alone. */
+function scaleTiming(timing: Transition, factor: number): Transition {
+    const scaled: Record<string, unknown> = { ...timing };
+    for (const key of ['duration', 'delay'] as const) {
+        const value = (timing as Record<string, unknown>)[key];
+        if (typeof value === 'number') scaled[key] = value * factor;
+    }
+    return scaled as Transition;
+}
+
+/**
+ * The same transition, run at `speed`.
+ *
+ * `normal` returns the original object rather than a copy: it is the default,
+ * and framer-motion reads `variants` when the incoming slide mounts, so
+ * handing it an identical-but-new object every render is work for nothing.
+ * A function variant (the directional styles take the nav direction) is
+ * passed through untouched — none of them carry their own timing, and
+ * calling one here would mean guessing a direction.
+ */
+export function scaleSlideTransition(
+    base: SlideTransition,
+    speed: TransitionSpeed,
+): SlideTransition {
+    const factor = TRANSITION_SPEEDS[speed];
+    if (!factor || factor === 1) return base;
+
+    const variants: Variants = {};
+    for (const [name, variant] of Object.entries(base.variants)) {
+        if (typeof variant !== 'object' || variant === null) {
+            variants[name] = variant;
+            continue;
+        }
+        const { transition, ...rest } = variant as Record<string, unknown>;
+        variants[name] = transition
+            ? { ...rest, transition: scaleTiming(transition as Transition, factor) }
+            : variant;
+    }
+
+    return { variants, transition: scaleTiming(base.transition, factor) };
+}
+
 export const CONCRETE_TRANSITIONS: ConcreteTransitionStyle[] =
     Object.keys(slideTransitions) as ConcreteTransitionStyle[];
 

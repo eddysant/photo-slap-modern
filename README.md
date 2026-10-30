@@ -37,7 +37,9 @@ Nothing to turn on, and no need to relaunch.
 **Transitions** — Fade, Slide, Zoom, Flip, a classic **Star Wipe** (the new
 slide revealed through a growing star over the old one), a **CRT Power-On**
 that collapses the slide to a glowing line and snaps it back out, or **Surprise
-Me**, which picks a different one every time.
+Me**, which picks a different one every time. **Transition speed** runs any
+of them at Normal, Fast, Faster or nearly instant, so the same style can be
+the centrepiece of a photo frame or stay out of the way while you cull.
 
 **Filling the letterbox** — bars beside a photo can hold either a blurred,
 darkened copy of it (*Smart Background*) or its own average colour (*Ambient*).

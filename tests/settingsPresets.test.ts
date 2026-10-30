@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { cullingActionForKey } from '../src/culling';
 import { SETTINGS_PRESETS } from '../src/settingsPresets';
+import { TRANSITION_SPEED_NAMES } from '../src/transitions';
 
 describe('named settings presets', () => {
     it('provides the four named workflows with distinct intent', () => {
@@ -58,3 +59,22 @@ describe('culling keyboard workflow', () => {
     });
 });
 
+
+describe('presets decide how fast a transition runs', () => {
+    it('names a speed for every preset rather than inheriting one', () => {
+        for (const preset of Object.values(SETTINGS_PRESETS)) {
+            expect(TRANSITION_SPEED_NAMES).toContain(preset.transitionSpeed);
+        }
+    });
+
+    /**
+     * Culling is a review bar, not a show: the wipe is the thing standing
+     * between the reviewer and the next photo. Photo Frame is the opposite —
+     * the transition is most of what there is to look at.
+     */
+    it('gets out of the way for culling and takes its time for a photo frame', () => {
+        const order = TRANSITION_SPEED_NAMES;
+        expect(order.indexOf(SETTINGS_PRESETS.Culling.transitionSpeed))
+            .toBeGreaterThan(order.indexOf(SETTINGS_PRESETS['Photo Frame'].transitionSpeed));
+    });
+});

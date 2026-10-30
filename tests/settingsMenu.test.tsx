@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { SettingsMenu } from '../src/components/SettingsMenu';
+import { TRANSITION_SPEED_LABELS, TRANSITION_SPEED_NAMES } from '../src/transitions';
 
 const noop = () => {};
 
@@ -14,6 +15,7 @@ const render = (overrides: Partial<Props> = {}) => {
         isSmartVideoEnabled: true, onToggleSmartVideo: noop, isStretch: false, onToggleStretch: noop,
         isKenBurns: false, onToggleKenBurns: noop, isExifEnabled: false, onToggleExif: noop,
         transitionStyle: 'fade', onTransitionChange: noop, sortOrder: 'name', onSortChange: noop,
+        transitionSpeed: 'normal', onTransitionSpeedChange: noop,
         slideDuration: 3000, onDurationChange: noop, controlsPosition: 'bottom', onControlsPositionChange: noop,
         quickMoveFolders: [null, null, null], onSetQuickMoveFolder: noop, showSlideTimer: true, onToggleSlideTimer: noop,
         frameMode: false, onToggleFrameMode: noop, autoPlayOnOpen: false, onToggleAutoPlayOnOpen: noop,
@@ -62,5 +64,24 @@ describe('metadata storage control', () => {
 
     it('names the file it would otherwise write', () => {
         expect(render()).toContain('.photo-slap.json');
+    });
+});
+
+describe('transition speed control', () => {
+    it('offers every speed, labelled, next to the transition itself', () => {
+        const html = render();
+        expect(html).toContain('Transition speed');
+        for (const speed of TRANSITION_SPEED_NAMES) {
+            expect(html).toContain(`value="${speed}"`);
+            expect(html).toContain(TRANSITION_SPEED_LABELS[speed]);
+        }
+        // It is a presentation choice, so it belongs with Transition rather
+        // than off in another section.
+        expect(html.indexOf('Transition speed')).toBeGreaterThan(html.indexOf('Playback &amp; display'));
+    });
+
+    it('shows the speed currently in force', () => {
+        const html = render({ transitionSpeed: 'faster' });
+        expect(html).toMatch(/<option[^>]*value="faster"[^>]*selected/);
     });
 });

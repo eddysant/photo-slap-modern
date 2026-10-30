@@ -342,6 +342,53 @@ try {
     check('incoming clip-path interpolates', new Set(incoming).size >= 4, `${new Set(incoming).size} distinct shapes`);
     check('outgoing slide keeps full-star clip', midWipe.every(s => s.clips[0]?.includes('-150%')));
 
+    console.log('transition speed');
+    // The pure scaling is unit-tested; what that cannot show is that the
+    // setting reaches framer-motion at all. Time a real star wipe from the
+    // keypress until the outgoing slide unmounts, at Normal and then at the
+    // fastest setting, driving the same <select> a user would.
+    const speed = await cdp.evaluate(`(async () => {
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+        const wipeMs = async () => {
+            const t0 = performance.now();
+            window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' }));
+            // Wait for the second slide to appear, then for it to go again.
+            for (let i = 0; i < 400; i++) {
+                await sleep(10);
+                if (document.querySelectorAll('.viewer-container > div').length === 1
+                    && performance.now() - t0 > 30) break;
+            }
+            return performance.now() - t0;
+        };
+        const setSpeed = async (value) => {
+            document.querySelector('button[title="Settings"]').click();
+            await sleep(400);
+            const select = [...document.querySelectorAll('select')]
+                .find(s => [...s.options].some(o => o.value === 'instant'));
+            if (!select) return false;
+            Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set.call(select, value);
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+            await sleep(200);
+            window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+            await sleep(400);
+            return true;
+        };
+        const found = await setSpeed('normal');
+        await wipeMs();                       // warm up
+        const normal = await wipeMs();
+        if (!await setSpeed('instant')) return JSON.stringify({ found: false });
+        await wipeMs();
+        const instant = await wipeMs();
+        await setSpeed('normal');             // leave the show as later checks expect
+        return JSON.stringify({ found, normal, instant });
+    })()`).then(JSON.parse);
+    check('the options panel offers a transition speed', speed.found);
+    check(
+        'the fastest setting really does run the wipe faster',
+        speed.instant < speed.normal * 0.6,
+        `normal ${Math.round(speed.normal)}ms -> instant ${Math.round(speed.instant)}ms`,
+    );
+
     console.log('directional slide transition');
     const dir = await cdp.evaluate(`(async () => {
         const sleep = ms => new Promise(r => setTimeout(r, ms));
