@@ -246,8 +246,15 @@ runs) and is the number to compare when a change is a startup cost.
   already cached on disk keyed by path+mtime+size, so libvips' own operation
   cache is a second copy of an answer we have; and each worker thread holds
   its own tile buffers for a photo that can be 48MP, multiplied again by the
-  jobs running at once. `DERIVE_CONCURRENCY` (now 2) still provides the
-  parallelism. This alone was ~130MB of main.
+  jobs running at once. `DERIVE_CONCURRENCY` still provides the
+  parallelism, and capping libvips is where nearly all of the ~130MB this
+  bullet was worth actually came from. **The job count is a speed/memory
+  dial and was mis-set.** It went to 2 on the assumption that half as many
+  jobs would still keep a grid scroll ahead of the eye; measured, two jobs
+  derive at 54ms an image against 32ms at three and 25ms at four, for
+  276 / 295 / 323MB of main at rest. It ships at 3 — 40% of the memory
+  four costs for 80% of the speed — and the difference is what a dedupe
+  scan, a health scan or a first grid open on a large library pays.
 - **A photo already small enough is served as-is.** Asking for `?w=2560`
   against a 1600px JPEG used to decode it and re-encode it at quality 90 —
   often to a *bigger* file, always at the cost of a full-resolution bitmap in
@@ -274,6 +281,13 @@ runs) and is the number to compare when a change is a startup cost.
   — measured as byte-identical tags on a 12MB JPEG and a 6.5MB HEIC — and
   falls back to the whole file if that yields nothing, so a format that
   trailed its metadata would still report it rather than appear to have none.
+  `files:getDates` reads the same way for the opposite reason: it is run
+  across the **whole library** for a date sort, so the window is the entire
+  cost — 256KB x 2,000 photos is 512MB of I/O, 770ms warm on a local SSD
+  and far worse on a network volume. It tries 64KB first and widens to
+  256KB only when that yields no date, so a camera writing a large
+  embedded thumbnail ahead of `DateTimeOriginal` is not silently sorted by
+  mtime.
 - **The remote's library mirror does not outlive the server.** `remoteLibrary`
   in main is a copy of the playable list, kept so phones can browse by index
   without a path ever leaving the process. Turning the remote off now clears
