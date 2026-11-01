@@ -15,7 +15,9 @@ import { ZoomPan } from './components/ZoomPan'
 import { useAmbientColor } from './hooks/useAmbientColor'
 import { useImagePreloader } from './hooks/useImagePreloader'
 import { useLibraryMeta, type MetadataStorage } from './hooks/useLibraryMeta'
-import { usePendingDeletes, UNDO_WINDOW_MS } from './hooks/usePendingDeletes'
+import {
+  usePendingDeletes, UNDO_WINDOW_MS, trashFailureMessage, type RestoreReason,
+} from './hooks/usePendingDeletes'
 import { useRemote } from './hooks/useRemote'
 import { useShuffleCycle } from './hooks/useShuffleCycle'
 import { usePlayableList } from './hooks/usePlayableList'
@@ -425,16 +427,26 @@ function App() {
     setAllFiles(prev => prev.filter(f => !gone.has(f.path)));
   }, [pinSurvivorOf]);
 
-  /** Put files back after an undo, or after a trash that failed. */
-  const restoreToView = useCallback((restored: MediaFile[]) => {
+  /**
+   * Put files back after an undo, or after a trash that failed.
+   *
+   * **Only an undo may move the viewer.** An undo is a request to see that
+   * photo again, so it is pinned. A refused trash is not: the user pressed
+   * Backspace seven seconds ago and has moved on, and pinning the restored
+   * path dragged the show back to the very photo they tried to delete —
+   * which is what "it reset the slideshow" turned out to mean. The file
+   * rejoins the list wherever it belongs and the viewer stays put.
+   */
+  const restoreToView = useCallback((restored: MediaFile[], reason: RestoreReason) => {
     if (restored.length === 0) return;
-    pinPath(restored[0].path);
+    if (reason === 'undo') pinPath(restored[0].path);
+    else hold();
     setAllFiles(prev => {
       const known = new Set(prev.map(f => f.path));
       const missing = restored.filter(f => !known.has(f.path));
       return missing.length === 0 ? prev : [...prev, ...missing];
     });
-  }, [pinPath]);
+  }, [pinPath, hold]);
 
   /**
    * Media that appeared in, or vanished from, the folders on show while the
@@ -480,15 +492,25 @@ function App() {
 
   const { pending: pendingDelete, requestDelete, undo: undoDelete } = usePendingDeletes({
     onRemoved: files => removeFromView(files.map(f => f.path)),
-    onRestored: (restored, reason) => {
-      restoreToView(restored);
+    onRestored: (restored, reason, why) => {
+      restoreToView(restored, reason);
       // A file that could not be trashed reappearing with no explanation is
       // indistinguishable from a bug. It happens for real: an external drive
       // formatted exFAT has no .Trashes, so macOS refuses to trash at all.
+      //
+      // The Reveal action is not decoration. `useToast` drops a plain message
+      // that arrives while an actionable toast is still protecting itself,
+      // and the delete's own Undo toast is given exactly `UNDO_WINDOW_MS` —
+      // the same duration as the timer that fires this notice. Whether the
+      // most important message in the app appeared therefore came down to
+      // which of two equal timers ran first. Carrying an action takes it out
+      // of that race entirely, and Finder is where the user has to go to
+      // delete the file by hand anyway.
       if (reason === 'trash-failed') {
-        showToast(restored.length === 1
-          ? `Couldn't move ${restored[0].name} to the Trash \u2014 it's still in the show`
-          : `Couldn't move ${restored.length} files to the Trash \u2014 they're still in the show`);
+        showToast(trashFailureMessage(restored, why), {
+          label: 'Reveal',
+          onAction: () => { dismissToast(); void window.api.showInFolder(restored[0].path); },
+        });
       }
     },
   });

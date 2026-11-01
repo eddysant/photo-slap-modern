@@ -16,7 +16,7 @@ brew install --cask photo-slap
 
 **Photos** `.jpg` `.jpeg` `.png` `.webp` `.gif` `.bmp` `.heic` `.heif`
 
-**Videos** `.mp4` `.webm` `.ogg` `.gifv`
+**Videos** `.mp4` `.mov` `.mkv` `.webm` `.ogg` `.gifv`
 
 ---
 

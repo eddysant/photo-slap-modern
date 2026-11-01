@@ -66,9 +66,14 @@ interface QuarantineManifest {
 const QUARANTINE_DIR = '.photo-slap-quarantine';
 const QUARANTINE_MANIFEST = '.manifest.json';
 
+/**
+ * Formats the slideshow will not open at all. Kept in step with
+ * `SUPPORTED_EXTENSIONS` by hand — `.mov` and `.mkv` moved out of this list
+ * when they were shown to play, and a format can only ever be in one of them.
+ */
 const UNSUPPORTED_MEDIA_EXTENSIONS = new Set([
     '.avif', '.jfif', '.jxl', '.svg', '.tif', '.tiff',
-    '.3gp', '.avi', '.m2ts', '.m4v', '.mkv', '.mov', '.mts', '.wmv',
+    '.3gp', '.avi', '.m2ts', '.m4v', '.mts', '.wmv',
     '.cr2', '.cr3', '.dng', '.nef', '.orf', '.raf', '.raw', '.rw2',
 ]);
 
@@ -102,8 +107,15 @@ function hasCaptureDate(buffer: Buffer): boolean {
 }
 
 function validVideoHeader(ext: string, header: Buffer): boolean {
-    if (ext === '.mp4' || ext === '.gifv') return header.length >= 12 && header.subarray(4, 12).includes(Buffer.from('ftyp'));
-    if (ext === '.webm') return header.length >= 4 && header.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]));
+    // .mov is ISO base media format like .mp4 — iPhones and ffmpeg both write
+    // an `ftyp` box with the brand `qt  `, so the same check covers it.
+    if (ext === '.mp4' || ext === '.gifv' || ext === '.mov') {
+        return header.length >= 12 && header.subarray(4, 12).includes(Buffer.from('ftyp'));
+    }
+    // Matroska and WebM share the EBML magic; .mkv is the general case of it.
+    if (ext === '.webm' || ext === '.mkv') {
+        return header.length >= 4 && header.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]));
+    }
     if (ext === '.ogg') return header.length >= 4 && header.subarray(0, 4).toString('ascii') === 'OggS';
     return false;
 }

@@ -42,6 +42,9 @@ type CullingDecision = 'keep' | 'reject';
 type LibraryHealthCategory = 'corrupt' | 'tiny' | 'unsupported' | 'missing-date' | 'orphan-sidecar';
 type LibraryHealthRepairAction = 'remove-orphans' | 'quarantine-corrupt';
 
+/** Whether a file reached the Trash, and the OS's reason when it did not. */
+type TrashOutcome = { ok: true } | { ok: false; reason?: string };
+
 interface LibraryHealthIssue {
     category: LibraryHealthCategory;
     path: string;
@@ -83,7 +86,7 @@ interface Window {
         watchDirs: (dirs: string[]) => Promise<void>;
         getPathForFile: (file: File) => string;
         getDates: (paths: string[]) => Promise<Record<string, number>>;
-        deleteFile: (path: string) => Promise<boolean>;
+        deleteFile: (path: string) => Promise<TrashOutcome>;
         getStore: (key: string) => Promise<any>;
         setStore: (key: string, value: any) => Promise<void>;
         showInFolder: (path: string) => Promise<void>;

@@ -773,10 +773,13 @@ ipcMain.handle('dir:watch', async (_event, dirs: string[]) => {
 ipcMain.handle('file:delete', async (_event, filePath: string) => {
   try {
     await shell.trashItem(assertAllowedPath(filePath));
-    return true;
+    return { ok: true };
   } catch (e) {
     console.error('Failed to delete file', e);
-    return false;
+    // The reason is the whole value of the message the user ends up seeing:
+    // "permission denied" and "this volume has no Trash" call for completely
+    // different actions, and a bare "it did not work" calls for none.
+    return { ok: false, reason: (e as Error)?.message ?? 'unknown error' };
   }
 });
 

@@ -19,7 +19,7 @@ describe('library health scan', () => {
         await sharp({ create: { width: 100, height: 80, channels: 3, background: '#336699' } })
             .png().toFile(path.join(root, 'tiny.png'));
         await fs.writeFile(path.join(root, 'broken.jpg'), 'not an image');
-        await fs.writeFile(path.join(root, 'legacy.mov'), 'unsupported video');
+        await fs.writeFile(path.join(root, 'legacy.avi'), 'unsupported video');
         await fs.writeFile(path.join(root, SIDECAR_NAME), JSON.stringify({
             version: 1,
             favorites: ['gone.jpg'],
@@ -37,7 +37,7 @@ describe('library health scan', () => {
         expect(report.scannedFiles).toBe(2);
         expect(report.issues.some(i => i.category === 'corrupt' && i.path.endsWith('broken.jpg'))).toBe(true);
         expect(report.issues.some(i => i.category === 'tiny' && i.path.endsWith('tiny.png'))).toBe(true);
-        expect(report.issues.some(i => i.category === 'unsupported' && i.path.endsWith('legacy.mov'))).toBe(true);
+        expect(report.issues.some(i => i.category === 'unsupported' && i.path.endsWith('legacy.avi'))).toBe(true);
         expect(report.issues.some(i => i.category === 'missing-date' && i.path.endsWith('tiny.png'))).toBe(true);
         expect(report.summary['orphan-sidecar']).toBe(2);
     });

@@ -15,10 +15,19 @@ describe('sanitizeUploadName', () => {
     });
 
     it('refuses formats the slideshow cannot scan back', () => {
-        // .mov used to be accepted: the upload would join the running show and
-        // then disappear, because scanDirectory does not recognise it.
-        expect(sanitizeUploadName('IMG_0001.mov').ok).toBe(false);
-        expect(sanitizeUploadName('clip.mkv').ok).toBe(false);
+        // The rule, not the example: an accepted upload that a re-scan does
+        // not recognise joins the running show and then disappears with
+        // nothing to explain it. (.mov was once the case in point; it is
+        // supported now, which is why the pair below are both still refused.)
+        expect(sanitizeUploadName('clip.avi').ok).toBe(false);
+        expect(sanitizeUploadName('clip.m4v').ok).toBe(false);
+    });
+
+    it('accepts the phone video formats the slideshow now plays', () => {
+        // An iPhone shares .mov. Refusing it was the drift running the other
+        // way: the show could have played it all along.
+        expect(sanitizeUploadName('IMG_0001.mov').ok).toBe(true);
+        expect(sanitizeUploadName('clip.mkv').ok).toBe(true);
     });
 
     it('strips any directory component from a traversal attempt', () => {

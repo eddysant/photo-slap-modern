@@ -10,11 +10,53 @@ export const UNDO_WINDOW_MS = 7_000;
  */
 export type RestoreReason = 'undo' | 'trash-failed';
 
+/** A file the Trash would not take, and what it said about why. */
+export interface RefusedTrash {
+    file: MediaFile;
+    reason?: string;
+}
+
 interface PendingDeletesOptions {
     /** Take these files out of the slideshow right away. */
     onRemoved: (files: MediaFile[]) => void;
-    /** Put them back — the user changed their mind, or the Trash refused them. */
-    onRestored: (files: MediaFile[], reason: RestoreReason) => void;
+    /**
+     * Put them back — the user changed their mind, or the Trash refused them.
+     * `why` carries the OS's explanation for a refusal, when it gave one.
+     */
+    onRestored: (files: MediaFile[], reason: RestoreReason, why?: string) => void;
+}
+
+/**
+ * The sentence the user actually reads when a delete is refused.
+ *
+ * It is a pure function so the wording can be tested. The reason matters
+ * more than the apology: "permission denied" is something the user can act
+ * on, and for one release this message was not shown at all.
+ */
+export function trashFailureMessage(files: MediaFile[], why?: string): string {
+    const what = files.length === 1
+        ? `Couldn't move ${files[0].name} to the Trash`
+        : `Couldn't move ${files.length} files to the Trash`;
+    const because = why?.trim() ? ` — ${cleanTrashReason(why)}` : '';
+    return `${what}${because}. ${files.length === 1 ? "It's" : "They're"} still in the show.`;
+}
+
+/**
+ * Reduces an OS trash error to the part the user does not already know.
+ *
+ * macOS answers with a whole sentence that repeats the filename back, in
+ * curly quotes: “t2.jpg” couldn’t be moved to the trash because you don’t
+ * have permission to access it. Pasted into a toast that already names the
+ * file, that reads as two sentences saying the same thing. Everything after
+ * "because" is the only new information in it, so that is what is kept.
+ * Other platforms bake the full path in instead, which is stripped.
+ */
+export function cleanTrashReason(raw: string): string {
+    const because = /\bbecause\s+(.+)/is.exec(raw);
+    const core = because ? because[1] : raw.replace(/\s*'?\/[^\s']*'?/g, '');
+    const text = (core.replace(/\s{2,}/g, ' ').trim() || raw).replace(/[.\s]+$/, '');
+    const short = text.length > 90 ? `${text.slice(0, 89)}…` : text;
+    return short.charAt(0).toLowerCase() + short.slice(1);
 }
 
 /**
@@ -41,12 +83,13 @@ interface PendingDeletesOptions {
  */
 export async function trashFiles(
     files: MediaFile[],
-    trash: (path: string) => Promise<boolean>,
-): Promise<MediaFile[]> {
-    const failed: MediaFile[] = [];
+    trash: (path: string) => Promise<TrashOutcome>,
+): Promise<RefusedTrash[]> {
+    const failed: RefusedTrash[] = [];
     for (const file of files) {
-        const ok = await trash(file.path).catch(() => false);
-        if (!ok) failed.push(file);
+        const outcome = await trash(file.path)
+            .catch((e: unknown) => ({ ok: false as const, reason: (e as Error)?.message }));
+        if (!outcome.ok) failed.push({ file, reason: outcome.reason });
     }
     return failed;
 }
@@ -80,7 +123,9 @@ export function usePendingDeletes({ onRemoved, onRestored }: PendingDeletesOptio
         const failed = await trashNow(files);
         // A file that could not be trashed is still gone from the slideshow;
         // put it back so the list matches the disk.
-        if (failed.length > 0) onRestoredRef.current(failed, 'trash-failed');
+        if (failed.length > 0) {
+            onRestoredRef.current(failed.map(f => f.file), 'trash-failed', failed[0].reason);
+        }
         return failed;
     }, [trashNow]);
 
@@ -93,7 +138,9 @@ export function usePendingDeletes({ onRemoved, onRestored }: PendingDeletesOptio
             if (timerRef.current) clearTimeout(timerRef.current);
             pendingRef.current = null;
             void trashNow(previous).then(failed => {
-                if (failed.length > 0) onRestoredRef.current(failed, 'trash-failed');
+                if (failed.length > 0) {
+                    onRestoredRef.current(failed.map(f => f.file), 'trash-failed', failed[0].reason);
+                }
             });
         }
 

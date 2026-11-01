@@ -123,7 +123,14 @@ async function makeResilienceFixture() {
     const playable = spawnSync('ffmpeg', ['-v', 'error', '-f', 'lavfi',
         '-i', 'testsrc=duration=6:size=320x240:rate=10', '-pix_fmt', 'yuv420p',
         path.join(dir, '4-playable.mp4')]);
-    return { dir, hasPlayable: playable.status === 0 };
+    // A QuickTime container, the format an iPhone shares. H.264 rather than
+    // HEVC on purpose: HEVC decoding is hardware-dependent, and this check
+    // should answer "is .mov wired up" on every machine rather than "does
+    // this machine have an HEVC decoder".
+    const phone = spawnSync('ffmpeg', ['-v', 'error', '-f', 'lavfi',
+        '-i', 'testsrc=duration=4:size=320x240:rate=10', '-c:v', 'libx264',
+        '-pix_fmt', 'yuv420p', path.join(dir, '5-phone.mov')]);
+    return { dir, hasPlayable: playable.status === 0, hasMov: phone.status === 0 };
 }
 
 // ---------- CDP ----------
@@ -234,6 +241,7 @@ let brokenFixture = null;
 let shuffleFixture = null;
 let sidecarFixture = null;
 let deepFixture = null;
+let trashFailFixture = null;
 try {
     const page = await waitForPage();
     cdp = await connect(page);
@@ -880,6 +888,38 @@ try {
     check('undone delete never reached the Trash even after the window closed',
         stillOnDisk.length === filesOnDisk, JSON.stringify(stillOnDisk));
 
+    if (resilience.hasMov) {
+        console.log('QuickTime .mov playback');
+        // .mov was listed as unsupported on the strength of canPlayType,
+        // which reports "no" for video/quicktime. That is advisory and here
+        // simply wrong — the only question that counts is whether this app,
+        // serving the file over media:// with that very Content-Type,
+        // actually decodes it.
+        const mov = await cdp.evaluate(`(async () => {
+            const key = k => window.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true }));
+            for (let i = 0; i < 10; i++) {
+                if ((document.querySelector('.title-bar')?.textContent ?? '').includes('5-phone')) break;
+                key('ArrowRight');
+                await new Promise(r => setTimeout(r, 700));
+            }
+            const title = document.querySelector('.title-bar')?.textContent ?? '';
+            const v = document.querySelector('video.media-element');
+            if (!v) return JSON.stringify({ title, found: false });
+            await new Promise(r => setTimeout(r, 2000));
+            return JSON.stringify({
+                title, found: true, w: v.videoWidth, h: v.videoHeight,
+                t: v.currentTime, err: v.error ? v.error.code : null,
+            });
+        })()`).then(JSON.parse);
+
+        check('the scanner offers the .mov to the slideshow at all',
+            mov.title.includes('5-phone') && mov.found, JSON.stringify(mov));
+        check('and Chromium really decodes it over media://',
+            mov.found && mov.w === 320 && mov.h === 240 && !mov.err, JSON.stringify(mov));
+        check('and it is playing, not merely loaded',
+            mov.found && mov.t > 0, JSON.stringify(mov));
+    }
+
     if (resilience.hasPlayable) {
         console.log('render churn');
         // Video `timeupdate` fires ~4x/s and is the app's highest-frequency
@@ -1159,6 +1199,96 @@ try {
     check('and the panel then lists the photo the shallow scan missed',
         ui !== null && ui.corrupt >= 1, viaUi);
 
+    // ---------------------------------------------------------------
+    // Sixth launch: a delete the Trash refuses. The fixture directory is
+    // made read-only, so the file cannot be removed from it and
+    // shell.trashItem fails for real — no stubbing, the same path an exFAT
+    // volume with no .Trashes takes. The file is already out of the show by
+    // then, so it comes back seven seconds later, and the question is
+    // whether the viewer gets dragged back to the photo it was asked to
+    // delete. The counter alone cannot answer that (the list is the same
+    // length again), so these checks read the filename on screen.
+    // ---------------------------------------------------------------
+    console.log('a delete the Trash refuses');
+    cdp.close();
+    cdp = null;
+    await shutdownApp(child);
+    trashFailFixture = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-slap-e2e-notrash-'));
+    for (let i = 1; i <= 4; i++) {
+        await sharp(Buffer.from(`<svg width="640" height="480" xmlns="http://www.w3.org/2000/svg"><rect width="640" height="480" fill="hsl(${i * 70} 70% 50%)"/></svg>`))
+            .jpeg().toFile(path.join(trashFailFixture, `t${i}.jpg`));
+    }
+    await fs.chmod(trashFailFixture, 0o500);
+    await fs.writeFile(cfg, JSON.stringify({
+        transitionStyle: 'fade', isShuffle: false, mediaFilter: 'both', sortOrder: 'name',
+        isKenBurns: false, isExifEnabled: false, isSmart: false, slideDuration: 600000,
+        metadataStorage: 'memory',
+    }));
+    child = launchApp(trashFailFixture);
+    cdp = await attach();
+
+    let noTrashShow = '';
+    for (let i = 0; i < 40; i++) {
+        noTrashShow = await cdp.evaluate(`document.querySelector('.file-info')?.textContent ?? ''`);
+        if (noTrashShow.includes('/ 4')) break;
+        await sleep(500);
+    }
+    check('relaunched into a library the Trash cannot accept', noTrashShow.includes('/ 4'), noTrashShow);
+
+    const refused = await cdp.evaluate(`(async () => {
+        const name = () => decodeURIComponent((document.querySelector('img.media-element')?.src ?? '').split('?')[0]).split('/').pop();
+        const pos = () => document.querySelector('.file-info')?.textContent?.trim();
+        const press = k => window.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true }));
+        press('ArrowRight');
+        await new Promise(r => setTimeout(r, 1200));
+        const before = { name: name(), pos: pos() };
+        press('Backspace');
+        await new Promise(r => setTimeout(r, 1500));
+        const removed = { name: name(), pos: pos() };
+        // The notice appears when the trash is attempted, one undo window
+        // later, and is gone a few seconds after that. Poll for it rather
+        // than sleeping past the window and reading once: a single late read
+        // reports an empty toast whether or not one was ever shown, which is
+        // exactly the false negative this check had to begin with.
+        let toast = '';
+        let action = '';
+        for (let i = 0; i < 60; i++) {
+            await new Promise(r => setTimeout(r, 250));
+            const el = document.querySelector('.toast');
+            const text = el?.textContent ?? '';
+            if (text && /Trash/i.test(text)) {
+                toast = text;
+                action = el.querySelector('.toast-action')?.textContent ?? '';
+                break;
+            }
+        }
+        return JSON.stringify({
+            before, removed,
+            after: { name: name(), pos: pos() },
+            toast, action,
+        });
+    })()`).then(JSON.parse);
+
+    check('the photo it was asked to delete left the show', refused.removed.name !== refused.before.name,
+        JSON.stringify(refused));
+    check('a refused delete leaves the viewer where it was, not back on the deleted photo',
+        refused.after.name === refused.removed.name, JSON.stringify(refused));
+    check('and it says the Trash would not take the file, with the reason',
+        /Trash/i.test(refused.toast) && /t2\.jpg/.test(refused.toast),
+        JSON.stringify(refused.toast));
+    // The notice carries an action deliberately: `useToast` drops a plain
+    // message arriving while an actionable toast is still protecting itself,
+    // and the delete's own Undo toast runs for exactly the undo window - the
+    // same duration as the timer that fires this one. Carrying an action
+    // takes the outcome out of that race.
+    check('and offers somewhere to go about it',
+        refused.action.includes('Reveal'), JSON.stringify(refused));
+
+    const stillThere = (await fs.readdir(trashFailFixture)).filter(n => n.endsWith('.jpg'));
+    check('the refused file is still on disk and back in the list',
+        stillThere.length === 4 && refused.after.pos.endsWith('/ 4'),
+        `${stillThere.length} files, counter ${refused.after.pos}`);
+
 } catch (e) {
     failures++;
     console.error('✗ E2E aborted:', e.message);
@@ -1173,6 +1303,11 @@ try {
     if (shuffleFixture) await fs.rm(shuffleFixture, { recursive: true, force: true });
     if (sidecarFixture) await fs.rm(sidecarFixture, { recursive: true, force: true });
     if (deepFixture) await fs.rm(deepFixture, { recursive: true, force: true });
+    if (trashFailFixture) {
+        // Put the permissions back or the cleanup cannot remove it either.
+        await fs.chmod(trashFailFixture, 0o700).catch(() => {});
+        await fs.rm(trashFailFixture, { recursive: true, force: true });
+    }
 }
 
 console.log(failures === 0 ? '\nE2E: all checks passed' : `\nE2E: ${failures} check(s) FAILED`);

@@ -6,7 +6,21 @@ import path from 'node:path';
  * anything not listed here will not be found by a re-scan, so it must not be
  * accepted from anywhere else either (see guestUpload.ts).
  */
-export const VIDEO_EXTENSIONS = new Set(['.webm', '.mp4', '.gifv', '.ogg']);
+/**
+ * `.mov` and `.mkv` are here because they were measured, not assumed. They
+ * were left out on the strength of `canPlayType`, which reports "no" for
+ * `video/quicktime` — but that is advisory and, here, simply wrong:
+ * served over a privileged scheme with `Content-Type: video/quicktime`,
+ * exactly as media:// serves them, Electron 43 played H.264 .mov, HEVC .mov
+ * and H.264 .mkv alike.
+ *
+ * What they do bring is files the decoder may refuse on some machines: HEVC
+ * decode is hardware-dependent, and a .mkv can hold anything at all. That is
+ * already handled — the `<video>` onError skip, the stall watchdog and the
+ * health scan all exist for media that will not play. Refusing to look at an
+ * iPhone video that would have played is the worse failure of the two.
+ */
+export const VIDEO_EXTENSIONS = new Set(['.webm', '.mp4', '.gifv', '.ogg', '.mov', '.mkv']);
 
 export const SUPPORTED_EXTENSIONS = new Set([
   // Images (.heic/.heif are transcoded to JPEG by the media:// protocol)
