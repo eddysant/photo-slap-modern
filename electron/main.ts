@@ -952,8 +952,10 @@ ipcMain.handle('library:save', async (_event, roots: string[], meta: LibraryMeta
   await saveLibraryMeta(assertAllowedPaths(roots), meta);
 });
 
-ipcMain.handle('library:health', async (_event, roots: string[]) => {
-  return await scanLibraryHealth(assertAllowedPaths(roots));
+ipcMain.handle('library:health', async (_event, roots: string[], options?: { deep?: boolean }) => {
+  // `deep` is read as a plain boolean rather than passed through, so nothing
+  // the renderer sends can reach sharp or libheif as anything but a flag.
+  return await scanLibraryHealth(assertAllowedPaths(roots), { deep: options?.deep === true });
 });
 
 ipcMain.handle('library:health:repair', async (_event, roots: string[], action: 'remove-orphans' | 'quarantine-corrupt', paths: string[] = []) => {

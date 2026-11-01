@@ -20,7 +20,7 @@ contextBridge.exposeInMainWorld('api', {
   moveFile: (path: string, destDir: string) => ipcRenderer.invoke('file:move', path, destDir),
   libraryLoad: (roots: string[]) => ipcRenderer.invoke('library:load', roots),
   librarySave: (roots: string[], meta: unknown) => ipcRenderer.invoke('library:save', roots, meta),
-  scanLibraryHealth: (roots: string[]) => ipcRenderer.invoke('library:health', roots),
+  scanLibraryHealth: (roots: string[], options?: { deep?: boolean }) => ipcRenderer.invoke('library:health', roots, options),
   repairLibraryHealth: (roots: string[], action: 'remove-orphans' | 'quarantine-corrupt', paths?: string[]) => ipcRenderer.invoke('library:health:repair', roots, action, paths),
   exportLibraryHealth: (report: unknown) => ipcRenderer.invoke('library:health:export', report),
   listQuarantine: (roots: string[]) => ipcRenderer.invoke('quarantine:list', roots),

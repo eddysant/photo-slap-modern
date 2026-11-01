@@ -233,6 +233,7 @@ let cdp = null;
 let brokenFixture = null;
 let shuffleFixture = null;
 let sidecarFixture = null;
+let deepFixture = null;
 try {
     const page = await waitForPage();
     cdp = await connect(page);
@@ -1079,6 +1080,85 @@ try {
         check('and the favorite pressed while in memory is in it',
             written.includes('m1.jpg'), written.slice(0, 200));
     }
+    // ---------------------------------------------------------------
+    // Fifth launch: the deep health scan. The shallow scan reads headers,
+    // and a header is not evidence — so the fixture is a photo with 60% of
+    // its scan data cut off, which reports its full dimensions and looks
+    // perfectly healthy until something actually decodes it. A unit test can
+    // call the scanner directly; only this can show the flag surviving the
+    // checkbox, the preload bridge and the IPC boundary.
+    // ---------------------------------------------------------------
+    await shutdownApp(child);
+    deepFixture = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-slap-e2e-deep-'));
+    const bigPhoto = await sharp({ create: { width: 1600, height: 1200, channels: 3, background: '#b43f2a' } })
+        .jpeg({ quality: 92 }).toBuffer();
+    await fs.writeFile(path.join(deepFixture, 'healthy.jpg'), bigPhoto);
+    await fs.writeFile(path.join(deepFixture, 'truncated.jpg'), bigPhoto.subarray(0, Math.floor(bigPhoto.length * 0.4)));
+    await fs.writeFile(cfg, JSON.stringify({
+        transitionStyle: 'fade', isShuffle: false, mediaFilter: 'both', sortOrder: 'name',
+        isKenBurns: false, isExifEnabled: false, isSmart: false, slideDuration: 600000,
+    }));
+    child = launchApp(deepFixture);
+    cdp = await attach();
+
+    let deepShow = '';
+    for (let i = 0; i < 40; i++) {
+        deepShow = await cdp.evaluate(`document.querySelector('.file-info')?.textContent ?? ''`);
+        if (deepShow.includes('/ 2')) break;
+        await sleep(500);
+    }
+    check('relaunched into a library holding one truncated photo', deepShow.includes('/ 2'), deepShow);
+
+    // Through the real preload bridge and the real IPC handler, both ways.
+    const scans = JSON.parse(await cdp.evaluate(`(async () => {
+        const roots = [${JSON.stringify(deepFixture)}];
+        const shallow = await window.api.scanLibraryHealth(roots);
+        const deep = await window.api.scanLibraryHealth(roots, { deep: true });
+        const names = r => r.issues.filter(i => i.category === 'corrupt').map(i => i.path).sort();
+        return JSON.stringify({
+            shallowDeep: shallow.deep, deepDeep: deep.deep,
+            shallowCorrupt: names(shallow), deepCorrupt: names(deep),
+        });
+    })()`));
+    check('the shallow scan sees nothing wrong with the truncated photo',
+        scans.shallowDeep === false && scans.shallowCorrupt.length === 0, JSON.stringify(scans));
+    check('the deep scan finds it, and the flag survives the IPC round trip',
+        scans.deepDeep === true
+        && scans.deepCorrupt.map(p => path.basename(p)).join(',') === 'truncated.jpg', JSON.stringify(scans));
+
+    // And the checkbox a person would actually click.
+    const viaUi = await cdp.evaluate(`(async () => {
+        document.querySelector('button[title="Settings"]')?.click();
+        await new Promise(r => setTimeout(r, 800));
+        const open = [...document.querySelectorAll('.settings-menu button')]
+            .find(b => b.textContent.includes('Library Health'));
+        if (!open) return 'no Library Health button in the options panel';
+        open.click();
+        for (let i = 0; i < 40 && !document.querySelector('.health-scan-note'); i++) {
+            await new Promise(r => setTimeout(r, 500));
+        }
+        const box = document.querySelector('.health-deep-toggle input');
+        if (!box) return 'no deep scan control in the health panel';
+        const before = document.querySelector('.health-scan-note').textContent;
+        box.click();
+        for (let i = 0; i < 60; i++) {
+            await new Promise(r => setTimeout(r, 500));
+            const note = document.querySelector('.health-scan-note');
+            if (note && note.textContent.includes('every photo was decoded')) {
+                const corrupt = [...document.querySelectorAll('.health-issue .health-badge')]
+                    .filter(b => b.textContent.includes('Corrupt')).length;
+                return JSON.stringify({ before: before.includes('Headers and structure only'), corrupt });
+            }
+        }
+        return 'the panel never reported a deep scan';
+    })()`);
+    let ui = null;
+    try { ui = JSON.parse(viaUi); } catch { /* left null, reported below */ }
+    check('ticking the deep scan box re-runs the scan as a deep one',
+        ui !== null && ui.before === true, viaUi);
+    check('and the panel then lists the photo the shallow scan missed',
+        ui !== null && ui.corrupt >= 1, viaUi);
+
 } catch (e) {
     failures++;
     console.error('✗ E2E aborted:', e.message);
@@ -1092,6 +1172,7 @@ try {
     if (brokenFixture) await fs.rm(brokenFixture, { recursive: true, force: true });
     if (shuffleFixture) await fs.rm(shuffleFixture, { recursive: true, force: true });
     if (sidecarFixture) await fs.rm(sidecarFixture, { recursive: true, force: true });
+    if (deepFixture) await fs.rm(deepFixture, { recursive: true, force: true });
 }
 
 console.log(failures === 0 ? '\nE2E: all checks passed' : `\nE2E: ${failures} check(s) FAILED`);

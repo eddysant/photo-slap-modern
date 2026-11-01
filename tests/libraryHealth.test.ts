@@ -6,6 +6,7 @@ import sharp from 'sharp';
 import {
     healthReportToCsv, listQuarantinedFiles, permanentlyDeleteQuarantinedFiles,
     quarantineCorruptFiles, quarantineEntriesToCsv, restoreQuarantinedFiles, scanLibraryHealth,
+    type LibraryHealthReport,
 } from '../electron/libraryHealth';
 import { SIDECAR_NAME } from '../electron/libraryMeta';
 import { heicFile, mdat } from './heifFixture';
@@ -91,7 +92,7 @@ describe('library health scan', () => {
 
     it('exports a CSV with safely quoted cells', () => {
         const csv = healthReportToCsv({
-            roots: ['/lib'], scannedFiles: 1,
+            roots: ['/lib'], scannedFiles: 1, deep: false,
             issues: [{ category: 'corrupt', path: '/lib/a,b.jpg', detail: 'Could not read "header"' }],
             summary: { corrupt: 1, tiny: 0, unsupported: 0, 'missing-date': 0, 'orphan-sidecar': 0 },
         });
@@ -161,5 +162,77 @@ describe('HEIC health without a decode', () => {
         await place('garbage.heic', Buffer.from('this is not a photo'));
         const report = await scanLibraryHealth([root]);
         expect(report.issues.some(i => i.category === 'corrupt' && i.path.endsWith('garbage.heic'))).toBe(true);
+    });
+});
+
+/**
+ * The deep scan decodes pixels instead of trusting headers. The two cases
+ * below are the reason it exists, and both were verified against real files
+ * before being written as tests: `sharp().metadata()` reports correct
+ * dimensions for a JPEG missing more than half its scan data, and the box
+ * reader calls a HEIC with a scribbled `mdat` intact.
+ */
+describe('deep library health scan', () => {
+    let root: string;
+
+    beforeEach(async () => {
+        root = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-slap-deep-'));
+    });
+
+    afterEach(async () => {
+        await fs.rm(root, { recursive: true, force: true });
+    });
+
+    const corruptPaths = (report: LibraryHealthReport) =>
+        report.issues.filter(i => i.category === 'corrupt').map(i => path.basename(i.path));
+
+    /** Large enough that the 320px / 10KB "tiny" rule cannot be what fires. */
+    const photo = () => sharp({ create: { width: 1600, height: 1200, channels: 3, background: '#b43f2a' } })
+        .jpeg({ quality: 92 }).toBuffer();
+
+    it('says which kind of scan produced the report', async () => {
+        expect((await scanLibraryHealth([root])).deep).toBe(false);
+        expect((await scanLibraryHealth([root], { deep: true })).deep).toBe(true);
+    });
+
+    it('catches a truncated photo that the header check passes', async () => {
+        const whole = await photo();
+        await fs.writeFile(path.join(root, 'cut.jpg'), whole.subarray(0, Math.floor(whole.length * 0.4)));
+
+        // The shallow scan reads 1600x1200 out of the surviving header and
+        // finds nothing wrong at all.
+        expect(corruptPaths(await scanLibraryHealth([root]))).toEqual([]);
+
+        const deep = await scanLibraryHealth([root], { deep: true });
+        expect(corruptPaths(deep)).toEqual(['cut.jpg']);
+        expect(deep.issues.find(i => i.category === 'corrupt')?.detail).toContain('header reads correctly');
+    });
+
+    it('catches a HEIC whose boxes are intact and whose pixels are not', async () => {
+        // heifFixture builds a valid box tree over deliberately meaningless
+        // payload bytes — exactly the gap the structural check cannot see.
+        await fs.writeFile(path.join(root, 'rotten.heic'), heicFile({ data: mdat(32 * 1024) }));
+
+        expect(corruptPaths(await scanLibraryHealth([root]))).toEqual([]);
+        expect(corruptPaths(await scanLibraryHealth([root], { deep: true }))).toEqual(['rotten.heic']);
+    });
+
+    it('does not accuse a healthy photo', async () => {
+        await fs.writeFile(path.join(root, 'fine.jpg'), await photo());
+        const deep = await scanLibraryHealth([root], { deep: true });
+        expect(corruptPaths(deep)).toEqual([]);
+        expect(deep.scannedFiles).toBe(1);
+    });
+
+    /**
+     * A structurally broken HEIC should keep the specific diagnosis the box
+     * reader gave it, not be flattened into the generic decode failure — the
+     * truncation message is the one that tells the user what happened.
+     */
+    it('keeps the structural diagnosis when a deep scan is asked for', async () => {
+        const whole = heicFile({ data: mdat(32 * 1024) });
+        await fs.writeFile(path.join(root, 'short.heic'), whole.subarray(0, whole.length - 512));
+        const deep = await scanLibraryHealth([root], { deep: true });
+        expect(deep.issues.find(i => i.category === 'corrupt')?.detail).toContain('truncated');
     });
 });

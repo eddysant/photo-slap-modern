@@ -17,9 +17,19 @@ export interface LibraryHealthIssue {
     detail: string;
 }
 
+export interface LibraryHealthOptions {
+    /**
+     * Decode every photo's pixels rather than trusting its header. Slow by
+     * design — see `decodePixels` for what it buys.
+     */
+    deep?: boolean;
+}
+
 export interface LibraryHealthReport {
     roots: string[];
     scannedFiles: number;
+    /** Whether a deep scan produced this report; reports are not comparable across the two. */
+    deep: boolean;
     issues: LibraryHealthIssue[];
     summary: Record<LibraryHealthCategory, number>;
 }
@@ -98,7 +108,42 @@ function validVideoHeader(ext: string, header: Buffer): boolean {
     return false;
 }
 
-async function inspectMediaFile(file: { path: string; type: 'image' | 'video' }): Promise<LibraryHealthIssue[]> {
+/**
+ * Forces a real decode of every byte of pixel data, which is the only thing
+ * that can see rot behind a valid header.
+ *
+ * The shallow scan reads headers, and a header is not evidence about the
+ * image: `sharp().metadata()` reports 2000x1500 for a JPEG with 60% of its
+ * scan data missing, and `heifStructure` reports a HEIC with a scribbled
+ * `mdat` as intact. Both measured. Decoding catches those — of four
+ * byte-level corruptions injected into a real HEIC's payload, libde265
+ * rejected three.
+ *
+ * It is still not a proof of health: the fourth (twenty bytes near the end
+ * of the payload) decoded without complaint, and a JPEG with 400 scribbled
+ * bytes mid-scan decoded too. There is no cheap check that is also total,
+ * which is why this is a deliberate choice and not the default.
+ *
+ * The resize is what keeps it affordable in memory: libvips reads
+ * sequentially and never holds the full-resolution bitmap, so a 48MP photo
+ * does not cost 200MB to verify. sharp's default `failOn: 'warning'` is what
+ * turns libjpeg's complaints into a thrown error rather than a shrug.
+ */
+async function decodePixels(filePath: string, isHeif: boolean): Promise<boolean> {
+    try {
+        if (isHeif) {
+            const decodeHeic = await loadHeicDecoder();
+            await decodeHeic({ buffer: await fs.readFile(filePath) });
+        } else {
+            await sharp(filePath, { animated: true }).resize({ width: 1 }).toBuffer();
+        }
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+async function inspectMediaFile(file: { path: string; type: 'image' | 'video' }, deep: boolean): Promise<LibraryHealthIssue[]> {
     const issues: LibraryHealthIssue[] = [];
     const ext = path.extname(file.path).toLowerCase();
     let stat;
@@ -159,6 +204,16 @@ async function inspectMediaFile(file: { path: string; type: 'image' | 'video' })
         }
     }
 
+    // A HEIC whose boxes answered for it, or any other image whose header
+    // did, has not actually been decoded yet. Only a deep scan pays for that.
+    if (deep && !await decodePixels(file.path, isHeif)) {
+        return [{
+            category: 'corrupt',
+            path: file.path,
+            detail: 'The header reads correctly but the image data could not be decoded.',
+        }];
+    }
+
     if (stat.size < 10 * 1024 || width < 320 || height < 320) {
         issues.push({
             category: 'tiny',
@@ -177,7 +232,8 @@ async function inspectMediaFile(file: { path: string; type: 'image' | 'video' })
     return issues;
 }
 
-export async function scanLibraryHealth(roots: string[]): Promise<LibraryHealthReport> {
+export async function scanLibraryHealth(roots: string[], options: LibraryHealthOptions = {}): Promise<LibraryHealthReport> {
+    const deep = options.deep === true;
     const normalizedRoots = [...new Set(roots.map(root => path.resolve(root)))];
     const supported = [] as { path: string; type: 'image' | 'video' }[];
     const issues: LibraryHealthIssue[] = [];
@@ -200,7 +256,7 @@ export async function scanLibraryHealth(roots: string[]): Promise<LibraryHealthR
     const inspectWorker = async () => {
         while (next < supported.length) {
             const file = supported[next++];
-            issues.push(...await inspectMediaFile(file));
+            issues.push(...await inspectMediaFile(file, deep));
         }
     };
     await Promise.all(Array.from({ length: Math.min(8, Math.max(1, supported.length)) }, inspectWorker));
@@ -223,7 +279,7 @@ export async function scanLibraryHealth(roots: string[]): Promise<LibraryHealthR
     issues.sort((a, b) => a.category.localeCompare(b.category) || a.path.localeCompare(b.path));
     const summary = emptySummary();
     for (const issue of issues) summary[issue.category]++;
-    return { roots: normalizedRoots, scannedFiles: supported.length, issues, summary };
+    return { roots: normalizedRoots, scannedFiles: supported.length, deep, issues, summary };
 }
 
 const toPortableRelative = (relativePath: string) => relativePath.split(path.sep).join('/');

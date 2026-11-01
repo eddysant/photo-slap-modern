@@ -28,6 +28,10 @@ export function LibraryHealthModal({ isOpen, roots, onClose, onReport, onFilesMo
     const [isRepairing, setIsRepairing] = useState(false);
     const [notice, setNotice] = useState<string | null>(null);
     const [showQuarantine, setShowQuarantine] = useState(false);
+    // Session-only on purpose: a deep scan is a decision about this scan, and
+    // reopening the panel should not silently commit the user to minutes of
+    // decoding they asked for once.
+    const [deep, setDeep] = useState(false);
 
     useEffect(() => { if (!isOpen) setShowQuarantine(false); }, [isOpen]);
 
@@ -38,7 +42,7 @@ export function LibraryHealthModal({ isOpen, roots, onClose, onReport, onFilesMo
         setError(null);
         setNotice(null);
         setActiveCategory('all');
-        window.api.scanLibraryHealth(roots)
+        window.api.scanLibraryHealth(roots, { deep })
             .then(result => {
                 if (!cancelled) {
                     setReport(result);
@@ -47,7 +51,7 @@ export function LibraryHealthModal({ isOpen, roots, onClose, onReport, onFilesMo
             })
             .catch(() => { if (!cancelled) setError('The library health scan could not be completed.'); });
         return () => { cancelled = true; };
-    }, [isOpen, roots, scanRevision, onReport]);
+    }, [isOpen, roots, scanRevision, deep, onReport]);
 
     const repair = async (action: LibraryHealthRepairAction) => {
         if (!report) return;
@@ -107,7 +111,12 @@ export function LibraryHealthModal({ isOpen, roots, onClose, onReport, onFilesMo
                     />
                 ) : (
                     <>
-                {!report && !error && <div className="health-loading"><div className="loading-spinner" /><p>Inspecting media and sidecars…</p></div>}
+                {!report && !error && (
+                    <div className="health-loading">
+                        <div className="loading-spinner" />
+                        <p>{deep ? 'Decoding every photo — this takes a while…' : 'Inspecting media and sidecars…'}</p>
+                    </div>
+                )}
                 {error && <div className="health-loading"><p>{error}</p></div>}
                 {report && (
                     <>
@@ -119,7 +128,29 @@ export function LibraryHealthModal({ isOpen, roots, onClose, onReport, onFilesMo
                                 </button>
                             ))}
                         </div>
-                        <div className="health-scan-note">Scanned {report.scannedFiles} supported media file{report.scannedFiles === 1 ? '' : 's'} in {report.roots.length} root{report.roots.length === 1 ? '' : 's'}.</div>
+                        <div className="health-scan-note">
+                            Scanned {report.scannedFiles} supported media file{report.scannedFiles === 1 ? '' : 's'} in {report.roots.length} root{report.roots.length === 1 ? '' : 's'}.
+                            {' '}
+                            {report.deep
+                                ? 'Deep scan: every photo was decoded.'
+                                : 'Headers and structure only — a deep scan also decodes every photo.'}
+                        </div>
+                        <label className="health-deep-toggle">
+                            <input
+                                type="checkbox"
+                                checked={deep}
+                                disabled={isRepairing}
+                                onChange={event => setDeep(event.target.checked)}
+                            />
+                            <span>
+                                <strong>Deep scan</strong>
+                                <small>
+                                    Decodes every photo instead of reading its header. Finds damage a
+                                    valid header hides, and takes minutes rather than seconds on a
+                                    large library.
+                                </small>
+                            </span>
+                        </label>
                         <div className="health-actions">
                             <button className="retro-button compact" disabled={isRepairing || report.summary.corrupt === 0} onClick={() => repair('quarantine-corrupt')}>
                                 <FiArchive /> Move corrupt aside
