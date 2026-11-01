@@ -8,6 +8,7 @@ import {
     quarantineCorruptFiles, quarantineEntriesToCsv, restoreQuarantinedFiles, scanLibraryHealth,
 } from '../electron/libraryHealth';
 import { SIDECAR_NAME } from '../electron/libraryMeta';
+import { heicFile, mdat } from './heifFixture';
 
 describe('library health scan', () => {
     let root: string;
@@ -106,5 +107,59 @@ describe('library health scan', () => {
         expect(csv).toContain('"original_path","quarantine_path","size_bytes","quarantined_at"');
         expect(csv).toContain('"/lib/a,b.jpg"');
         expect(csv).toContain('"42"');
+    });
+});
+
+/**
+ * The scan used to run the WASM HEVC decoder over every HEIC in the library
+ * purely to learn its dimensions — 1020ms a photo, half an hour on a 2,000
+ * photo library. It reads the box tree instead. These fixtures are
+ * structurally valid HEIFs whose pixel data is deliberately nonsense, so the
+ * decoder would reject all of them: the verdicts below are only reachable
+ * without one.
+ */
+describe('HEIC health without a decode', () => {
+    let root: string;
+
+    beforeEach(async () => {
+        root = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-slap-heic-health-'));
+    });
+
+    afterEach(async () => {
+        await fs.rm(root, { recursive: true, force: true });
+    });
+
+    const place = async (name: string, bytes: Buffer) => {
+        await fs.writeFile(path.join(root, name), bytes);
+    };
+
+    it('passes a well-formed HEIC without decoding its pixels', async () => {
+        // Big enough to clear the 10 KB floor too, so the only thing the
+        // assertions below can be reacting to is the dimensions.
+        await place('photo.heic', heicFile({ data: mdat(32 * 1024) }));
+        const report = await scanLibraryHealth([root]);
+        expect(report.scannedFiles).toBe(1);
+        expect(report.summary.corrupt).toBe(0);
+        // Read from `ispe`: a thumbnail-sized answer would have landed here.
+        expect(report.summary.tiny).toBe(0);
+    });
+
+    it('reports a truncated HEIC as corrupt, and says why', async () => {
+        const whole = heicFile({ data: mdat(32 * 1024) });
+        await place('cut.heic', whole.subarray(0, whole.length - 512));
+        const report = await scanLibraryHealth([root]);
+        const issue = report.issues.find(i => i.category === 'corrupt');
+        expect(issue?.path.endsWith('cut.heic')).toBe(true);
+        expect(issue?.detail).toContain('truncated');
+    });
+
+    /**
+     * A .heic that is not HEIF at all is not something the box reader may
+     * judge, so the decoder still has the last word on it.
+     */
+    it('still falls back to the decoder for a file it cannot parse', async () => {
+        await place('garbage.heic', Buffer.from('this is not a photo'));
+        const report = await scanLibraryHealth([root]);
+        expect(report.issues.some(i => i.category === 'corrupt' && i.path.endsWith('garbage.heic'))).toBe(true);
     });
 });

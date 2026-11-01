@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import glob from 'fast-glob';
 import sharp from 'sharp';
+import { inspectHeifStructure } from './heifStructure';
 import { loadHeicDecoder } from './lazyDeps';
 import ExifReader from 'exifreader';
 import { loadLibraryMeta } from './libraryMeta';
@@ -119,23 +120,43 @@ async function inspectMediaFile(file: { path: string; type: 'image' | 'video' })
         return issues;
     }
 
+    const isHeif = ext === '.heic' || ext === '.heif';
     let width = 0;
     let height = 0;
-    try {
-        if (ext === '.heic' || ext === '.heif') {
-            const decodeHeic = await loadHeicDecoder();
-            const decoded = await decodeHeic({ buffer: await fs.readFile(file.path) });
-            width = decoded.width;
-            height = decoded.height;
-        } else {
-            const metadata = await sharp(file.path, { animated: true }).metadata();
-            width = metadata.width ?? 0;
-            height = metadata.height ?? 0;
+
+    if (isHeif) {
+        // Reading the box tree beats decoding by ~60x a photo and still
+        // catches the way a HEIC in someone's library actually goes bad; see
+        // heifStructure.ts for what that does and does not promise. Anything
+        // it cannot vouch for falls through to the decode below, which stays
+        // the authority.
+        const structure = await inspectHeifStructure(file.path, stat.size);
+        if (structure.kind === 'damaged') {
+            return [{ category: 'corrupt', path: file.path, detail: structure.detail }];
         }
-        if (!width || !height) throw new Error('No dimensions');
-    } catch {
-        issues.push({ category: 'corrupt', path: file.path, detail: 'The image could not be decoded.' });
-        return issues;
+        if (structure.kind === 'intact') {
+            width = structure.width;
+            height = structure.height;
+        }
+    }
+
+    if (!width || !height) {
+        try {
+            if (isHeif) {
+                const decodeHeic = await loadHeicDecoder();
+                const decoded = await decodeHeic({ buffer: await fs.readFile(file.path) });
+                width = decoded.width;
+                height = decoded.height;
+            } else {
+                const metadata = await sharp(file.path, { animated: true }).metadata();
+                width = metadata.width ?? 0;
+                height = metadata.height ?? 0;
+            }
+            if (!width || !height) throw new Error('No dimensions');
+        } catch {
+            issues.push({ category: 'corrupt', path: file.path, detail: 'The image could not be decoded.' });
+            return issues;
+        }
     }
 
     if (stat.size < 10 * 1024 || width < 320 || height < 320) {
