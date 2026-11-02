@@ -38,7 +38,7 @@ describe('grid metadata filters', () => {
 
     it('indexes multiple health findings per file without duplicates', () => {
         const report: LibraryHealthReport = {
-            roots: ['/lib'], scannedFiles: 1, deep: false,
+            roots: ['/lib'], scannedFiles: 1, deep: false, cancelled: false,
             issues: [
                 { category: 'tiny', path: '/lib/a.jpg', detail: 'tiny' },
                 { category: 'missing-date', path: '/lib/a.jpg', detail: 'undated' },

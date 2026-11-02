@@ -32,25 +32,32 @@ export function LibraryHealthModal({ isOpen, roots, onClose, onReport, onFilesMo
     // reopening the panel should not silently commit the user to minutes of
     // decoding they asked for once.
     const [deep, setDeep] = useState(false);
+    const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
 
     useEffect(() => { if (!isOpen) setShowQuarantine(false); }, [isOpen]);
 
     useEffect(() => {
         if (!isOpen || roots.length === 0) return;
-        let cancelled = false;
+        let dropped = false;
         setReport(null);
         setError(null);
         setNotice(null);
+        setProgress(null);
         setActiveCategory('all');
+        const stopListening = window.api.onHealthProgress(p => { if (!dropped) setProgress(p); });
         window.api.scanLibraryHealth(roots, { deep })
             .then(result => {
-                if (!cancelled) {
-                    setReport(result);
-                    onReport(result);
-                }
+                if (dropped) return;
+                setReport(result);
+                // A cancelled scan is partial by definition. It is shown
+                // here, clearly labelled, but not handed to App: the grid's
+                // health filters would present "no issues" for files nothing
+                // ever looked at.
+                if (!result.cancelled) onReport(result);
             })
-            .catch(() => { if (!cancelled) setError('The library health scan could not be completed.'); });
-        return () => { cancelled = true; };
+            .catch(() => { if (!dropped) setError('The library health scan could not be completed.'); })
+            .finally(() => { if (!dropped) setProgress(null); });
+        return () => { dropped = true; stopListening(); };
     }, [isOpen, roots, scanRevision, deep, onReport]);
 
     const repair = async (action: LibraryHealthRepairAction) => {
@@ -115,6 +122,18 @@ export function LibraryHealthModal({ isOpen, roots, onClose, onReport, onFilesMo
                     <div className="health-loading">
                         <div className="loading-spinner" />
                         <p>{deep ? 'Decoding every photo — this takes a while…' : 'Inspecting media and sidecars…'}</p>
+                        {progress && progress.total > 0 && (
+                            <>
+                                <div className="health-progress" role="progressbar"
+                                    aria-valuenow={progress.done} aria-valuemin={0} aria-valuemax={progress.total}>
+                                    <span style={{ width: `${Math.round((progress.done / progress.total) * 100)}%` }} />
+                                </div>
+                                <small>{progress.done} of {progress.total} files</small>
+                            </>
+                        )}
+                        <button className="retro-button compact" onClick={() => void window.api.cancelLibraryHealth()}>
+                            Stop scanning
+                        </button>
                     </div>
                 )}
                 {error && <div className="health-loading"><p>{error}</p></div>}
@@ -128,12 +147,14 @@ export function LibraryHealthModal({ isOpen, roots, onClose, onReport, onFilesMo
                                 </button>
                             ))}
                         </div>
-                        <div className="health-scan-note">
+                        <div className={`health-scan-note${report.cancelled ? ' cancelled' : ''}`}>
+                            {report.cancelled ? 'Stopped early. ' : ''}
                             Scanned {report.scannedFiles} supported media file{report.scannedFiles === 1 ? '' : 's'} in {report.roots.length} root{report.roots.length === 1 ? '' : 's'}.
                             {' '}
                             {report.deep
                                 ? 'Deep scan: every photo was decoded.'
                                 : 'Headers and structure only — a deep scan also decodes every photo.'}
+                            {report.cancelled && ' Anything not reached was not checked, and sidecar entries were not examined at all.'}
                         </div>
                         <label className="health-deep-toggle">
                             <input

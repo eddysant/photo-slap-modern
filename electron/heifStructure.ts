@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { INVALID_HEADER, parseBoxHeader, SHORT_HEADER } from './isoBmff';
 
 /**
  * A HEIC health check that does not decode the image.
@@ -72,32 +73,30 @@ function walkBoxes(buf: Buffer, start: number, limit: number): BoxWalk {
         // A box with fewer than 8 bytes left for its header is a short file,
         // not an unparseable one: the previous box's size pointed here.
         if (offset + 8 > limit) return { boxes, truncated: true, unreadable: false };
-        if (offset + 8 > buf.length) return { boxes, truncated: false, unreadable: true };
 
-        let size = buf.readUInt32BE(offset);
-        const type = buf.toString('latin1', offset + 4, offset + 8);
-        let payloadStart = offset + 8;
+        const header = parseBoxHeader(buf, offset);
+        if (header === SHORT_HEADER || header === INVALID_HEADER) {
+            return { boxes, truncated: false, unreadable: true };
+        }
 
-        if (size === 1) {
-            // 64-bit size, in the eight bytes after the type.
-            if (payloadStart + 8 > buf.length) return { boxes, truncated: false, unreadable: true };
-            const large = buf.readBigUInt64BE(payloadStart);
-            if (large > BigInt(Number.MAX_SAFE_INTEGER)) return { boxes, truncated: false, unreadable: true };
-            size = Number(large);
-            payloadStart += 8;
-        } else if (size === 0) {
+        const payloadStart = offset + header.headerSize;
+        if (header.declaredSize === null) {
             // "To the end of the file", which only the last box may claim.
-            boxes.push({ type, payloadStart, end: limit });
+            boxes.push({ type: header.type, payloadStart, end: limit });
             return { boxes, truncated: false, unreadable: false };
         }
 
-        const end = offset + size;
-        if (end <= payloadStart) return { boxes, truncated: false, unreadable: true };
+        const end = offset + header.declaredSize;
+        // `end === payloadStart` is an empty box, which is legal — a `free`
+        // of exactly 8 bytes is how padding is written. Only a box ending
+        // before its own header is nonsense. (The walk still advances by at
+        // least the 8-byte header, so an empty box cannot loop.)
+        if (end < payloadStart) return { boxes, truncated: false, unreadable: true };
         if (end > limit) {
-            boxes.push({ type, payloadStart, end });
+            boxes.push({ type: header.type, payloadStart, end });
             return { boxes, truncated: true, unreadable: false };
         }
-        boxes.push({ type, payloadStart, end });
+        boxes.push({ type: header.type, payloadStart, end });
         offset = end;
     }
     return { boxes, truncated: false, unreadable: false };

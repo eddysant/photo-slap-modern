@@ -21,6 +21,12 @@ contextBridge.exposeInMainWorld('api', {
   libraryLoad: (roots: string[]) => ipcRenderer.invoke('library:load', roots),
   librarySave: (roots: string[], meta: unknown) => ipcRenderer.invoke('library:save', roots, meta),
   scanLibraryHealth: (roots: string[], options?: { deep?: boolean }) => ipcRenderer.invoke('library:health', roots, options),
+  cancelLibraryHealth: () => ipcRenderer.invoke('library:health:cancel'),
+  onHealthProgress: (cb: (p: { done: number; total: number }) => void) => {
+    const listener = (_e: unknown, p: { done: number; total: number }) => cb(p);
+    ipcRenderer.on('library:health:progress', listener);
+    return () => { ipcRenderer.removeListener('library:health:progress', listener); };
+  },
   repairLibraryHealth: (roots: string[], action: 'remove-orphans' | 'quarantine-corrupt', paths?: string[]) => ipcRenderer.invoke('library:health:repair', roots, action, paths),
   exportLibraryHealth: (report: unknown) => ipcRenderer.invoke('library:health:export', report),
   listQuarantine: (roots: string[]) => ipcRenderer.invoke('quarantine:list', roots),

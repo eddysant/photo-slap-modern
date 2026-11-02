@@ -55,6 +55,7 @@ interface LibraryHealthReport {
     roots: string[];
     scannedFiles: number;
     deep: boolean;
+    cancelled: boolean;
     issues: LibraryHealthIssue[];
     summary: Record<LibraryHealthCategory, number>;
 }
@@ -97,6 +98,8 @@ interface Window {
         libraryLoad: (roots: string[]) => Promise<LibraryMeta>;
         librarySave: (roots: string[], meta: LibraryMeta) => Promise<void>;
         scanLibraryHealth: (roots: string[], options?: { deep?: boolean }) => Promise<LibraryHealthReport>;
+        cancelLibraryHealth: () => Promise<void>;
+        onHealthProgress: (cb: (p: { done: number; total: number }) => void) => () => void;
         repairLibraryHealth: (
             roots: string[],
             action: 'remove-orphans' | 'quarantine-corrupt',

@@ -1282,6 +1282,11 @@
 .health-summary strong { font-size: 1.15rem; color: #fff; }
 .health-summary span { font-size: 0.5rem; line-height: 1.35; }
 .health-scan-note { padding: 9px 16px; color: #777; border-bottom: 1px solid #333; font-size: 0.58rem; }
+.health-progress { width: min(360px, 70%); height: 10px; margin: 14px auto 6px; background: #1b1b1b; border: 2px solid #333; }
+.health-progress span { display: block; height: 100%; background: #ff4fa3; transition: width 160ms linear; }
+.health-loading small { color: #777; font-size: 0.55rem; }
+.health-loading .retro-button { width: auto; margin-top: 14px; min-height: 36px; }
+.health-scan-note.cancelled { color: #e8b84b; border-bottom-color: #6b5a22; }
 .health-deep-toggle { display: flex; align-items: flex-start; gap: 10px; padding: 11px 16px; border-bottom: 1px solid #333; cursor: pointer; }
 .health-deep-toggle input { margin-top: 2px; accent-color: #ff4fa3; flex-shrink: 0; }
 .health-deep-toggle span { display: flex; flex-direction: column; gap: 4px; }

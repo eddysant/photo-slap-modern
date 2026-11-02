@@ -22,7 +22,7 @@ import {
 } from './pathAccess'
 import { sanitizeUploadName, findFreeUploadPath } from './guestUpload'
 import { createConcurrencyLimit } from './concurrencyLimit'
-import { loadHeicDecoder } from './lazyDeps'
+import { decodeHeicImage } from './lazyDeps'
 import ExifReader from 'exifreader';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -187,8 +187,7 @@ async function deriveImage(filePath: string, maxDim: number | null): Promise<{ b
     if (isHeic(filePath)) {
       // heic-decode (WASM libheif) does the HEVC decode — prebuilt sharp
       // binaries can't, HEVC being patent-encumbered
-      const decodeHeic = await loadHeicDecoder();
-      const { width, height, data } = await decodeHeic({ buffer: await fs.readFile(filePath) });
+      const { width, height, data } = await decodeHeicImage(await fs.readFile(filePath));
       // `Buffer.from(typedArray)` copies: a second full-size RGBA buffer —
       // 48MB for a 12MP photo — on top of the one libheif just handed over.
       // A view over the same bytes costs nothing.
@@ -986,10 +985,29 @@ ipcMain.handle('library:save', async (_event, roots: string[], meta: LibraryMeta
   await saveLibraryMeta(assertAllowedPaths(roots), meta);
 });
 
+/**
+ * A cancel is matched to the scan it was meant for.
+ *
+ * A bare boolean would let a cancel arriving just as one scan finished abort
+ * the next one — and since a repair kicks off a fresh scan, that is a
+ * sequence the health panel produces on its own.
+ */
+let healthScanGeneration = 0;
+let cancelledScanGeneration = -1;
+
+ipcMain.handle('library:health:cancel', () => {
+  cancelledScanGeneration = healthScanGeneration;
+});
+
 ipcMain.handle('library:health', async (_event, roots: string[], options?: { deep?: boolean }) => {
   // `deep` is read as a plain boolean rather than passed through, so nothing
   // the renderer sends can reach sharp or libheif as anything but a flag.
-  return await scanLibraryHealth(assertAllowedPaths(roots), { deep: options?.deep === true });
+  const generation = ++healthScanGeneration;
+  return await scanLibraryHealth(assertAllowedPaths(roots), {
+    deep: options?.deep === true,
+    isCancelled: () => cancelledScanGeneration === generation,
+    onProgress: (done, total) => win?.webContents.send('library:health:progress', { done, total }),
+  });
 });
 
 ipcMain.handle('library:health:repair', async (_event, roots: string[], action: 'remove-orphans' | 'quarantine-corrupt', paths: string[] = []) => {

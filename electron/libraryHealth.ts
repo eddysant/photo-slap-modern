@@ -3,7 +3,8 @@ import path from 'node:path';
 import glob from 'fast-glob';
 import sharp from 'sharp';
 import { inspectHeifStructure } from './heifStructure';
-import { loadHeicDecoder } from './lazyDeps';
+import { inspectVideoStructure } from './videoStructure';
+import { decodeHeicImage } from './lazyDeps';
 import ExifReader from 'exifreader';
 import { loadLibraryMeta } from './libraryMeta';
 import { isWithin } from './pathAccess';
@@ -23,6 +24,18 @@ export interface LibraryHealthOptions {
      * design — see `decodePixels` for what it buys.
      */
     deep?: boolean;
+    /**
+     * Called as files are inspected, throttled. A deep scan of a real
+     * library runs for minutes, and a spinner that says nothing for that
+     * long is indistinguishable from a hang.
+     */
+    onProgress?: (done: number, total: number) => void;
+    /**
+     * Asked between files. A scan the user has decided against should stop
+     * costing them, and the one that can run for half an hour is exactly the
+     * one they will change their mind about.
+     */
+    isCancelled?: () => boolean;
 }
 
 export interface LibraryHealthReport {
@@ -30,6 +43,8 @@ export interface LibraryHealthReport {
     scannedFiles: number;
     /** Whether a deep scan produced this report; reports are not comparable across the two. */
     deep: boolean;
+    /** Set when the user stopped the scan: the issues below are whatever had been found. */
+    cancelled: boolean;
     issues: LibraryHealthIssue[];
     summary: Record<LibraryHealthCategory, number>;
 }
@@ -76,6 +91,18 @@ const UNSUPPORTED_MEDIA_EXTENSIONS = new Set([
     '.3gp', '.avi', '.m2ts', '.m4v', '.mts', '.wmv',
     '.cr2', '.cr3', '.dng', '.nef', '.orf', '.raf', '.raw', '.rw2',
 ]);
+
+/** Video containers that are ISO base media format, so the box tree can be read. */
+const ISO_BMFF_VIDEO = new Set(['.mp4', '.mov', '.gifv']);
+
+const byCategoryThenPath = (a: LibraryHealthIssue, b: LibraryHealthIssue) =>
+    a.category.localeCompare(b.category) || a.path.localeCompare(b.path);
+
+const tally = (issues: LibraryHealthIssue[]): Record<LibraryHealthCategory, number> => {
+    const summary = emptySummary();
+    for (const issue of issues) summary[issue.category]++;
+    return summary;
+};
 
 const emptySummary = (): Record<LibraryHealthCategory, number> => ({
     corrupt: 0,
@@ -144,8 +171,7 @@ function validVideoHeader(ext: string, header: Buffer): boolean {
 async function decodePixels(filePath: string, isHeif: boolean): Promise<boolean> {
     try {
         if (isHeif) {
-            const decodeHeic = await loadHeicDecoder();
-            await decodeHeic({ buffer: await fs.readFile(filePath) });
+            await decodeHeicImage(await fs.readFile(filePath));
         } else {
             await sharp(filePath, { animated: true }).resize({ width: 1 }).toBuffer();
         }
@@ -169,10 +195,22 @@ async function inspectMediaFile(file: { path: string; type: 'image' | 'video' },
         try {
             const header = await readHead(file.path, 64);
             if (!validVideoHeader(ext, header)) {
-                issues.push({ category: 'corrupt', path: file.path, detail: 'The video header is invalid or unreadable.' });
+                return [{ category: 'corrupt', path: file.path, detail: 'The video header is invalid or unreadable.' }];
             }
         } catch {
-            issues.push({ category: 'corrupt', path: file.path, detail: 'The video could not be read.' });
+            return [{ category: 'corrupt', path: file.path, detail: 'The video could not be read.' }];
+        }
+
+        // The signature only says the file began life as a video. The box
+        // tree says whether all of it arrived — an mp4 truncated to 30% of
+        // its bytes passed the signature check and was reported healthy.
+        // (EBML containers get the signature check only; see
+        // videoStructure.ts for why this is the ISO-BMFF family's trick.)
+        if (ISO_BMFF_VIDEO.has(ext)) {
+            const structure = await inspectVideoStructure(file.path, stat.size);
+            if (structure.kind === 'damaged') {
+                issues.push({ category: 'corrupt', path: file.path, detail: structure.detail });
+            }
         }
         return issues;
     }
@@ -200,8 +238,7 @@ async function inspectMediaFile(file: { path: string; type: 'image' | 'video' },
     if (!width || !height) {
         try {
             if (isHeif) {
-                const decodeHeic = await loadHeicDecoder();
-                const decoded = await decodeHeic({ buffer: await fs.readFile(file.path) });
+                const decoded = await decodeHeicImage(await fs.readFile(file.path));
                 width = decoded.width;
                 height = decoded.height;
             } else {
@@ -265,13 +302,43 @@ export async function scanLibraryHealth(roots: string[], options: LibraryHealthO
     }
 
     let next = 0;
+    let done = 0;
+    let cancelled = false;
+    // Throttled rather than per-file: a 5,000-file library would otherwise
+    // put 5,000 IPC messages behind a progress bar that redraws 60 times a
+    // second at best.
+    let lastReport = 0;
+    const PROGRESS_INTERVAL_MS = 150;
+    const report = (force: boolean) => {
+        const now = Date.now();
+        if (!force && now - lastReport < PROGRESS_INTERVAL_MS) return;
+        lastReport = now;
+        options.onProgress?.(done, supported.length);
+    };
+
     const inspectWorker = async () => {
         while (next < supported.length) {
+            if (options.isCancelled?.()) { cancelled = true; return; }
             const file = supported[next++];
             issues.push(...await inspectMediaFile(file, deep));
+            done++;
+            report(false);
         }
     };
+    report(true);
     await Promise.all(Array.from({ length: Math.min(8, Math.max(1, supported.length)) }, inspectWorker));
+    report(true);
+
+    // A cancelled scan reports what it found and stops. The sidecar pass
+    // below is skipped too: it would walk the whole library's metadata for a
+    // result the user has already said they do not want.
+    if (cancelled) {
+        issues.sort(byCategoryThenPath);
+        return {
+            roots: normalizedRoots, scannedFiles: done, deep, cancelled: true,
+            issues, summary: tally(issues),
+        };
+    }
 
     const meta = await loadLibraryMeta(normalizedRoots);
     const sidecarPaths = new Set([
@@ -288,10 +355,11 @@ export async function scanLibraryHealth(roots: string[], options: LibraryHealthO
         }
     }));
 
-    issues.sort((a, b) => a.category.localeCompare(b.category) || a.path.localeCompare(b.path));
-    const summary = emptySummary();
-    for (const issue of issues) summary[issue.category]++;
-    return { roots: normalizedRoots, scannedFiles: supported.length, deep, issues, summary };
+    issues.sort(byCategoryThenPath);
+    return {
+        roots: normalizedRoots, scannedFiles: supported.length, deep, cancelled: false,
+        issues, summary: tally(issues),
+    };
 }
 
 const toPortableRelative = (relativePath: string) => relativePath.split(path.sep).join('/');

@@ -9,7 +9,7 @@ import {
     type LibraryHealthReport,
 } from '../electron/libraryHealth';
 import { SIDECAR_NAME } from '../electron/libraryMeta';
-import { heicFile, mdat } from './heifFixture';
+import { box, ftyp, heicFile, mdat } from './heifFixture';
 
 describe('library health scan', () => {
     let root: string;
@@ -92,7 +92,7 @@ describe('library health scan', () => {
 
     it('exports a CSV with safely quoted cells', () => {
         const csv = healthReportToCsv({
-            roots: ['/lib'], scannedFiles: 1, deep: false,
+            roots: ['/lib'], scannedFiles: 1, deep: false, cancelled: false,
             issues: [{ category: 'corrupt', path: '/lib/a,b.jpg', detail: 'Could not read "header"' }],
             summary: { corrupt: 1, tiny: 0, unsupported: 0, 'missing-date': 0, 'orphan-sidecar': 0 },
         });
@@ -234,5 +234,114 @@ describe('deep library health scan', () => {
         await fs.writeFile(path.join(root, 'short.heic'), whole.subarray(0, whole.length - 512));
         const deep = await scanLibraryHealth([root], { deep: true });
         expect(deep.issues.find(i => i.category === 'corrupt')?.detail).toContain('truncated');
+    });
+});
+
+describe('watching, and stopping, a long scan', () => {
+    let root: string;
+
+    beforeEach(async () => {
+        root = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-slap-progress-'));
+        // Twelve ordinary photos; what they contain does not matter here.
+        await Promise.all(Array.from({ length: 12 }, async (_, i) => {
+            const bytes = await sharp({ create: { width: 900, height: 700, channels: 3, background: '#2a6fb4' } })
+                .jpeg({ quality: 90 }).toBuffer();
+            await fs.writeFile(path.join(root, `p${i}.jpg`), bytes);
+        }));
+    });
+
+    afterEach(async () => {
+        await fs.rm(root, { recursive: true, force: true });
+    });
+
+    it('reports progress against a total it knows up front', async () => {
+        const seen: { done: number; total: number }[] = [];
+        const report = await scanLibraryHealth([root], { onProgress: (done, total) => seen.push({ done, total }) });
+
+        expect(seen.length).toBeGreaterThan(0);
+        // A progress bar is only honest if the total does not move under it.
+        expect(new Set(seen.map(p => p.total))).toEqual(new Set([12]));
+        expect(seen.map(p => p.done)).toEqual([...seen.map(p => p.done)].sort((a, b) => a - b));
+        // Whatever the throttle dropped, the last report is the finished count.
+        expect(seen[seen.length - 1]).toEqual({ done: 12, total: 12 });
+        expect(report.scannedFiles).toBe(12);
+        expect(report.cancelled).toBe(false);
+    });
+
+    /**
+     * Cancelling has to stop the work, not just hide it: a deep scan of a
+     * large library is minutes of decoding, which is the whole reason the
+     * button exists.
+     */
+    it('stops early when asked and says the report is partial', async () => {
+        // Asked between files, so counting the asks counts the files: the
+        // throttled progress callback is too coarse to cancel against on a
+        // library this small, and that is a property of the throttle rather
+        // than of the cancel.
+        let asked = 0;
+        const report = await scanLibraryHealth([root], { isCancelled: () => ++asked > 4 });
+
+        expect(report.cancelled).toBe(true);
+        expect(report.scannedFiles).toBeLessThan(12);
+        expect(report.scannedFiles).toBeGreaterThan(0);
+    });
+
+    it('scans everything when the cancel check never fires', async () => {
+        const report = await scanLibraryHealth([root], { isCancelled: () => false });
+        expect(report).toMatchObject({ cancelled: false, scannedFiles: 12 });
+    });
+});
+
+/**
+ * A video was checked by its first twelve bytes, so a download cut short —
+ * which keeps its `ftyp` signature intact — was reported as healthy by both
+ * scans. The box walk is what sees the difference, and it costs no decode.
+ */
+describe('video health', () => {
+    let root: string;
+
+    beforeEach(async () => {
+        root = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-slap-vhealth-'));
+    });
+
+    afterEach(async () => {
+        await fs.rm(root, { recursive: true, force: true });
+    });
+
+    const mp4 = (payload = 8192) => Buffer.concat([
+        ftyp('isom', ['mp42', 'avc1']),
+        mdat(payload),
+        box('moov', Buffer.alloc(512, 0x11)),
+    ]);
+
+    const corrupt = (report: LibraryHealthReport) =>
+        report.issues.filter(i => i.category === 'corrupt').map(i => path.basename(i.path));
+
+    it('leaves a well-formed video alone', async () => {
+        await fs.writeFile(path.join(root, 'ok.mp4'), mp4());
+        expect(corrupt(await scanLibraryHealth([root]))).toEqual([]);
+    });
+
+    it('catches a truncated video in the ordinary scan', async () => {
+        const whole = mp4();
+        await fs.writeFile(path.join(root, 'cut.mp4'), whole.subarray(0, Math.floor(whole.length * 0.3)));
+        expect(corrupt(await scanLibraryHealth([root]))).toEqual(['cut.mp4']);
+    });
+
+    it('checks a .mov the same way, now that the show plays them', async () => {
+        const whole = mp4();
+        await fs.writeFile(path.join(root, 'cut.mov'), whole.subarray(0, whole.length - 1));
+        await fs.writeFile(path.join(root, 'ok.mov'), mp4(4096));
+        expect(corrupt(await scanLibraryHealth([root]))).toEqual(['cut.mov']);
+    });
+
+    /**
+     * An EBML container gets only the magic-byte check — nothing here reads
+     * its structure — so it must not be accused on the strength of that.
+     */
+    it('does not accuse a container it cannot read the structure of', async () => {
+        const ebml = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3]), Buffer.alloc(40_000, 9)]);
+        await fs.writeFile(path.join(root, 'clip.webm'), ebml);
+        expect(corrupt(await scanLibraryHealth([root]))).toEqual([]);
     });
 });
