@@ -648,6 +648,27 @@ function applyContentSecurityPolicy() {
   });
 }
 
+/**
+ * Keep a test run out of the user's way (`PHOTO_SLAP_UNOBTRUSIVE=1`).
+ *
+ * `test:smoke` and `test:e2e` launch the real app, and a window taking over
+ * the screen and the keyboard in the middle of someone else's work is not a
+ * cost worth paying for a check they did not initiate. With this set the app
+ * claims no dock slot (on macOS that makes it an accessory, so it never
+ * becomes the front application), the window is shown *inactive* so focus
+ * stays where it was, and it is parked off-screen so nothing appears.
+ *
+ * It is deliberately shown rather than hidden: a window created with
+ * `show: false` gives Chromium no surface to composite, and the transition
+ * checks read interpolated clip-path values off real frames. Off-screen and
+ * inactive keeps the frames coming while staying invisible.
+ *
+ * `test:memory` does NOT set this. Its numbers are quoted against a
+ * 1200x800 @2x window, and changing what the compositor is asked to do
+ * would make them incomparable to every figure already recorded.
+ */
+const UNOBTRUSIVE = process.env.PHOTO_SLAP_UNOBTRUSIVE === '1';
+
 function createWindow() {
   const iconPath = path.join(process.env.VITE_PUBLIC, 'icon.png');
 
@@ -666,10 +687,20 @@ function createWindow() {
       // Send to Display); don't let Chromium throttle timers/animations.
       backgroundThrottling: false,
     },
+    show: !UNOBTRUSIVE,
     titleBarStyle: 'hiddenInset',
     vibrancy: 'under-window', // macos blur effect
     visualEffectState: 'active',
   })
+
+  if (UNOBTRUSIVE) {
+    app.dock?.hide();
+    win.once('ready-to-show', () => {
+      // Far enough out that no arrangement of displays can show it.
+      win?.setPosition(-8000, -8000);
+      win?.showInactive();
+    });
+  }
 
   // Set dock icon explicitly for macOS dev
   if (process.platform === 'darwin' && VITE_DEV_SERVER_URL) {

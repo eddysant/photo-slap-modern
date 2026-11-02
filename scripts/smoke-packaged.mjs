@@ -124,7 +124,13 @@ let cdp = null;
 
 // VITE_DEV_SERVER_URL must not leak in: its presence is what selects the dev
 // server and the relaxed CSP, which would make this test meaningless.
-const env = { ...process.env, PHOTO_SLAP_DIR: fixture, PHOTO_SLAP_DEBUG_PORT: String(PORT) };
+const env = {
+    ...process.env,
+    PHOTO_SLAP_DIR: fixture,
+    PHOTO_SLAP_DEBUG_PORT: String(PORT),
+    // Don't steal the screen or the keyboard from whoever is working.
+    PHOTO_SLAP_UNOBTRUSIVE: '1',
+};
 delete env.VITE_DEV_SERVER_URL;
 
 const target = appBundle

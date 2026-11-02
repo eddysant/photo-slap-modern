@@ -199,7 +199,14 @@ let child = null;
 function launchApp(dir) {
     const proc = spawn('npm', ['run', 'dev'], {
         cwd: PROJECT_ROOT,
-        env: { ...process.env, PHOTO_SLAP_DIR: dir, PHOTO_SLAP_DEBUG_PORT: String(PORT) },
+        // Off-screen and never focused: these runs take minutes and the
+        // window has no business interrupting whatever the user is doing.
+        env: {
+            ...process.env,
+            PHOTO_SLAP_DIR: dir,
+            PHOTO_SLAP_DEBUG_PORT: String(PORT),
+            PHOTO_SLAP_UNOBTRUSIVE: '1',
+        },
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: true,
     });
