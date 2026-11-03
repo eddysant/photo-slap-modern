@@ -20,6 +20,8 @@ import {
 } from './hooks/usePendingDeletes'
 import { useRemote } from './hooks/useRemote'
 import { useShuffleCycle } from './hooks/useShuffleCycle'
+import { useSlideNavigation } from './hooks/useSlideNavigation'
+import { useVideoElement } from './hooks/useVideoElement'
 import { usePlayableList } from './hooks/usePlayableList'
 import { useSlideSource } from './hooks/useSlideSource'
 import { useToast } from './hooks/useToast'
@@ -33,7 +35,7 @@ import {
 import { getFileUrl, getDisplayUrl } from './utils'
 import { cullingActionForKey } from './culling'
 import { SETTINGS_PRESETS, type SettingsPresetName } from './settingsPresets'
-import { hasSeenEverything, makeShuffleHistoryKey } from './shuffleHistory'
+import { makeShuffleHistoryKey } from './shuffleHistory'
 import { healthIssuesByPath } from './gridFilters'
 
 const mergeScans = (results: ScanResult[]): ScanResult => ({
@@ -48,7 +50,6 @@ const KEN_BURNS_ANIMATIONS = ['kb-pan-left', 'kb-pan-right', 'kb-pan-up', 'kb-pa
 
 function App() {
   const [allFiles, setAllFiles] = useState<MediaFile[]>([])
-  const [isPlaying, setIsPlaying] = useState(false)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [currentDirs, setCurrentDirs] = useState<string[]>([])
@@ -66,8 +67,6 @@ function App() {
   const [tagFilter, setTagFilter] = useState('')
   const [exifData, setExifData] = useState<ExifData | null>(null)
   const [kenBurnsClass, setKenBurnsClass] = useState('')
-  // 1 = forward, -1 = backward; mirrors directional slide transitions
-  const [direction, setDirection] = useState(1)
 
   // Settings (persisted across launches via electron-store)
   const [isShuffle, setIsShuffle] = usePersistedState('isShuffle', false)
@@ -153,6 +152,31 @@ function App() {
     index: currentIndex, goTo, pinPath, pinIndex, hold, pinSurvivorOf,
   } = position;
 
+  /**
+   * Where the show goes next, and whether it is going anywhere by itself:
+   * direction, the play flag, the guest queue and the shuffle-cycle wrap.
+   * The key is null with no folders open, which is what makes a history
+   * reset a no-op rather than a reset of nothing.
+   */
+  const shuffleKey = currentDirs.length > 0 ? makeShuffleHistoryKey(currentDirs, mediaFilter) : null;
+  const nav = useSlideNavigation({
+    files, goTo, replaceFiles, isShuffle, shuffleKey, shuffle, cullingMode,
+    onQueued: file => showToast(`\u{1F4FA} ${file.name} — queued by a guest`),
+  });
+  const {
+    direction, isPlaying, setIsPlaying, queuedCount,
+    nextSlide, prevSlide, togglePlay, jumpTo, resetHistory,
+  } = nav;
+
+  // List-shaping settings just persist; the effect above re-derives the list
+  const toggleShuffle = () => {
+    if (isShuffle) shuffle.forgetOrder(); // re-partition when it comes back on
+    setIsShuffle(!isShuffle);
+  };
+  const resetShuffleHistory = useCallback(() => {
+    if (resetHistory()) showToast('Shuffle history reset');
+  }, [resetHistory, showToast]);
+
   const ingestScanResult = useCallback((result: ScanResult) => {
     if (result.errors.length > 0) {
       showToast(`${result.errors.length} folder${result.errors.length > 1 ? 's' : ''} couldn't be read`);
@@ -169,7 +193,7 @@ function App() {
     } else {
       showToast('No media files found in that folder');
     }
-  }, [showToast, autoPlayOnOpen, resetDateCache]);
+  }, [showToast, autoPlayOnOpen, resetDateCache, setIsPlaying]);
 
   // Remember the current position per folder set (debounced)
   useEffect(() => {
@@ -288,95 +312,7 @@ function App() {
     };
   }, [ingestScanResult, showToast]);
 
-  /**
-   * Slides guests have queued from their phones, as paths. A queued slide
-   * jumps the line on the next advance — automatic or manual — which is the
-   * whole point: someone picks a photo and it comes up next.
-   */
-  const queueRef = useRef<string[]>([]);
-  const [queuedCount, setQueuedCount] = useState(0);
-
-  /** Pop the next queued slide's index, skipping any that have since gone. */
-  const takeQueuedIndex = useCallback((list: MediaFile[]) => {
-    let found: number | null = null;
-    while (queueRef.current.length > 0 && found === null) {
-      const [path, ...rest] = queueRef.current;
-      queueRef.current = rest;
-      const index = list.findIndex(file => file.path === path);
-      if (index >= 0) found = index;
-    }
-    setQueuedCount(queueRef.current.length);
-    return found;
-  }, []);
-
-  useEffect(() => {
-    return window.api.on('remote:queue', (_event, index: number) => {
-      const file = files[index];
-      if (!file) return;
-      queueRef.current = [...queueRef.current, file.path];
-      setQueuedCount(queueRef.current.length);
-      showToast(`\u{1F4FA} ${file.name} — queued by a guest`);
-    });
-  }, [files, showToast]);
-
-  // NOTE: keep these updaters pure (no setState inside another setState
-  // updater) — StrictMode double-invokes updaters and impure ones make
-  // navigation skip slides in dev.
-  const nextSlide = useCallback(() => {
-    setDirection(1);
-    if (files.length === 0) return;
-    // Guest picks come first, ahead of shuffle and normal order alike.
-    const queued = takeQueuedIndex(files);
-    if (queued !== null) {
-      goTo(queued);
-      return;
-    }
-    // Start a new cycle only once everything really has been seen. Keying off
-    // "we are on the last index" meant wrapping backwards from slide 1 landed
-    // on the last slide, and the next press then reshuffled the whole library.
-    if (isShuffle) {
-      const key = makeShuffleHistoryKey(currentDirs, mediaFilter);
-      if (hasSeenEverything(files, shuffle.viewedIn(key))) {
-        replaceFiles(shuffle.startNewCycle(key, files));
-        goTo(0);
-        return;
-      }
-    }
-    goTo(prev => (prev + 1) % files.length);
-  }, [files, isShuffle, currentDirs, mediaFilter, shuffle, takeQueuedIndex, goTo, replaceFiles]);
-
-  const prevSlide = useCallback(() => {
-    setDirection(-1);
-    goTo(prev => files.length === 0 ? prev : (prev - 1 + files.length) % files.length);
-  }, [files.length, goTo]);
-
-  const togglePlay = useCallback(() => {
-    if (!cullingMode) setIsPlaying(prev => !prev);
-  }, [cullingMode]);
-
-  // List-shaping settings just persist; the effect above re-derives the list
-  const toggleShuffle = () => {
-    if (isShuffle) shuffle.forgetOrder(); // re-partition when it comes back on
-    setIsShuffle(!isShuffle);
-  };
-  const resetShuffleHistory = useCallback(() => {
-    if (currentDirs.length === 0) return;
-    const key = makeShuffleHistoryKey(currentDirs, mediaFilter);
-    if (isShuffle) {
-      // An explicit reset should give a genuinely different order, not the
-      // same one the finished cycle used.
-      replaceFiles(shuffle.startNewCycle(key, files));
-      goTo(0);
-    } else {
-      shuffle.clearViewed(key, files.length);
-    }
-    showToast('Shuffle history reset');
-  }, [currentDirs, mediaFilter, files, isShuffle, shuffle, showToast, goTo, replaceFiles]);
   const handleMediaFilterChange = (newFilter: MediaFilter) => setMediaFilter(newFilter);
-
-  useEffect(() => {
-    if (cullingMode) setIsPlaying(false);
-  }, [cullingMode]);
 
   const applyPreset = useCallback((name: SettingsPresetName) => {
     const preset = SETTINGS_PRESETS[name];
@@ -400,7 +336,7 @@ function App() {
     setCullingMode(preset.cullingMode);
     if (preset.cullingMode) setIsPlaying(false);
     showToast(`${name} preset applied`);
-  }, [setMediaFilter, setIsShuffle, setIsSmart, setIsSmartVideoEnabled, setIsAmbientColor, setIsStretch, setIsKenBurns, setIsExifEnabled, setTransitionStyle, setTransitionSpeed, setSortOrder, setSlideDuration, setControlsPosition, setShowSlideTimer, setFrameMode, setAutoPlayOnOpen, setRemoteEnabled, setCullingMode, showToast]);
+  }, [setMediaFilter, setIsShuffle, setIsSmart, setIsSmartVideoEnabled, setIsAmbientColor, setIsStretch, setIsKenBurns, setIsExifEnabled, setTransitionStyle, setTransitionSpeed, setSortOrder, setSlideDuration, setControlsPosition, setShowSlideTimer, setFrameMode, setAutoPlayOnOpen, setRemoteEnabled, setCullingMode, setIsPlaying, showToast]);
 
   const openHealthScan = useCallback(async () => {
     let roots = currentDirs;
@@ -566,16 +502,8 @@ function App() {
 
   const toggleSettings = () => setIsSettingsOpen(prev => !prev);
 
-  // Video Scrubber Logic
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const bgVideoRef = useRef<HTMLVideoElement>(null);
-  const [videoProgress, setVideoProgress] = useState(0);
-  const [isUserPaused, setIsUserPaused] = useState(false);
-
   // Per-slide state reset + EXIF fetch + Ken Burns randomization
   useEffect(() => {
-    setVideoProgress(0);
-    setIsUserPaused(false);
     setExifData(null);
 
     if (files[currentIndex]?.type === 'image') {
@@ -597,61 +525,6 @@ function App() {
     // re-run this on its own update and re-roll on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [transitionStyle, currentIndex]);
-
-  // Sync Volume
-  useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.volume = volume;
-      videoRef.current.muted = isMuted;
-    }
-  }, [volume, isMuted, currentIndex]); // Update when file changes too to ensure new video gets volume
-
-  // Sync Video Playback: this effect is the single owner of play/pause for
-  // both the main and blurred background video (the bg video deliberately
-  // has no autoPlay attribute — it must not start while the main is paused,
-  // e.g. when smart background is toggled on mid-pause).
-  useEffect(() => {
-    const els = [videoRef.current, bgVideoRef.current];
-    els.forEach(el => {
-      if (el) {
-        if (isUserPaused) el.pause();
-        else el.play().catch(() => { });
-      }
-    });
-  }, [isUserPaused, currentIndex, isSmart, isSmartVideoEnabled]);
-
-  const toggleVideoPause = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    setIsUserPaused(prev => !prev);
-  };
-
-  const handleVideoTimeUpdate = () => {
-    notePlaybackProgress(); // tells the stall watchdog the video is alive
-    if (videoRef.current) {
-      const progress = (videoRef.current.currentTime / videoRef.current.duration) * 100;
-      setVideoProgress(progress || 0);
-    }
-  };
-
-  const handleVideoSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const time = parseFloat(e.target.value);
-    if (videoRef.current) {
-      const target = (time / 100) * videoRef.current.duration;
-      videoRef.current.currentTime = target;
-      if (bgVideoRef.current) bgVideoRef.current.currentTime = target; // keep blur in sync
-      setVideoProgress(time);
-    }
-  };
-
-  // Jump the playing video by delta seconds (M/N shortcuts)
-  const seekVideoBy = useCallback((delta: number) => {
-    const video = videoRef.current;
-    if (!video || !isFinite(video.duration)) return;
-    const target = Math.min(Math.max(0, video.currentTime + delta), Math.max(0, video.duration - 0.1));
-    video.currentTime = target;
-    if (bgVideoRef.current) bgVideoRef.current.currentTime = target;
-    setVideoProgress((target / video.duration) * 100);
-  }, []);
 
   const showCurrentInFinder = useCallback(() => {
     if (files.length > 0 && files[currentIndex]) {
@@ -676,14 +549,6 @@ function App() {
       showToast(result.error ?? 'Move failed');
     }
   }, [files, currentIndex, quickMoveFolders, showToast, handleFilesDeleted]);
-
-  // Keep the display awake while a slideshow or a video is playing —
-  // matters most when the show is running fullscreen on a TV.
-  const currentIsVideo = files[currentIndex]?.type === 'video';
-  useEffect(() => {
-    const keepAwake = isPlaying || (currentIsVideo && !isUserPaused);
-    window.api.setPowerBlocked(keepAwake);
-  }, [isPlaying, currentIsVideo, isUserPaused]);
 
   // Batch operations from the grid's select mode
   const batchFavorite = meta.setFavorite;
@@ -745,6 +610,26 @@ function App() {
 
   const currentFile: MediaFile | null = files[currentIndex] ?? null;
 
+  // The two <video> elements and the single owner of play/pause/seek for
+  // both of them. Keyed on the current file's path, which is also the slide
+  // wrapper's React key — so a new path is a new element.
+  const video = useVideoElement({ currentFile, volume, isMuted });
+  // Destructured on purpose: these effects own the keydown handler and the
+  // menu:action listeners, and naming `video` itself in their dependencies
+  // re-registers both several times a second while a clip plays — `progress`
+  // is part of that object. Measured at 21 re-registrations over 5s.
+  const { progress: videoProgress, isUserPaused, attachVideo, attachBgVideo, seekBy } = video;
+
+  // Keep the display awake while a slideshow or a video is playing —
+  // matters most when the show is running fullscreen on a TV.
+  const currentIsVideo = files[currentIndex]?.type === 'video';
+  useEffect(() => {
+    const keepAwake = isPlaying || (currentIsVideo && !isUserPaused);
+    window.api.setPowerBlocked(keepAwake);
+  }, [isPlaying, currentIsVideo, isUserPaused]);
+
+
+
   const ambientColor = useAmbientColor(currentFile, isAmbientColor && !isSmart);
 
   const { url: remoteUrl, qr: remoteQr, reactions } = useRemote({
@@ -776,6 +661,9 @@ function App() {
       nextSlide();
     }
   };
+
+  const handleVideoSeek = (e: React.ChangeEvent<HTMLInputElement>) =>
+    video.seekToPercent(parseFloat(e.target.value));
 
   // Never fetch or decode more pixels than the window can show; zooming is
   // the one thing that can, and upgrades on demand.
@@ -902,10 +790,10 @@ function App() {
           setIsTagEditorOpen(prev => !prev);
           break;
         case 'm':
-          seekVideoBy(10);
+          seekBy(10);
           break;
         case 'n':
-          seekVideoBy(-10);
+          seekBy(-10);
           break;
         case '1':
         case '2':
@@ -923,7 +811,7 @@ function App() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [nextSlide, prevSlide, togglePlay, deleteCurrentFile, showCurrentInFinder, seekVideoBy, quickMove, toggleFavorite, frameMode, setFrameMode, cullingMode, markCurrentCulling]);
+  }, [nextSlide, prevSlide, togglePlay, deleteCurrentFile, showCurrentInFinder, seekBy, quickMove, toggleFavorite, frameMode, setFrameMode, cullingMode, markCurrentCulling]);
 
   // Update window title
   useEffect(() => {
@@ -945,8 +833,8 @@ function App() {
       'frame': () => setFrameMode(!frameMode),
       'favorite': toggleFavorite,
       'tags': () => setIsTagEditorOpen(prev => !prev),
-      'seek-forward': () => seekVideoBy(10),
-      'seek-back': () => seekVideoBy(-10),
+      'seek-forward': () => seekBy(10),
+      'seek-back': () => seekBy(-10),
       'reveal': showCurrentInFinder,
       'delete': deleteCurrentFile,
       // Non-destructive, matching the K/X keys. 'delete' above is the only
@@ -962,7 +850,7 @@ function App() {
       window.api.on('menu:action', (_event, name: string) => actions[name]?.()),
     ];
     return () => cleanups.forEach(c => c());
-  }, [handleOpenDirectory, showCurrentInFinder, nextSlide, prevSlide, togglePlay, seekVideoBy, deleteCurrentFile, toggleFavorite, frameMode, setFrameMode, markCurrentCulling]);
+  }, [handleOpenDirectory, showCurrentInFinder, nextSlide, prevSlide, togglePlay, seekBy, deleteCurrentFile, toggleFavorite, frameMode, setFrameMode, markCurrentCulling]);
 
   const fileUrl = currentFile ? getFileUrl(currentFile.path) : '';
   // Memoized because framer-motion reads `variants` when the incoming slide
@@ -1163,7 +1051,7 @@ function App() {
               <div className="smart-background-layer">
                 {currentFile.type === 'video' ? (
                   <video
-                    ref={bgVideoRef}
+                    ref={attachBgVideo}
                     src={fileUrl}
                     className="blurred-media"
                     muted
@@ -1181,22 +1069,22 @@ function App() {
             {currentFile.type === 'video' ? (
               <>
                 <video
-                  ref={(el) => {
-                    videoRef.current = el;
-                    if (el) {
-                      el.volume = volume;
-                      el.muted = isMuted;
-                    }
-                  }}
+                  ref={attachVideo}
                   src={fileUrl}
                   className="media-element"
                   controls={false}
                   autoPlay // Always autoplay
                   loop={!isPlaying} // Loop ONLY if not in slideshow mode. If slideshow, play once then next.
-                  onTimeUpdate={handleVideoTimeUpdate}
+                  onTimeUpdate={() => {
+                    notePlaybackProgress(); // the stall watchdog's liveness signal
+                    video.handleTimeUpdate();
+                  }}
                   onEnded={handleVideoEnded}
                   onError={handleVideoError}
-                  onClick={toggleVideoPause}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    video.togglePause();
+                  }}
                   style={{
                     cursor: 'pointer',
                     objectFit: 'contain',
@@ -1313,8 +1201,7 @@ function App() {
           healthIssues={healthReport ? healthIssues : null}
           quickMoveFolders={quickMoveFolders}
           onSelect={(i) => {
-            setDirection(i >= currentIndex ? 1 : -1);
-            goTo(i);
+            jumpTo(i, currentIndex);
             setIsGridOpen(false);
           }}
           onClose={() => setIsGridOpen(false)}
