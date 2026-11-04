@@ -720,6 +720,25 @@
   color: #00aaff;
 }
 
+.dedupe-history {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  max-width: 460px;
+  font-size: 0.75rem;
+  color: #777;
+  text-align: center;
+}
+
+.dedupe-done-note {
+  font-size: 0.8rem;
+  color: #888;
+  margin: 0;
+  max-width: 420px;
+  text-align: center;
+}
+
 .step-scanning {
   display: flex;
   flex-direction: column;

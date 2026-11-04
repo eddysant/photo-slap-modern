@@ -3,6 +3,10 @@ import { FiX, FiCheck } from 'react-icons/fi';
 import { bmvbhash } from 'blockhash-core';
 import { getFileUrl, formatBytes } from '../utils';
 import { groupSimilar } from '../similarity';
+import {
+    type DedupeHistory, type FileStat,
+    loadHistory, recordGroup, recordPair, undecidedFrom,
+} from '../dedupeHistory';
 import type { PHashMessage, PHashRequest } from '../workers/phashWorker';
 
 const isVideoFile = (p: string) => /\.(mp4|mov|webm|mkv|ogg|gifv)$/i.test(p);
@@ -116,6 +120,13 @@ export function DedupeModal({ isOpen, onClose, rootPaths, onFilesDeleted }: Dedu
     const [statusMsg, setStatusMsg] = useState('');
     const [groups, setGroups] = useState<DuplicateGroup[]>([]);
     const [currentGroupIndex, setCurrentGroupIndex] = useState(0);
+    /**
+     * Groups this scan found and did not show, because every pair in them had
+     * already been decided. The user has to be told: a scan that reports four
+     * groups when it found sixteen is otherwise just wrong.
+     */
+    const [suppressed, setSuppressed] = useState(0);
+    const [decisionCount, setDecisionCount] = useState(0);
 
     // Files of the current group still in contention. We always compare the
     // first two: the "keeper" (left) vs the next challenger (right). Whoever
@@ -139,6 +150,17 @@ export function DedupeModal({ isOpen, onClose, rootPaths, onFilesDeleted }: Dedu
     const requestedInfoRef = useRef<Set<string>>(new Set());
     /** Files the review tried to trash but couldn't, reported at the end. */
     const failedDeletesRef = useRef<string[]>([]);
+    /**
+     * Previous answers, in a ref: the review reads it on every advance, and a
+     * re-render per decision would remount the compare cards.
+     */
+    const historyRef = useRef<DedupeHistory>({});
+    /**
+     * Sizes and mtimes of every file in the found groups, so a decision can
+     * be checked against the file as it is now rather than as it was. The
+     * compare cards want the same numbers, so they share them.
+     */
+    const statsRef = useRef<Record<string, FileStat>>({});
 
     // The folders to scan: defaults to the whole open session, but a folder
     // can be picked here directly (the modal is reachable from the start screen).
@@ -155,8 +177,20 @@ export function DedupeModal({ isOpen, onClose, rootPaths, onFilesDeleted }: Dedu
             setDimensions({});
             requestedInfoRef.current.clear();
             failedDeletesRef.current = [];
+            statsRef.current = {};
+            setSuppressed(0);
+            void window.api.getStore('dedupeDecisions').then(raw => {
+                historyRef.current = loadHistory(raw);
+                setDecisionCount(Object.keys(historyRef.current).length);
+            });
         }
     }, [isOpen, rootPaths]);
+
+    const saveHistory = (next: DedupeHistory) => {
+        historyRef.current = next;
+        setDecisionCount(Object.keys(next).length);
+        void window.api.setStore('dedupeDecisions', next);
+    };
 
     const chooseFolder = async () => {
         const dir = await window.api.pickDirectory();
@@ -205,15 +239,41 @@ export function DedupeModal({ isOpen, onClose, rootPaths, onFilesDeleted }: Dedu
         setDimensions(prev => (prev[path]?.w === dims.w && prev[path]?.h === dims.h ? prev : { ...prev, [path]: dims }));
     };
 
-    const enterReview = (found: DuplicateGroup[]) => {
-        if (found.length > 0) {
-            setGroups(found);
-            setCurrentGroupIndex(0);
-            setStep('review');
-        } else {
-            setStatusMsg(strictness === 0 ? 'No exact duplicates found!' : 'No similar files found!');
+    const nothingFoundMessage = () =>
+        strictness === 0 ? 'No exact duplicates found!' : 'No similar files found!';
+
+    const enterReview = async (found: DuplicateGroup[]) => {
+        if (found.length === 0) {
+            setSuppressed(0);
+            setStatusMsg(nothingFoundMessage());
             setStep('done');
+            return;
         }
+
+        // One batch over the files of the found groups — bounded by what
+        // matched, not by the library — so a decision can be checked against
+        // the file as it is now. It also pre-fills the compare cards' sizes.
+        const paths = [...new Set(found.flatMap(g => g.files))];
+        statsRef.current = await window.api.getFileInfo(paths).catch(() => ({}));
+        paths.forEach(p => requestedInfoRef.current.add(p));
+        setFileInfos(statsRef.current);
+
+        const open: DuplicateGroup[] = [];
+        for (const group of found) {
+            const files = undecidedFrom(group.files, historyRef.current, statsRef.current);
+            if (files) open.push({ ...group, files });
+        }
+        setSuppressed(found.length - open.length);
+
+        if (open.length === 0) {
+            setStatusMsg(`Nothing new to review — you've already answered all ${found.length} group${found.length > 1 ? 's' : ''} this found.`);
+            setStep('done');
+            return;
+        }
+
+        setGroups(open);
+        setCurrentGroupIndex(0);
+        setStep('review');
     };
 
     // Perceptual hash of a sampled video frame (~1s in, to skip black intro
@@ -265,7 +325,7 @@ export function DedupeModal({ isOpen, onClose, rootPaths, onFilesDeleted }: Dedu
 
             if (level.threshold === null) {
                 const result = await window.api.scanDedupeExact(scanRoots, includeVideos);
-                enterReview(result.map(g => ({ ...g, type: 'exact' as const })));
+                await enterReview(result.map(g => ({ ...g, type: 'exact' as const })));
                 return;
             }
 
@@ -308,7 +368,7 @@ export function DedupeModal({ isOpen, onClose, rootPaths, onFilesDeleted }: Dedu
             const newGroups: DuplicateGroup[] = groupSimilar(hashes, level.threshold)
                 .map(files => ({ hash: '', files, type: 'similar' as const }));
 
-            enterReview(newGroups);
+            await enterReview(newGroups);
         } catch (e) {
             console.error(e);
             setStatusMsg('Error during scan.');
@@ -329,17 +389,26 @@ export function DedupeModal({ isOpen, onClose, rootPaths, onFilesDeleted }: Dedu
     };
 
     const deleteFile = async (path: string) => {
-        const ok = await window.api.deleteFile(path);
-        if (ok) onFilesDeleted?.([path]);
+        // `file:delete` answers with `{ ok, reason? }`, not a boolean — an
+        // object is always truthy, so this reported every refusal as a
+        // success and the final count of files the Trash would not take was
+        // permanently zero.
+        const outcome = await window.api.deleteFile(path);
+        if (outcome.ok) onFilesDeleted?.([path]);
         // A file that couldn't be trashed still leaves the review — repeating
         // the same pair would just trap the user — but saying nothing would
         // leave them believing it was deleted.
         else failedDeletesRef.current.push(path);
-        return ok;
+        return outcome.ok;
     };
 
     const resolveConflict = async (keep: 'left' | 'right' | 'both' | 'skip') => {
         if (keep === 'skip') {
+            // Every pair still in contention, not just the one on screen: the
+            // review walks a group pairwise, so recording one pair would
+            // leave a three-file group asking about its third file next time,
+            // which is not what skipping it looked like.
+            saveHistory(recordGroup(historyRef.current, groupFiles, 'skipped', statsRef.current));
             nextGroup();
             return;
         }
@@ -353,11 +422,15 @@ export function DedupeModal({ isOpen, onClose, rootPaths, onFilesDeleted }: Dedu
             remaining = groupFiles.slice(1);
         } else {
             // Keep both: the challenger is safe; the keeper faces the next one
+            saveHistory(recordPair(historyRef.current, leftImage, rightImage, 'kept', statsRef.current));
             remaining = [leftImage, ...groupFiles.slice(2)];
         }
 
-        if (remaining.length >= 2) {
-            setGroupFiles(remaining);
+        // A deletion can uncover a pair that was answered in an earlier scan,
+        // so the remainder goes through the same filter the groups did.
+        const next = undecidedFrom(remaining, historyRef.current, statsRef.current);
+        if (next) {
+            setGroupFiles(next);
         } else {
             nextGroup();
         }
@@ -427,6 +500,16 @@ export function DedupeModal({ isOpen, onClose, rootPaths, onFilesDeleted }: Dedu
                             <button className="retro-button primary" onClick={startScan} disabled={scanRoots.length === 0}>
                                 START SCAN
                             </button>
+
+                            {decisionCount > 0 && (
+                                <div className="dedupe-history">
+                                    <span>
+                                        Remembering {decisionCount} pair{decisionCount > 1 ? 's' : ''} you've already
+                                        decided — this scan won't ask about them again.
+                                    </span>
+                                    <button className="text-btn" onClick={() => saveHistory({})}>Forget</button>
+                                </div>
+                            )}
                         </div>
                     )}
 
@@ -447,6 +530,7 @@ export function DedupeModal({ isOpen, onClose, rootPaths, onFilesDeleted }: Dedu
                             <div className="progress-indicator">
                                 Reviewing Group {currentGroupIndex + 1} / {groups.length}
                                 {groupFiles.length > 2 && ` — ${groupFiles.length} files in group`}
+                                {suppressed > 0 && ` (${suppressed} already decided)`}
                             </div>
 
                             <div className="compare-container">
@@ -500,6 +584,12 @@ export function DedupeModal({ isOpen, onClose, rootPaths, onFilesDeleted }: Dedu
                         <div className="step-done">
                             <FiCheck size={64} color="#00ff00" />
                             <h3>{statusMsg}</h3>
+                            {suppressed > 0 && (
+                                <p className="dedupe-done-note">
+                                    {suppressed} group{suppressed > 1 ? 's' : ''} weren't shown — you'd already
+                                    decided every pair in {suppressed > 1 ? 'them' : 'it'}.
+                                </p>
+                            )}
                             <button className="retro-button" onClick={onClose}>CLOSE</button>
                         </div>
                     )}
