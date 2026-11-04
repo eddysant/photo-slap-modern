@@ -10,6 +10,7 @@ import {
 } from '../electron/libraryHealth';
 import { SIDECAR_NAME } from '../electron/libraryMeta';
 import { box, ftyp, heicFile, mdat } from './heifFixture';
+import { ID_INFO, cluster, element, segment, tracks, webm } from './ebmlFixture';
 
 describe('library health scan', () => {
     let root: string;
@@ -335,13 +336,53 @@ describe('video health', () => {
         expect(corrupt(await scanLibraryHealth([root]))).toEqual(['cut.mov']);
     });
 
+    const webmFile = (clusterBytes = 8192) => webm(segment(
+        element(ID_INFO, Buffer.alloc(48)),
+        tracks(),
+        cluster(clusterBytes),
+    ));
+
     /**
-     * An EBML container gets only the magic-byte check — nothing here reads
-     * its structure — so it must not be accused on the strength of that.
+     * Matroska is a different container from the mp4 family and gets its own
+     * reader (`matroskaStructure.ts`); the point of checking it here is that
+     * the scan reaches for the right one by extension.
      */
-    it('does not accuse a container it cannot read the structure of', async () => {
+    it('leaves a well-formed .webm alone', async () => {
+        await fs.writeFile(path.join(root, 'ok.webm'), webmFile());
+        expect(corrupt(await scanLibraryHealth([root]))).toEqual([]);
+    });
+
+    it('catches a truncated .webm in the ordinary scan', async () => {
+        const whole = webmFile();
+        await fs.writeFile(path.join(root, 'cut.webm'), whole.subarray(0, Math.floor(whole.length * 0.3)));
+        expect(corrupt(await scanLibraryHealth([root]))).toEqual(['cut.webm']);
+    });
+
+    it('checks a .mkv the same way', async () => {
+        await fs.writeFile(path.join(root, 'ok.mkv'), webmFile(4096));
+        const whole = webmFile();
+        await fs.writeFile(path.join(root, 'cut.mkv'), whole.subarray(0, whole.length - 1));
+        expect(corrupt(await scanLibraryHealth([root]))).toEqual(['cut.mkv']);
+    });
+
+    /**
+     * Four magic bytes are a weak claim — anything may begin with them, and
+     * the byte after then reads as a length field, giving a declared extent
+     * far past the end of the file: the signature of truncation. A file we
+     * cannot actually read as elements must fall back to the magic-byte
+     * check rather than be accused on the strength of a misread length.
+     */
+    it('does not accuse a file that merely starts with the EBML magic', async () => {
         const ebml = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3]), Buffer.alloc(40_000, 9)]);
         await fs.writeFile(path.join(root, 'clip.webm'), ebml);
+        expect(corrupt(await scanLibraryHealth([root]))).toEqual([]);
+    });
+
+    /** An .ogg has no structural reader at all; it keeps the signature check. */
+    it('still accepts a container with no structural reader', async () => {
+        await fs.writeFile(path.join(root, 'clip.ogg'), Buffer.concat([
+            Buffer.from('OggS'), Buffer.alloc(20_000, 7),
+        ]));
         expect(corrupt(await scanLibraryHealth([root]))).toEqual([]);
     });
 });

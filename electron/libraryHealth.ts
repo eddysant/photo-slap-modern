@@ -4,6 +4,7 @@ import glob from 'fast-glob';
 import sharp from 'sharp';
 import { inspectHeifStructure } from './heifStructure';
 import { inspectVideoStructure } from './videoStructure';
+import { inspectMatroskaStructure } from './matroskaStructure';
 import { decodeHeicImage } from './lazyDeps';
 import ExifReader from 'exifreader';
 import { loadLibraryMeta } from './libraryMeta';
@@ -94,6 +95,8 @@ const UNSUPPORTED_MEDIA_EXTENSIONS = new Set([
 
 /** Video containers that are ISO base media format, so the box tree can be read. */
 const ISO_BMFF_VIDEO = new Set(['.mp4', '.mov', '.gifv']);
+/** Matroska and WebM: a different container, read by `matroskaStructure.ts`. */
+const EBML_VIDEO = new Set(['.webm', '.mkv']);
 
 const byCategoryThenPath = (a: LibraryHealthIssue, b: LibraryHealthIssue) =>
     a.category.localeCompare(b.category) || a.path.localeCompare(b.path);
@@ -201,16 +204,19 @@ async function inspectMediaFile(file: { path: string; type: 'image' | 'video' },
             return [{ category: 'corrupt', path: file.path, detail: 'The video could not be read.' }];
         }
 
-        // The signature only says the file began life as a video. The box
-        // tree says whether all of it arrived — an mp4 truncated to 30% of
-        // its bytes passed the signature check and was reported healthy.
-        // (EBML containers get the signature check only; see
-        // videoStructure.ts for why this is the ISO-BMFF family's trick.)
-        if (ISO_BMFF_VIDEO.has(ext)) {
-            const structure = await inspectVideoStructure(file.path, stat.size);
-            if (structure.kind === 'damaged') {
-                issues.push({ category: 'corrupt', path: file.path, detail: structure.detail });
-            }
+        // The signature only says the file began life as a video. The
+        // structure says whether all of it arrived — an mp4 truncated to 30%
+        // of its bytes passed the signature check and was reported healthy,
+        // and so did a truncated .webm until it got the same treatment. Two
+        // readers because they are two containers: `videoStructure.ts` walks
+        // ISO-BMFF boxes, `matroskaStructure.ts` walks EBML elements.
+        const structure = ISO_BMFF_VIDEO.has(ext)
+            ? await inspectVideoStructure(file.path, stat.size)
+            : EBML_VIDEO.has(ext)
+                ? await inspectMatroskaStructure(file.path, stat.size)
+                : null;
+        if (structure?.kind === 'damaged') {
+            issues.push({ category: 'corrupt', path: file.path, detail: structure.detail });
         }
         return issues;
     }
