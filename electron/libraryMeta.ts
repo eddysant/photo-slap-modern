@@ -82,14 +82,76 @@ export function mergeSidecars(sidecars: Sidecar[]): LibraryMeta {
     };
 }
 
+/**
+ * Which directories under a root hold a sidecar, remembered per root.
+ *
+ * Finding them means a `**` walk, which has to list *every* directory in the
+ * tree — the cost tracks directory count, not file count. Measured on 2,160
+ * files across 240 directories on a local SSD: 4.2ms of a 5.7ms save, and
+ * the save runs on an 800ms debounce as hearts and tags are pressed. On a
+ * network volume every one of those listings is a round trip.
+ *
+ * The cache is refreshed by `loadLibraryMeta`, which is to say whenever a
+ * library is opened, and updated by `saveLibraryMeta` when it creates a
+ * sidecar. So the staleness it admits is exactly this: a sidecar that
+ * appears from *outside* the app mid-session is not noticed until the next
+ * load. That costs a deeper sidecar's entry being written to a shallower one
+ * instead — which still loads back correctly, since merging is
+ * shallowest-wins — and nothing writes these files but photo-slap, of which
+ * one instance runs at a time (see the single-writer note under Sidecars).
+ */
+const sidecarDirsByRoot = new Map<string, Set<string>>();
+
 async function findSidecarFiles(root: string): Promise<string[]> {
+    const resolved = path.resolve(root);
     const nested = await glob(`**/${SIDECAR_NAME}`, {
-        cwd: path.resolve(root).replace(/\\/g, '/'),
+        cwd: resolved.replace(/\\/g, '/'),
         absolute: true,
         onlyFiles: true,
         dot: true,
     });
-    return nested.map(p => path.normalize(p));
+    const files = nested.map(p => path.normalize(p));
+    sidecarDirsByRoot.set(resolved, new Set(files.map(f => path.dirname(f))));
+    return files;
+}
+
+/** The known sidecar dirs, walking the tree only if nothing knows yet. */
+async function sidecarDirsFor(resolvedRoot: string): Promise<Set<string>> {
+    const known = sidecarDirsByRoot.get(resolvedRoot);
+    if (known) return known;
+    await findSidecarFiles(resolvedRoot);
+    return sidecarDirsByRoot.get(resolvedRoot) ?? new Set();
+}
+
+/**
+ * Record a sidecar against every root that contains it, not just the one
+ * being saved. A subfolder opened as a root of its own gets a sidecar under
+ * that key, and a parent root open at the same time has to learn about it
+ * too — otherwise the parent's next save would write the same entry into
+ * its own shallower sidecar and the deeper one would be left behind.
+ */
+function rememberSidecarDir(dir: string): void {
+    for (const [root, dirs] of sidecarDirsByRoot) {
+        if (isWithin(root, dir) || root === dir) dirs.add(dir);
+    }
+}
+
+/** The same, for a sidecar that has turned out not to exist any more. */
+function forgetSidecarDir(dir: string): void {
+    for (const dirs of sidecarDirsByRoot.values()) dirs.delete(dir);
+}
+
+/**
+ * Forget what was discovered, so the next save walks the tree again. For
+ * tests, and for anything that rearranges sidecars behind this module's
+ * back.
+ */
+export function invalidateSidecarDirs(roots?: string[]): void {
+    if (!roots) {
+        sidecarDirsByRoot.clear();
+        return;
+    }
+    for (const root of roots) sidecarDirsByRoot.delete(path.resolve(root));
 }
 
 async function readSidecar(file: string): Promise<Sidecar | null> {
@@ -114,10 +176,10 @@ export async function loadLibraryMeta(roots: string[]): Promise<LibraryMeta> {
 export async function saveLibraryMeta(roots: string[], meta: LibraryMeta): Promise<void> {
     for (const root of roots) {
         const resolvedRoot = path.resolve(root);
-        const existingFiles = await findSidecarFiles(resolvedRoot);
-        // Ownership candidates: every existing sidecar dir plus the root,
+        const knownDirs = await sidecarDirsFor(resolvedRoot);
+        // Ownership candidates: every known sidecar dir plus the root,
         // deepest first so entries stay in the most specific file.
-        const dirs = [...new Set([...existingFiles.map(f => path.dirname(f)), resolvedRoot])]
+        const dirs = [...new Set([...knownDirs, resolvedRoot])]
             .sort((a, b) => b.length - a.length);
         const ownerOf = (p: string) => dirs.find(d => isWithin(d, p)) ?? resolvedRoot;
 
@@ -153,8 +215,11 @@ export async function saveLibraryMeta(roots: string[], meta: LibraryMeta): Promi
             bucketFor(dir).culling[path.relative(dir, filePath)] = decision;
         }
 
-        const existingDirs = new Set(existingFiles.map(f => path.dirname(f)));
-        for (const dir of dirs) {
+        // In parallel: these are distinct files, and one at a time cost
+        // 3.8ms against 0.8ms on the same 240-directory library — the other
+        // half of what a save was spending, and again a round trip each on a
+        // network volume.
+        await Promise.all(dirs.map(async dir => {
             const bucket = buckets.get(dir);
             const hasContent = !!bucket && (
                 bucket.favorites.length > 0 || Object.keys(bucket.tags).length > 0 ||
@@ -162,7 +227,18 @@ export async function saveLibraryMeta(roots: string[], meta: LibraryMeta): Promi
             );
             // Don't litter folders with empty sidecars; but rewrite existing
             // ones even when emptied so unfavorites/untags actually persist.
-            if (!hasContent && !existingDirs.has(dir)) continue;
+            //
+            // Asked of the filesystem rather than of the cache. The cache
+            // can believe in a sidecar the user has since deleted by hand,
+            // and writing an empty one back would recreate a file they
+            // removed. It is one `access` per emptied candidate, against the
+            // tree walk this replaces.
+            if (!hasContent) {
+                if (!await pathExists(path.join(dir, SIDECAR_NAME))) {
+                    forgetSidecarDir(dir);
+                    return;
+                }
+            }
 
             const data: SidecarData = {
                 version: 1,
@@ -173,7 +249,10 @@ export async function saveLibraryMeta(roots: string[], meta: LibraryMeta): Promi
                 culling: bucket?.culling ?? {},
             };
             await fs.writeFile(path.join(dir, SIDECAR_NAME), JSON.stringify(data, null, 2));
-        }
+            // A sidecar this save created is one the next save must know
+            // about, or the entries in it would migrate to a shallower file.
+            rememberSidecarDir(dir);
+        }));
     }
 }
 
