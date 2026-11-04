@@ -10,6 +10,7 @@ import ExifReader from 'exifreader';
 import { loadLibraryMeta } from './libraryMeta';
 import { isWithin } from './pathAccess';
 import { scanDirectory } from './fileScanner';
+import { type DeepVerifyCache, fileStamp } from './deepVerifyCache';
 
 export type LibraryHealthCategory = 'corrupt' | 'tiny' | 'unsupported' | 'missing-date' | 'orphan-sidecar';
 
@@ -37,6 +38,14 @@ export interface LibraryHealthOptions {
      * one they will change their mind about.
      */
     isCancelled?: () => boolean;
+    /**
+     * Decodes this scan may skip because a previous one already did them.
+     * Only ever supplied for a deep scan — a shallow scan decodes nothing,
+     * so letting it record "this file is fine" would make the next deep scan
+     * skip the one thing it was asked to do. `scanLibraryHealth` refuses it
+     * outright when `deep` is false rather than trusting its callers.
+     */
+    verified?: DeepVerifyCache;
 }
 
 export interface LibraryHealthReport {
@@ -46,6 +55,12 @@ export interface LibraryHealthReport {
     deep: boolean;
     /** Set when the user stopped the scan: the issues below are whatever had been found. */
     cancelled: boolean;
+    /**
+     * Photos whose pixels a previous deep scan had already decoded. A resumed
+     * scan finishing in seconds is otherwise indistinguishable from one that
+     * did not run.
+     */
+    skippedVerified: number;
     issues: LibraryHealthIssue[];
     summary: Record<LibraryHealthCategory, number>;
 }
@@ -184,7 +199,11 @@ async function decodePixels(filePath: string, isHeif: boolean): Promise<boolean>
     }
 }
 
-async function inspectMediaFile(file: { path: string; type: 'image' | 'video' }, deep: boolean): Promise<LibraryHealthIssue[]> {
+async function inspectMediaFile(
+    file: { path: string; type: 'image' | 'video' },
+    deep: boolean,
+    verified?: DeepVerifyCache,
+): Promise<LibraryHealthIssue[]> {
     const issues: LibraryHealthIssue[] = [];
     const ext = path.extname(file.path).toLowerCase();
     let stat;
@@ -260,13 +279,21 @@ async function inspectMediaFile(file: { path: string; type: 'image' | 'video' },
     }
 
     // A HEIC whose boxes answered for it, or any other image whose header
-    // did, has not actually been decoded yet. Only a deep scan pays for that.
-    if (deep && !await decodePixels(file.path, isHeif)) {
-        return [{
-            category: 'corrupt',
-            path: file.path,
-            detail: 'The header reads correctly but the image data could not be decoded.',
-        }];
+    // did, has not actually been decoded yet. Only a deep scan pays for that
+    // — and only once per file, so stopping a scan and restarting it does
+    // not pay again (see deepVerifyCache.ts).
+    if (deep) {
+        const stamp = fileStamp(stat.size, stat.mtimeMs);
+        const remembered = verified?.get(file.path, stamp);
+        const decoded = remembered ?? await decodePixels(file.path, isHeif);
+        if (remembered === undefined) verified?.set(file.path, stamp, decoded);
+        if (!decoded) {
+            return [{
+                category: 'corrupt',
+                path: file.path,
+                detail: 'The header reads correctly but the image data could not be decoded.',
+            }];
+        }
     }
 
     if (stat.size < 10 * 1024 || width < 320 || height < 320) {
@@ -289,6 +316,9 @@ async function inspectMediaFile(file: { path: string; type: 'image' | 'video' },
 
 export async function scanLibraryHealth(roots: string[], options: LibraryHealthOptions = {}): Promise<LibraryHealthReport> {
     const deep = options.deep === true;
+    // The cache records that a file's pixels decoded. A shallow scan decodes
+    // nothing, so it may neither read nor write it.
+    const verified = deep ? options.verified : undefined;
     const normalizedRoots = [...new Set(roots.map(root => path.resolve(root)))];
     const supported = [] as { path: string; type: 'image' | 'video' }[];
     const issues: LibraryHealthIssue[] = [];
@@ -326,7 +356,7 @@ export async function scanLibraryHealth(roots: string[], options: LibraryHealthO
         while (next < supported.length) {
             if (options.isCancelled?.()) { cancelled = true; return; }
             const file = supported[next++];
-            issues.push(...await inspectMediaFile(file, deep));
+            issues.push(...await inspectMediaFile(file, deep, verified));
             done++;
             report(false);
         }
@@ -342,6 +372,7 @@ export async function scanLibraryHealth(roots: string[], options: LibraryHealthO
         issues.sort(byCategoryThenPath);
         return {
             roots: normalizedRoots, scannedFiles: done, deep, cancelled: true,
+            skippedVerified: verified?.hits ?? 0,
             issues, summary: tally(issues),
         };
     }
@@ -364,6 +395,7 @@ export async function scanLibraryHealth(roots: string[], options: LibraryHealthO
     issues.sort(byCategoryThenPath);
     return {
         roots: normalizedRoots, scannedFiles: supported.length, deep, cancelled: false,
+        skippedVerified: verified?.hits ?? 0,
         issues, summary: tally(issues),
     };
 }

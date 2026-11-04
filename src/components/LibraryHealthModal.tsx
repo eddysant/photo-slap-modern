@@ -152,9 +152,23 @@ export function LibraryHealthModal({ isOpen, roots, onClose, onReport, onFilesMo
                             Scanned {report.scannedFiles} supported media file{report.scannedFiles === 1 ? '' : 's'} in {report.roots.length} root{report.roots.length === 1 ? '' : 's'}.
                             {' '}
                             {report.deep
-                                ? 'Deep scan: every photo was decoded.'
+                                ? report.skippedVerified > 0
+                                    // Not "every photo was decoded", which was
+                                    // the old wording and is now untrue: a
+                                    // resumed scan finishing in seconds has to
+                                    // say why rather than look like it skipped
+                                    // the work it was asked to do. The count of
+                                    // photos decoded *this* pass is deliberately
+                                    // not given — scannedFiles includes videos,
+                                    // which are never decoded, so subtracting
+                                    // would be a plausible-looking wrong number.
+                                    ? (report.skippedVerified === 1
+                                        ? 'Deep scan: 1 photo had already been decoded by an earlier scan, so it was not decoded again.'
+                                        : `Deep scan: ${report.skippedVerified} photos had already been decoded by an earlier scan, so they were not decoded again.`)
+                                    : 'Deep scan: every photo was decoded.'
                                 : 'Headers and structure only — a deep scan also decodes every photo.'}
                             {report.cancelled && ' Anything not reached was not checked, and sidecar entries were not examined at all.'}
+                            {report.cancelled && report.deep && ' Everything it did decode is remembered, so scanning again picks up from there.'}
                         </div>
                         <label className="health-deep-toggle">
                             <input

@@ -56,6 +56,8 @@ interface LibraryHealthReport {
     scannedFiles: number;
     deep: boolean;
     cancelled: boolean;
+    /** Photos a previous deep scan had already decoded, so this one skipped them. */
+    skippedVerified: number;
     issues: LibraryHealthIssue[];
     summary: Record<LibraryHealthCategory, number>;
 }

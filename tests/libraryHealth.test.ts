@@ -11,6 +11,7 @@ import {
 import { SIDECAR_NAME } from '../electron/libraryMeta';
 import { box, ftyp, heicFile, mdat } from './heifFixture';
 import { ID_INFO, cluster, element, segment, tracks, webm } from './ebmlFixture';
+import { createDeepVerifyCache, fileStamp } from '../electron/deepVerifyCache';
 
 describe('library health scan', () => {
     let root: string;
@@ -94,6 +95,7 @@ describe('library health scan', () => {
     it('exports a CSV with safely quoted cells', () => {
         const csv = healthReportToCsv({
             roots: ['/lib'], scannedFiles: 1, deep: false, cancelled: false,
+            skippedVerified: 0,
             issues: [{ category: 'corrupt', path: '/lib/a,b.jpg', detail: 'Could not read "header"' }],
             summary: { corrupt: 1, tiny: 0, unsupported: 0, 'missing-date': 0, 'orphan-sidecar': 0 },
         });
@@ -223,6 +225,164 @@ describe('deep library health scan', () => {
         const deep = await scanLibraryHealth([root], { deep: true });
         expect(corruptPaths(deep)).toEqual([]);
         expect(deep.scannedFiles).toBe(1);
+    });
+
+    // ---- resuming ----
+
+    /**
+     * The decode is the whole cost of a deep scan, so these go through the
+     * real scanner with a real cache rather than asserting on the cache in
+     * isolation: what matters is that the second pass does not decode again,
+     * and that it still reports what the first pass found.
+     */
+    describe('a second deep scan does not decode again', () => {
+        it('skips a photo an earlier scan already decoded, and says how many', async () => {
+            await fs.writeFile(path.join(root, 'fine.jpg'), await photo());
+
+            const cache = createDeepVerifyCache();
+            const first = await scanLibraryHealth([root], { deep: true, verified: cache });
+            expect(first.skippedVerified).toBe(0);
+            expect(cache.dirty).toBe(true);
+
+            const second = await scanLibraryHealth([root], {
+                deep: true,
+                verified: createDeepVerifyCache(cache.entries()),
+            });
+            expect(second.skippedVerified).toBe(1);
+            expect(corruptPaths(second)).toEqual([]);
+        });
+
+        /**
+         * The report has to be assembled fresh, not replayed: a resumed scan
+         * that forgot the damage would announce a clean library, which is
+         * worse than making the user wait.
+         */
+        it('still reports a file the earlier scan found rotten', async () => {
+            await fs.writeFile(path.join(root, 'cut.jpg'),
+                (await photo()).subarray(0, 2048));
+
+            const cache = createDeepVerifyCache();
+            expect(corruptPaths(await scanLibraryHealth([root], { deep: true, verified: cache })))
+                .toEqual(['cut.jpg']);
+
+            const second = await scanLibraryHealth([root], {
+                deep: true,
+                verified: createDeepVerifyCache(cache.entries()),
+            });
+            expect(second.skippedVerified).toBe(1);
+            expect(corruptPaths(second)).toEqual(['cut.jpg']);
+        });
+
+        /**
+         * The two tests above assert the *count* of skipped files, which a
+         * mutation test showed is not the same claim: the count comes from
+         * the cache being consulted, so a scan that read the cache and then
+         * decoded anyway passed both. These two make the decode observable
+         * by planting a verdict that contradicts the file — not a state the
+         * app can reach, since it would need the bytes to change without the
+         * size or mtime changing, but the only way to see from outside
+         * whether a decode happened.
+         */
+        it('really does skip the decode, not merely count it', async () => {
+            const file = path.join(root, 'rotten.jpg');
+            await fs.writeFile(file, (await photo()).subarray(0, 2048));
+            const { size, mtimeMs } = await fs.stat(file);
+
+            const cache = createDeepVerifyCache({
+                [file]: { stamp: fileStamp(size, mtimeMs), ok: true, at: 1 },
+            });
+            const report = await scanLibraryHealth([root], { deep: true, verified: cache });
+            // A decode would have failed. Nothing is reported, so none happened.
+            expect(corruptPaths(report)).toEqual([]);
+            expect(report.skippedVerified).toBe(1);
+        });
+
+        it('and uses the remembered verdict rather than a fresh one', async () => {
+            const file = path.join(root, 'fine.jpg');
+            await fs.writeFile(file, await photo());
+            const { size, mtimeMs } = await fs.stat(file);
+
+            const cache = createDeepVerifyCache({
+                [file]: { stamp: fileStamp(size, mtimeMs), ok: false, at: 1 },
+            });
+            // A fresh decode would succeed, so this can only be the cache.
+            expect(corruptPaths(await scanLibraryHealth([root], { deep: true, verified: cache })))
+                .toEqual(['fine.jpg']);
+        });
+
+        /** Edit the file and the verdict is about something that no longer exists. */
+        it('decodes again once the file has changed', async () => {
+            const file = path.join(root, 'fine.jpg');
+            await fs.writeFile(file, await photo());
+            const cache = createDeepVerifyCache();
+            await scanLibraryHealth([root], { deep: true, verified: cache });
+
+            // A different photo at the same path: new size, new mtime.
+            await fs.writeFile(file, await sharp({
+                create: { width: 1400, height: 1000, channels: 3, background: '#2a6fb4' },
+            }).jpeg({ quality: 80 }).toBuffer());
+
+            const second = await scanLibraryHealth([root], {
+                deep: true,
+                verified: createDeepVerifyCache(cache.entries()),
+            });
+            expect(second.skippedVerified).toBe(0);
+            expect(corruptPaths(second)).toEqual([]);
+        });
+
+        /**
+         * A cancel used to throw away everything the scan had decoded, which
+         * made the cancel and the resume cancel each other out. The partial
+         * work is what the next pass starts from.
+         */
+        it('keeps what a cancelled scan managed to decode', async () => {
+            for (let i = 0; i < 6; i++) {
+                await fs.writeFile(path.join(root, `p${i}.jpg`), await photo());
+            }
+            const cache = createDeepVerifyCache();
+            let asked = 0;
+            const stopped = await scanLibraryHealth([root], {
+                deep: true, verified: cache, isCancelled: () => ++asked > 3,
+            });
+            expect(stopped.cancelled).toBe(true);
+
+            const decoded = Object.keys(cache.entries()).length;
+            expect(decoded).toBeGreaterThan(0);
+            expect(decoded).toBeLessThan(6);
+
+            // The resumed pass decodes only what the first one did not reach.
+            const resumed = await scanLibraryHealth([root], {
+                deep: true,
+                verified: createDeepVerifyCache(cache.entries()),
+            });
+            expect(resumed.cancelled).toBe(false);
+            expect(resumed.skippedVerified).toBe(decoded);
+            expect(resumed.scannedFiles).toBe(6);
+        });
+
+        /**
+         * A shallow scan decodes nothing, so a verdict from one would make
+         * the next deep scan skip the only thing it exists to do — and the
+         * report would look right while having decoded nothing at all.
+         */
+        it('a shallow scan neither fills the cache nor reads it', async () => {
+            await fs.writeFile(path.join(root, 'cut.jpg'), (await photo()).subarray(0, 2048));
+
+            const cache = createDeepVerifyCache();
+            expect(corruptPaths(await scanLibraryHealth([root], { verified: cache }))).toEqual([]);
+            expect(cache.dirty).toBe(false);
+            expect(cache.entries()).toEqual({});
+
+            // And a shallow scan handed a full cache does not consult it,
+            // so it cannot inherit a deep verdict it did not earn.
+            const full = createDeepVerifyCache();
+            await scanLibraryHealth([root], { deep: true, verified: full });
+            const shallow = await scanLibraryHealth([root], {
+                verified: createDeepVerifyCache(full.entries()),
+            });
+            expect(shallow.skippedVerified).toBe(0);
+            expect(corruptPaths(shallow)).toEqual([]);
+        });
     });
 
     /**

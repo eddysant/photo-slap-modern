@@ -16,6 +16,7 @@ import {
   scanLibraryHealth, quarantineCorruptFiles, healthReportToCsv, LibraryHealthReport,
   listQuarantinedFiles, restoreQuarantinedFiles, permanentlyDeleteQuarantinedFiles, quarantineEntriesToCsv,
 } from './libraryHealth'
+import { createDeepVerifyCache, loadDeepVerifyCache, type DeepVerifyRecord } from './deepVerifyCache'
 import { startRemoteServer, stopRemoteServer, getRemoteUrl, RemoteStatus } from './remoteServer'
 import {
   allowRoot, isAllowedPath, assertAllowedPath, assertAllowedPaths, filterAllowedPaths, mediaUrlToPath,
@@ -999,15 +1000,52 @@ ipcMain.handle('library:health:cancel', () => {
   cancelledScanGeneration = healthScanGeneration;
 });
 
+/**
+ * Where the deep scan's "these pixels decoded" verdicts live between runs.
+ *
+ * Deliberately a file in userData rather than electron-store: the store
+ * holds settings and is read whole at startup, while this can reach a couple
+ * of megabytes on a large library. It is read once per deep scan and written
+ * once at the end of one.
+ */
+const deepVerifyPath = () => path.join(app.getPath('userData'), 'deep-verify.json');
+
+async function readDeepVerified(): Promise<DeepVerifyRecord> {
+  try {
+    return loadDeepVerifyCache(JSON.parse(await fs.readFile(deepVerifyPath(), 'utf8')));
+  } catch {
+    // No file yet, or one we cannot make sense of. Either way the scan just
+    // does the work — a resume cache is never worth failing a scan over.
+    return {};
+  }
+}
+
 ipcMain.handle('library:health', async (_event, roots: string[], options?: { deep?: boolean }) => {
   // `deep` is read as a plain boolean rather than passed through, so nothing
   // the renderer sends can reach sharp or libheif as anything but a flag.
+  const deep = options?.deep === true;
   const generation = ++healthScanGeneration;
-  return await scanLibraryHealth(assertAllowedPaths(roots), {
-    deep: options?.deep === true,
+  // Only a deep scan has anything to remember or to skip.
+  const verified = deep ? createDeepVerifyCache(await readDeepVerified()) : undefined;
+
+  const report = await scanLibraryHealth(assertAllowedPaths(roots), {
+    deep,
+    verified,
     isCancelled: () => cancelledScanGeneration === generation,
     onProgress: (done, total) => win?.webContents.send('library:health:progress', { done, total }),
   });
+
+  // Written after a cancelled scan too — that is the whole point, since
+  // discarding what a stopped scan had decoded is what made resuming cost
+  // the full price again.
+  if (verified?.dirty) {
+    try {
+      await fs.writeFile(deepVerifyPath(), JSON.stringify(verified.entries()));
+    } catch (err) {
+      console.error('Could not save the deep-scan cache:', err);
+    }
+  }
+  return report;
 });
 
 ipcMain.handle('library:health:repair', async (_event, roots: string[], action: 'remove-orphans' | 'quarantine-corrupt', paths: string[] = []) => {

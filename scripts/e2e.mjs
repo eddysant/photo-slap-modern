@@ -185,6 +185,17 @@ const fixtureCount = (await fs.readdir(fixture)).length;
 const cfg = configPath();
 let configBackup = null;
 try { configBackup = await fs.readFile(cfg, 'utf8'); } catch { /* no config yet */ }
+
+/**
+ * The deep scan's resume cache lives beside the config, and this run writes
+ * to it — the fifth launch runs two deep scans precisely to prove it does.
+ * It is restored for the same reason the config is: a check the user did not
+ * start should not leave verdicts in their app directory, least of all ones
+ * keyed on temp paths that stopped existing when this script finished.
+ */
+const deepCache = path.join(path.dirname(cfg), 'deep-verify.json');
+let deepCacheBackup = null;
+try { deepCacheBackup = await fs.readFile(deepCache, 'utf8'); } catch { /* none yet */ }
 await fs.mkdir(path.dirname(cfg), { recursive: true });
 await fs.writeFile(cfg, JSON.stringify({
     transitionStyle: 'star', isShuffle: false, mediaFilter: 'both', sortOrder: 'name',
@@ -1191,10 +1202,18 @@ try {
         for (let i = 0; i < 60; i++) {
             await new Promise(r => setTimeout(r, 500));
             const note = document.querySelector('.health-scan-note');
-            if (note && note.textContent.includes('every photo was decoded')) {
+            // Keyed on the prefix, not on a whole sentence: a deep scan that
+            // reused an earlier one's decodes says so instead, and the old
+            // literal match reported "the panel never reported a deep scan"
+            // for a panel that had just reported one.
+            if (note && note.textContent.includes('Deep scan:')) {
                 const corrupt = [...document.querySelectorAll('.health-issue .health-badge')]
                     .filter(b => b.textContent.includes('Corrupt')).length;
-                return JSON.stringify({ before: before.includes('Headers and structure only'), corrupt });
+                return JSON.stringify({
+                    before: before.includes('Headers and structure only'),
+                    corrupt,
+                    note: note.textContent,
+                });
             }
         }
         return 'the panel never reported a deep scan';
@@ -1205,6 +1224,16 @@ try {
         ui !== null && ui.before === true, viaUi);
     check('and the panel then lists the photo the shallow scan missed',
         ui !== null && ui.corrupt >= 1, viaUi);
+    /**
+     * The direct deep scan above already decoded both photos, so this one —
+     * a separate scan, through the real IPC and the real cache file in
+     * userData — should not decode either of them again. That it still
+     * reports the truncated one is the other half: a remembered failure has
+     * to reach the report, or a resumed scan would announce a clean library.
+     */
+    check('a second deep scan reuses what the first one decoded',
+        ui !== null && /already been decoded/.test(ui.note) && ui.corrupt >= 1,
+        ui?.note ?? viaUi);
 
     // ---------------------------------------------------------------
     // Sixth launch: a delete the Trash refuses. The fixture directory is
@@ -1305,6 +1334,8 @@ try {
     try { if (child) process.kill(-child.pid, 'SIGTERM'); } catch { /* already gone */ }
     if (configBackup !== null) await fs.writeFile(cfg, configBackup);
     else await fs.rm(cfg, { force: true });
+    if (deepCacheBackup !== null) await fs.writeFile(deepCache, deepCacheBackup);
+    else await fs.rm(deepCache, { force: true });
     await fs.rm(fixture, { recursive: true, force: true });
     if (brokenFixture) await fs.rm(brokenFixture, { recursive: true, force: true });
     if (shuffleFixture) await fs.rm(shuffleFixture, { recursive: true, force: true });
