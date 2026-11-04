@@ -842,7 +842,9 @@ ipcMain.handle('file:move', async (_event, filePath: string, destDir: string) =>
     // The user filed this photo away; if the target sits inside the library
     // the watcher must not hand it straight back as new media.
     mediaWatcher.acknowledge(dest);
-    return { ok: true };
+    // The renderer needs the new path to carry the file's favorite, tags,
+    // rating and culling decision across with it.
+    return { ok: true, dest };
   } catch (e) {
     console.error('Failed to move file', e);
     return { ok: false, error: (e as Error).message };

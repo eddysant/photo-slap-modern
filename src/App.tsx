@@ -14,7 +14,7 @@ import { Toast } from './components/Toast'
 import { ZoomPan } from './components/ZoomPan'
 import { useAmbientColor } from './hooks/useAmbientColor'
 import { useImagePreloader } from './hooks/useImagePreloader'
-import { useLibraryMeta, type MetadataStorage } from './hooks/useLibraryMeta'
+import { useLibraryMeta, type MetadataMove, type MetadataStorage } from './hooks/useLibraryMeta'
 import {
   usePendingDeletes, UNDO_WINDOW_MS, trashFailureMessage, type RestoreReason,
 } from './hooks/usePendingDeletes'
@@ -23,6 +23,7 @@ import { useShuffleCycle } from './hooks/useShuffleCycle'
 import { useSlideNavigation } from './hooks/useSlideNavigation'
 import { useVideoElement } from './hooks/useVideoElement'
 import { usePlayableList } from './hooks/usePlayableList'
+import { useSlideDecorations } from './hooks/useSlideDecorations'
 import { useSlideSource } from './hooks/useSlideSource'
 import { useToast } from './hooks/useToast'
 import { useSlideshowPlayback } from './hooks/useSlideshowPlayback'
@@ -33,6 +34,7 @@ import {
   type ConcreteTransitionStyle, type TransitionStyle, type TransitionSpeed,
 } from './transitions'
 import { getFileUrl, getDisplayUrl } from './utils'
+import { folderLabel, moveReport } from './quickMove'
 import { cullingActionForKey } from './culling'
 import { SETTINGS_PRESETS, type SettingsPresetName } from './settingsPresets'
 import { makeShuffleHistoryKey } from './shuffleHistory'
@@ -44,9 +46,6 @@ const mergeScans = (results: ScanResult[]): ScanResult => ({
   errors: results.flatMap(r => r.errors),
 })
 
-
-
-const KEN_BURNS_ANIMATIONS = ['kb-pan-left', 'kb-pan-right', 'kb-pan-up', 'kb-pan-down', 'kb-zoom-in', 'kb-zoom-out'];
 
 function App() {
   const [allFiles, setAllFiles] = useState<MediaFile[]>([])
@@ -65,8 +64,6 @@ function App() {
   // launches would look like lost photos)
   const [favoritesOnly, setFavoritesOnly] = useState(false)
   const [tagFilter, setTagFilter] = useState('')
-  const [exifData, setExifData] = useState<ExifData | null>(null)
-  const [kenBurnsClass, setKenBurnsClass] = useState('')
 
   // Settings (persisted across launches via electron-store)
   const [isShuffle, setIsShuffle] = usePersistedState('isShuffle', false)
@@ -484,6 +481,19 @@ function App() {
     meta.forget(deleted);
   }, [removeFromView, meta]);
 
+  /**
+   * A file the user filed away with quick-move. It leaves the slideshow the
+   * same way a deleted one does — the target often sits inside the library,
+   * and the photo rejoining the show a second later is what `acknowledge` in
+   * the watcher exists to prevent — but its metadata travels with it rather
+   * than being forgotten. The file is not gone.
+   */
+  const handleFilesMoved = useCallback((moves: MetadataMove[]) => {
+    if (moves.length === 0) return;
+    removeFromView(moves.map(m => m.from));
+    meta.relocate(moves);
+  }, [removeFromView, meta]);
+
   const handleMetadataRemoved = useCallback((removed: string[]) => {
     meta.forgetLocally(removed); // the repair already rewrote the sidecars
   }, [meta]);
@@ -502,21 +512,12 @@ function App() {
 
   const toggleSettings = () => setIsSettingsOpen(prev => !prev);
 
-  // Per-slide state reset + EXIF fetch + Ken Burns randomization
-  useEffect(() => {
-    setExifData(null);
-
-    if (files[currentIndex]?.type === 'image') {
-      if (isExifEnabled) {
-        window.api.getExif(files[currentIndex].path).then(data => {
-          setExifData(data);
-        });
-      }
-      if (isKenBurns) {
-        setKenBurnsClass(KEN_BURNS_ANIMATIONS[Math.floor(Math.random() * KEN_BURNS_ANIMATIONS.length)]);
-      }
-    }
-  }, [currentIndex, isExifEnabled, isKenBurns, files]);
+  // The current slide's EXIF and its Ken Burns pan — both keyed on the
+  // file's path, so a re-derive that leaves the same photo on screen does not
+  // restart its drift, and a slow EXIF read cannot land on the next slide.
+  const { exifData, kenBurnsClass } = useSlideDecorations({
+    currentFile: files[currentIndex] ?? null, isExifEnabled, isKenBurns,
+  });
 
   useEffect(() => {
     const next = resolveTransition(transitionStyle, activeTransition);
@@ -543,12 +544,12 @@ function App() {
     }
     const result = await window.api.moveFile(file.path, destDir);
     if (result.ok) {
-      showToast(`Moved to ${destDir.split(/[/\\]/).pop()}`);
-      handleFilesDeleted([file.path]); // drop from the slideshow lists
+      showToast(`Moved to ${folderLabel(destDir)}`);
+      handleFilesMoved([{ from: file.path, to: result.dest ?? file.path }]);
     } else {
       showToast(result.error ?? 'Move failed');
     }
-  }, [files, currentIndex, quickMoveFolders, showToast, handleFilesDeleted]);
+  }, [files, currentIndex, quickMoveFolders, showToast, handleFilesMoved]);
 
   // Batch operations from the grid's select mode
   const batchFavorite = meta.setFavorite;
@@ -571,20 +572,19 @@ function App() {
 
   const batchMove = useCallback(async (paths: string[], slot: number) => {
     const destDir = quickMoveFolders[slot];
-    if (!destDir) return;
-    const moved: string[] = [];
+    if (!destDir || paths.length === 0) return;
+    const moves: MetadataMove[] = [];
+    const failed: string[] = [];
     for (const p of paths) {
       const result = await window.api.moveFile(p, destDir);
-      if (result.ok) moved.push(p);
+      if (result.ok) moves.push({ from: p, to: result.dest ?? p });
+      else failed.push(p);
     }
-    if (moved.length > 0) {
-      handleFilesDeleted(moved);
-      showToast(`Moved ${moved.length} to ${destDir.split(/[/\\]/).pop()}`);
-    }
-    if (moved.length < paths.length) {
-      showToast(`${paths.length - moved.length} file(s) could not be moved`);
-    }
-  }, [quickMoveFolders, handleFilesDeleted, showToast]);
+    if (moves.length > 0) handleFilesMoved(moves);
+    // One toast, not two: a plain toast replaces the one before it, so the
+    // failure notice used to wipe out the count of what actually moved.
+    showToast(moveReport({ moved: moves.map(m => m.from), failed }, destDir));
+  }, [quickMoveFolders, handleFilesMoved, showToast]);
 
   // Photo-frame overlay: fetch the current photo's date-taken lazily.
   // The "already fetched" set is a ref so adding an entry doesn't re-run the

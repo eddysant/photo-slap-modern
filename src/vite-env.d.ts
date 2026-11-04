@@ -96,7 +96,7 @@ interface Window {
         getExif: (path: string) => Promise<ExifData | null>;
         /** Average colour of an image as #rrggbb, for the ambient letterbox. */
         getAmbientColor: (path: string) => Promise<string | null>;
-        moveFile: (path: string, destDir: string) => Promise<{ ok: boolean; error?: string }>;
+        moveFile: (path: string, destDir: string) => Promise<{ ok: boolean; dest?: string; error?: string }>;
         libraryLoad: (roots: string[]) => Promise<LibraryMeta>;
         librarySave: (roots: string[], meta: LibraryMeta) => Promise<void>;
         scanLibraryHealth: (roots: string[], options?: { deep?: boolean }) => Promise<LibraryHealthReport>;

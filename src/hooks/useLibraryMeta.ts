@@ -63,6 +63,76 @@ export function pruneMetadata(state: LibraryMetaState, paths: Iterable<string>):
     return unchanged ? state : next;
 }
 
+/** A file that moved on disk, and where it went. */
+export interface MetadataMove {
+    from: string;
+    to: string;
+}
+
+/**
+ * Carry every entry for `from` across to `to`.
+ *
+ * **A quick-move is not a delete.** The photo still exists, and the target
+ * usually sits inside the same library, so forgetting its favorite, tags,
+ * rating and culling decision threw away work the user had done — then the
+ * sidecar write that followed made it permanent. Filing a hearted photo into
+ * `Keep/` and finding it unhearted on the next launch is silent data loss.
+ *
+ * The destination's own entries are cleared when the arriving file has none:
+ * whatever is at that path now is the file that just moved there, and a
+ * leftover entry for a path whose file is gone is exactly the orphan the
+ * library-health repair exists to clean up.
+ *
+ * The tag vocabulary is untouched, for the same reason `pruneMetadata` leaves
+ * it alone: it belongs to the library, not to a path.
+ *
+ * A destination outside every open root has no sidecar that owns it, so the
+ * next `saveLibraryMeta` drops the entry — the metadata follows the file as
+ * far as there is somewhere to keep it, and no further.
+ */
+export function relocateMetadata(
+    state: LibraryMetaState,
+    moves: Iterable<MetadataMove>,
+): LibraryMetaState {
+    const real = [...moves].filter(m => m.from !== m.to);
+    if (real.length === 0) return state;
+
+    const favorites = new Set(state.favorites);
+    const fileTags = { ...state.fileTags };
+    const ratings = { ...state.ratings };
+    const cullingDecisions = { ...state.cullingDecisions };
+    let changed = false;
+
+    const carry = <T,>(record: Record<string, T>, from: string, to: string): boolean => {
+        if (from in record) {
+            record[to] = record[from];
+            delete record[from];
+            return true;
+        }
+        if (to in record) {
+            delete record[to];
+            return true;
+        }
+        return false;
+    };
+
+    for (const { from, to } of real) {
+        if (favorites.delete(from)) {
+            favorites.add(to);
+            changed = true;
+        } else if (favorites.delete(to)) {
+            changed = true;
+        }
+        if (carry(fileTags, from, to)) changed = true;
+        if (carry(ratings, from, to)) changed = true;
+        if (carry(cullingDecisions, from, to)) changed = true;
+    }
+
+    return changed
+        ? { ...state, favorites, fileTags, ratings, cullingDecisions }
+        : state;
+}
+
 /** Add or remove one tag on one path, dropping the key when it empties. */
 export function toggleTag(
     fileTags: Record<string, string[]>,
@@ -350,6 +420,15 @@ export function useLibraryMeta(currentDirs: string[], storage: MetadataStorage =
         apply(prev => pruneMetadata(prev, paths));
     }, [apply]);
 
+    /**
+     * Follow files that moved on disk, keeping their metadata, and persist it.
+     * The counterpart to `forget`, for the one case where the file is not gone.
+     */
+    const relocate = useCallback((moves: MetadataMove[]) => {
+        if (moves.length === 0) return;
+        apply(prev => relocateMetadata(prev, moves));
+    }, [apply]);
+
     /** Forget without persisting — the health repair already rewrote sidecars. */
     const forgetLocally = useCallback((paths: string[]) => {
         if (paths.length === 0) return;
@@ -373,5 +452,6 @@ export function useLibraryMeta(currentDirs: string[], storage: MetadataStorage =
         setCulling,
         forget,
         forgetLocally,
-    }), [state, setFavorite, toggleFavoriteAt, setTag, addTagToAll, setRating, setCulling, forget, forgetLocally]);
+        relocate,
+    }), [state, setFavorite, toggleFavoriteAt, setTag, addTagToAll, setRating, setCulling, forget, forgetLocally, relocate]);
 }

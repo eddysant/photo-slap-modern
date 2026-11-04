@@ -197,9 +197,18 @@ const deepCache = path.join(path.dirname(cfg), 'deep-verify.json');
 let deepCacheBackup = null;
 try { deepCacheBackup = await fs.readFile(deepCache, 'utf8'); } catch { /* none yet */ }
 await fs.mkdir(path.dirname(cfg), { recursive: true });
+/**
+ * A quick-move target inside the library, which is where they usually are.
+ * Pressing `1` has to carry the photo's favorite and tags across with it —
+ * a quick-move is not a delete, and the sidecar write that follows is what
+ * made getting this wrong permanent. Only a filesystem read can say so.
+ */
+const quickMoveDir = path.join(fixture, 'Keep');
+await fs.mkdir(quickMoveDir, { recursive: true });
 await fs.writeFile(cfg, JSON.stringify({
     transitionStyle: 'star', isShuffle: false, mediaFilter: 'both', sortOrder: 'name',
     isKenBurns: false, isExifEnabled: false, isSmart: false, slideDuration: 3000,
+    quickMoveFolders: [quickMoveDir, null, null],
 }));
 
 let appLog = '';
@@ -784,6 +793,39 @@ try {
                 { method: 'POST', body: JSON.stringify(bad) });
             check(`queue rejects ${JSON.stringify(bad)}`, res.status === 400, String(res.status));
         }
+    }
+
+    /**
+     * Filing a photo away with quick-move used to go through the delete path,
+     * which forgets its metadata and persists that — so a hearted photo moved
+     * into `Keep/` came back unhearted, permanently. Hearted here rather than
+     * relying on the earlier one: by now the show has moved on.
+     */
+    console.log('quick-move keeps the metadata');
+    const movedFrom = await cdp.evaluate(`(async () => {
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+        await sleep(300);
+        const before = document.querySelector('.file-info')?.textContent ?? '';
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'h' }));
+        await sleep(300);
+        const hearted = !!document.querySelector('.fav-indicator');
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: '1' }));
+        await sleep(1500); // the move itself, then the sidecar save debounce
+        return JSON.stringify({ before, hearted });
+    })()`).then(JSON.parse);
+    check('the photo was hearted before being filed away', movedFrom.hearted, movedFrom.before);
+    try {
+        const landed = await fs.readdir(quickMoveDir);
+        check('quick-move moves the file into the target folder',
+            landed.length === 1, `Keep/ holds ${JSON.stringify(landed)}`);
+        const after = JSON.parse(await fs.readFile(path.join(fixture, '.photo-slap.json'), 'utf8'));
+        const inKeep = after.favorites.filter(f => f.startsWith('Keep' + path.sep));
+        check('a quick-moved photo keeps its favorite, at its new path',
+            inKeep.length === 1 && inKeep[0] === path.join('Keep', landed[0]),
+            `favorites=${JSON.stringify(after.favorites)} landed=${JSON.stringify(landed)}`);
+    } catch (e) {
+        check('a quick-moved photo keeps its favorite, at its new path', false, e.message);
     }
 
     // ---------- playback resilience, undo, help ----------

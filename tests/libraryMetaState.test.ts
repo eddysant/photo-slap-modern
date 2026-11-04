@@ -5,6 +5,7 @@ import {
     createSidecarSaver,
     pruneMetadata,
     sidecarAction,
+    relocateMetadata,
     sidecarPayload,
     toggleTag,
     type LibraryMetaState,
@@ -18,6 +19,92 @@ const state = (): LibraryMetaState => ({
     tagNames: ['beach', 'dog'],
     ratings: { '/lib/a.jpg': 5 },
     cullingDecisions: { '/lib/b.jpg': 'reject' },
+});
+
+describe('relocateMetadata', () => {
+    const moved = () => relocateMetadata(state(), [{ from: '/lib/a.jpg', to: '/lib/keep/a.jpg' }]);
+
+    it('carries a favorite across to the new path', () => {
+        const next = moved();
+        expect(next.favorites.has('/lib/a.jpg')).toBe(false);
+        expect(next.favorites.has('/lib/keep/a.jpg')).toBe(true);
+    });
+
+    it('carries tags and the rating across', () => {
+        const next = moved();
+        expect(next.fileTags['/lib/a.jpg']).toBeUndefined();
+        expect(next.fileTags['/lib/keep/a.jpg']).toEqual(['beach']);
+        expect(next.ratings['/lib/a.jpg']).toBeUndefined();
+        expect(next.ratings['/lib/keep/a.jpg']).toBe(5);
+    });
+
+    it('carries a culling decision across', () => {
+        const next = relocateMetadata(state(), [{ from: '/lib/b.jpg', to: '/lib/later/b.jpg' }]);
+        expect(next.cullingDecisions['/lib/b.jpg']).toBeUndefined();
+        expect(next.cullingDecisions['/lib/later/b.jpg']).toBe('reject');
+    });
+
+    // This is the bug it exists for: quick-move called `forget`, so filing a
+    // hearted photo away erased the heart and the sidecar write made it stick.
+    it('is not the same thing as forgetting the file', () => {
+        const before = state();
+        const next = relocateMetadata(before, [{ from: '/lib/a.jpg', to: '/lib/keep/a.jpg' }]);
+        const pruned = pruneMetadata(before, ['/lib/a.jpg']);
+        expect(next.favorites.size).toBe(before.favorites.size);
+        expect(pruned.favorites.size).toBe(before.favorites.size - 1);
+    });
+
+    it('leaves the tag vocabulary alone', () => {
+        expect(moved().tagNames).toEqual(['beach', 'dog']);
+    });
+
+    it('leaves other files untouched', () => {
+        const next = moved();
+        expect(next.favorites.has('/lib/b.jpg')).toBe(true);
+        expect(next.fileTags['/lib/b.jpg']).toEqual(['dog']);
+    });
+
+    it('moves several files in one call', () => {
+        const next = relocateMetadata(state(), [
+            { from: '/lib/a.jpg', to: '/lib/keep/a.jpg' },
+            { from: '/lib/b.jpg', to: '/lib/keep/b.jpg' },
+        ]);
+        expect([...next.favorites].sort()).toEqual(['/lib/keep/a.jpg', '/lib/keep/b.jpg']);
+        expect(next.ratings['/lib/keep/a.jpg']).toBe(5);
+        expect(next.cullingDecisions['/lib/keep/b.jpg']).toBe('reject');
+    });
+
+    // `apply` only persists when the state object actually changes.
+    it('returns the same state when there is nothing to move', () => {
+        const before = state();
+        expect(relocateMetadata(before, [])).toBe(before);
+        expect(relocateMetadata(before, [{ from: '/lib/none.jpg', to: '/lib/keep/none.jpg' }])).toBe(before);
+        expect(relocateMetadata(before, [{ from: '/lib/a.jpg', to: '/lib/a.jpg' }])).toBe(before);
+    });
+
+    /**
+     * An orphan entry at the destination belongs to a file that is gone; the
+     * file at that path now is the one that just arrived, and it had no heart.
+     */
+    it('clears a stale entry already sitting at the destination', () => {
+        const before: LibraryMetaState = {
+            ...state(),
+            favorites: new Set(['/lib/keep/a.jpg']),
+            ratings: { '/lib/keep/a.jpg': 1 },
+            fileTags: {},
+            cullingDecisions: {},
+        };
+        const next = relocateMetadata(before, [{ from: '/lib/a.jpg', to: '/lib/keep/a.jpg' }]);
+        expect(next.favorites.has('/lib/keep/a.jpg')).toBe(false);
+        expect(next.ratings['/lib/keep/a.jpg']).toBeUndefined();
+    });
+
+    it('does not mutate the state it was given', () => {
+        const before = state();
+        relocateMetadata(before, [{ from: '/lib/a.jpg', to: '/lib/keep/a.jpg' }]);
+        expect(before.favorites.has('/lib/a.jpg')).toBe(true);
+        expect(before.ratings['/lib/a.jpg']).toBe(5);
+    });
 });
 
 describe('pruneMetadata', () => {

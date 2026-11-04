@@ -62,3 +62,49 @@ describe('App does not make a hook object a dependency', () => {
         }
     });
 });
+
+/**
+ * Reads the source: a quick-move must not go through the delete path.
+ *
+ * `handleFilesDeleted` calls `meta.forget`, which prunes the file's favorite,
+ * tags, rating and culling decision *and persists it*. That is right for a
+ * file in the Trash and wrong for one the user filed into `Keep/` — the photo
+ * still exists, usually inside the same library, so filing a hearted photo
+ * away erased the heart and the sidecar write made it permanent. Both move
+ * paths go through `handleFilesMoved`, which carries the metadata across.
+ *
+ * This is a source read because the alternative is rendering `App`, and the
+ * loss is only observable one sidecar write later.
+ */
+describe('App treats a moved file as moved, not deleted', () => {
+    const source = fs.readFileSync(path.join(import.meta.dirname, '../src/App.tsx'), 'utf8');
+
+    /** The body of a `const <name> = useCallback(...)` in App. */
+    const body = (name: string) => {
+        const at = source.indexOf(`const ${name} = useCallback(`);
+        expect(at, name).toBeGreaterThan(-1);
+        const end = source.indexOf('\n  }, [', at);
+        expect(end, name).toBeGreaterThan(-1);
+        return source.slice(at, end);
+    };
+
+    for (const mover of ['quickMove', 'batchMove']) {
+        it(`${mover} does not forget the file's metadata`, () => {
+            const source = body(mover);
+            expect(source).toContain('handleFilesMoved');
+            expect(source).not.toContain('handleFilesDeleted');
+            expect(source).not.toContain('meta.forget');
+        });
+    }
+
+    it('handleFilesMoved relocates the metadata rather than pruning it', () => {
+        const moved = body('handleFilesMoved');
+        expect(moved).toContain('meta.relocate');
+        expect(moved).not.toContain('meta.forget');
+    });
+
+    // The counterpart, so this test cannot pass by `forget` having no callers.
+    it('a real delete still forgets it', () => {
+        expect(body('handleFilesDeleted')).toContain('meta.forget');
+    });
+});
