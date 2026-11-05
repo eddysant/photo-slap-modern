@@ -122,6 +122,27 @@ const fixture = await makeFixture();
 let child = null;
 let cdp = null;
 
+/**
+ * The app's own settings, put back afterwards.
+ *
+ * This launches the real app against a temp fixture, and the app records
+ * where it has been: `lastDirs` and a `resumePositions` entry per library.
+ * Without this the file filled up with fixture paths that stopped existing
+ * when the run finished — and the intro screen's Resume button then offered
+ * one of them. `test:e2e` has always restored the config; it restored
+ * whatever it found, which by then included everything this script had left.
+ * A check the user did not start should leave nothing behind.
+ */
+const configPath = () => {
+    const home = os.homedir();
+    if (process.platform === 'darwin') return path.join(home, 'Library/Application Support/photo-slap/config.json');
+    if (process.platform === 'win32') return path.join(process.env.APPDATA ?? home, 'photo-slap/config.json');
+    return path.join(home, '.config/photo-slap/config.json');
+};
+const cfg = configPath();
+let configBackup = null;
+try { configBackup = await fs.readFile(cfg, 'utf8'); } catch { /* no config yet */ }
+
 // VITE_DEV_SERVER_URL must not leak in: its presence is what selects the dev
 // server and the relaxed CSP, which would make this test meaningless.
 const env = {
@@ -256,6 +277,11 @@ try {
 } finally {
     cdp?.close();
     try { if (child) process.kill(-child.pid, 'SIGTERM'); } catch { /* already gone */ }
+    // After the app is gone, or electron-store writes the file again on its
+    // way out and undoes this.
+    await sleep(300);
+    if (configBackup !== null) await fs.writeFile(cfg, configBackup);
+    else await fs.rm(cfg, { force: true });
     await fs.rm(fixture, { recursive: true, force: true });
 }
 

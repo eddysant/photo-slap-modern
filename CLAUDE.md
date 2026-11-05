@@ -422,7 +422,15 @@ is for producing a release.
 `test:smoke` and `test:e2e` launch the real app but set
 `PHOTO_SLAP_UNOBTRUSIVE=1`, so no window appears and focus stays where it was
 (see below). `test:memory` does take the screen, deliberately. All three need
-any running photo-slap closed first, since the app is single-instance. `test:e2e` backs up and restores the user's settings.
+any running photo-slap closed first, since the app is single-instance.
+**`test:smoke` and `test:e2e` both back up and restore the user's settings**,
+and for a while only the e2e did. Both launch the real app against a temp
+fixture, and the app records where it has been — `lastDirs` plus a
+`resumePositions` entry per library — so the smoke run filled the config with
+fixture paths that stopped existing when it finished, and the intro screen's
+Resume button then offered one of them. The e2e restoring faithfully is what
+hid it: it restored what it found, which already included the smoke run's
+leavings. Found by reading a real config after a gate, not by a test.
 `test:smoke` takes an optional `-- --app <path>` to run against a packaged
 `.app`, and CI runs it that way before publishing a release; `test:memory`
 requires one, since dev-mode numbers mean nothing. Packaged
