@@ -9,6 +9,7 @@ import crypto from 'node:crypto'
 import Store from 'electron-store'
 import sharp from 'sharp'
 import { scanDirectory } from './fileScanner'
+import { EXIF_HEAD_BYTES, shouldReadWholeFile } from './exifRead'
 import { DirectoryWatcher } from './dirWatcher'
 import { findExactDuplicates, scanFiles } from './dedupe'
 import { loadLibraryMeta, saveLibraryMeta, removeOrphanedLibraryMeta, LibraryMeta } from './libraryMeta'
@@ -1228,12 +1229,16 @@ ipcMain.handle('file:getAmbientColor', async (_event, filePath: string) => {
  * failed head parse falls back to the whole file rather than reporting a
  * photo as having no EXIF.
  */
-const EXIF_HEAD_BYTES = 256 * 1024;
+type ExifTags = ReturnType<typeof ExifReader.load>;
+/** A file with no EXIF; the handler turns this into the `null` it promises. */
+const NO_EXIF = {} as ExifTags;
 
-async function readExifTags(resolved: string) {
+async function readExifTags(resolved: string): Promise<ExifTags> {
   const fh = await fs.open(resolved, 'r');
   let head: Buffer;
+  let size: number;
   try {
+    size = (await fh.stat()).size;
     const buf = Buffer.alloc(EXIF_HEAD_BYTES);
     const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
     head = buf.subarray(0, bytesRead);
@@ -1247,6 +1252,10 @@ async function readExifTags(resolved: string) {
   } catch {
     // fall through to the whole file
   }
+
+  // Nothing in the head. Reading the rest is only worth it for a file that
+  // could carry EXIF there at all, and only while it fits in main.
+  if (!shouldReadWholeFile(resolved, size)) return NO_EXIF;
   return ExifReader.load(await fs.readFile(resolved));
 }
 
