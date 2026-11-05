@@ -209,6 +209,10 @@ await fs.writeFile(cfg, JSON.stringify({
     transitionStyle: 'star', isShuffle: false, mediaFilter: 'both', sortOrder: 'name',
     isKenBurns: false, isExifEnabled: false, isSmart: false, slideDuration: 3000,
     quickMoveFolders: [quickMoveDir, null, null],
+    // Stated rather than left to the default. The remote check *toggles* the
+    // checkbox, so it only passes from off — seeded on, the click would stop
+    // the server and the check would sit waiting for a URL that never comes.
+    remoteEnabled: false,
 }));
 
 let appLog = '';
@@ -1073,6 +1077,7 @@ try {
     await fs.writeFile(cfg, JSON.stringify({
         transitionStyle: 'fade', isShuffle: true, mediaFilter: 'both', sortOrder: 'name',
         isKenBurns: false, isExifEnabled: false, isSmart: false, slideDuration: 600000,
+        remoteEnabled: false,
         shuffleHistory: {}, shuffleSeeds: {},
     }));
     child = launchApp(shuffleFixture);
@@ -1137,6 +1142,7 @@ try {
     await fs.writeFile(cfg, JSON.stringify({
         transitionStyle: 'fade', isShuffle: false, mediaFilter: 'both', sortOrder: 'name',
         isKenBurns: false, isExifEnabled: false, isSmart: false, slideDuration: 600000,
+        remoteEnabled: false,
         metadataStorage: 'memory',
     }));
     child = launchApp(sidecarFixture);
@@ -1197,6 +1203,7 @@ try {
     await fs.writeFile(cfg, JSON.stringify({
         transitionStyle: 'fade', isShuffle: false, mediaFilter: 'both', sortOrder: 'name',
         isKenBurns: false, isExifEnabled: false, isSmart: false, slideDuration: 600000,
+        remoteEnabled: false,
     }));
     child = launchApp(deepFixture);
     cdp = await attach();
@@ -1300,6 +1307,7 @@ try {
     await fs.writeFile(cfg, JSON.stringify({
         transitionStyle: 'fade', isShuffle: false, mediaFilter: 'both', sortOrder: 'name',
         isKenBurns: false, isExifEnabled: false, isSmart: false, slideDuration: 600000,
+        remoteEnabled: false,
         metadataStorage: 'memory',
     }));
     child = launchApp(trashFailFixture);
