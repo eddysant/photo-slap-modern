@@ -24,6 +24,7 @@ import {
 } from './pathAccess'
 import { sanitizeUploadName, findFreeUploadPath } from './guestUpload'
 import { createConcurrencyLimit } from './concurrencyLimit'
+import { writeCacheEntry } from './imageCache'
 import { decodeHeicImage } from './lazyDeps'
 import ExifReader from 'exifreader';
 
@@ -208,7 +209,9 @@ async function deriveImage(filePath: string, maxDim: number | null): Promise<{ b
       : await pipeline.jpeg({ quality: 90 }).toBuffer();
 
     if (cachePath) {
-      fs.writeFile(cachePath, buffer)
+      // Atomic, or a concurrent request for the same key reads a half-written
+      // entry as a cache hit and is served a truncated image. See imageCache.ts.
+      writeCacheEntry(cachePath, buffer)
         .then(() => noteCacheWrite(buffer.length))
         .catch(() => { });
     }

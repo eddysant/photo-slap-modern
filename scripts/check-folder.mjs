@@ -154,8 +154,17 @@ try {
     const total = Number((scan.counter.match(/\/\s*(\d+)/) ?? [])[1] ?? 0);
     check(`the folder opened and the scan found its media`,
         total === expectedMedia.length, `counter "${scan.counter}" vs ${expectedMedia.length} media files on disk`);
-    check('non-media files beneath it were ignored, not shown',
-        total < allEntries.length, `${allEntries.length} entries -> ${total} slides`);
+    /*
+     * Only a claim when there is something to exclude. A folder that happens
+     * to hold nothing but media made `total < allEntries.length` false and
+     * reported a filtering failure for a correct scan.
+     */
+    if (allEntries.length > expectedMedia.length) {
+        check('non-media files beneath it were ignored, not shown',
+            total < allEntries.length, `${allEntries.length} entries -> ${total} slides`);
+    } else {
+        console.log('    (every file here is playable media \u2014 nothing to exclude)');
+    }
     if (scan.toast) console.log(`    (toast: ${scan.toast})`);
 
     console.log('\npainting real photos');
@@ -173,27 +182,79 @@ try {
         const files = (await window.api.getAutoOpen())?.files ?? [];
         const photos = files.filter(f => f.type === 'image').slice(0, 5);
         const seen = [];
+        const setInput = (el, v) => {
+            Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(el, v);
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+        };
         for (const photo of photos) {
             window.dispatchEvent(new KeyboardEvent('keydown', { key: 'g' }));
             await sleep(900);
+            /*
+             * The grid is virtualized, so a cell for the wanted file usually
+             * is not rendered at all. Hunting the DOM for one found nothing,
+             * fell back to Escape, and then measured whichever slide happened
+             * to be on screen — reporting that file's pixels under this
+             * file's name, which is how a photo that paints in 200ms was
+             * recorded as a 0x0 paint failure. Narrowing by filename first
+             * renders exactly the wanted cell.
+             */
+            const filter = document.querySelector('.grid-filter');
+            if (filter) { setInput(filter, photo.name); await sleep(500); }
             const cell = [...document.querySelectorAll('.grid-cell')]
                 .find(c => c.textContent.includes(photo.name) || c.querySelector('img')?.src.includes(encodeURIComponent(photo.name)));
             if (cell) cell.click(); else window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
-            await sleep(1600);
-            const img = document.querySelector('img.media-element');
-            seen.push({ name: photo.name, w: img?.naturalWidth ?? 0, h: img?.naturalHeight ?? 0, src: (img?.src ?? '').slice(0, 140) });
+            /*
+             * Waited on, not slept past. A fixed 1.6s called a camera HEIC a
+             * paint failure on a large library and passed it on a small one:
+             * the first HEIC pays for the WASM decoder loading and queues
+             * behind a gridful of thumbnails, all serialised through the one
+             * decoder. "It had not painted yet" and "it will never paint" are
+             * different answers, and a fixed sleep cannot tell them apart.
+             */
+            const nameOf = el => decodeURIComponent((el?.src ?? '').split('?')[0].split('/').pop() ?? '');
+            /*
+             * Wait for the wanted file to be the one on screen, and only then
+             * for it to paint. Polling for "an image with pixels" matched the
+             * outgoing slide, which is still mounted and already painted, so
+             * every measurement landed one slide behind: each file was
+             * reported with its predecessor's dimensions.
+             */
+            const started = Date.now();
+            let img = null, showing = '';
+            while (Date.now() - started < 25000) {
+                await sleep(200);
+                img = document.querySelector('img.media-element');
+                showing = nameOf(img);
+                if (showing !== photo.name) continue;        // not swapped in yet
+                if (img.naturalWidth > 0) break;             // painted
+                if (img.complete) break;                     // errored
+            }
+            const waited = Date.now() - started;
+            /*
+             * Whether the URL carried a size is decided here, in the page,
+             * rather than inferred from a truncated src: slicing the URL to
+             * 140 characters first made the verdict depend on how long the
+             * folder's path happened to be, and a nested library under a temp
+             * directory lost the query string to the cut.
+             */
+            const src = img?.src ?? '';
+            seen.push({ name: photo.name, showing, w: img?.naturalWidth ?? 0, h: img?.naturalHeight ?? 0, waited,
+                sized: /\\?w=\\d+/.test(src), src: src.replace(/^.*\\//, '') });
         }
         return JSON.stringify({ photos: photos.length, totalPhotos: files.filter(f => f.type === 'image').length, seen });
     })()`).then(JSON.parse);
     if (paint.totalPhotos === 0) {
         console.log('    (no photos in this folder \u2014 nothing to paint)');
     } else {
-        const painted = paint.seen.filter(p => p.w > 0);
+        // A slide only counts if the file on screen is the one asked for.
+        const painted = paint.seen.filter(p => p.w > 0 && p.showing === p.name);
         check(`every photo slide visited painted pixels (${paint.photos} of ${paint.totalPhotos} photos)`,
             painted.length === paint.seen.length && paint.seen.length > 0,
-            paint.seen.map(p => `${p.name} ${p.w}x${p.h}`).join(', '));
+            paint.seen.map(p => `${p.name} ${p.w}x${p.h} in ${p.waited}ms`
+                + (p.showing === p.name ? '' : ` (but the viewer was showing ${p.showing || 'nothing'})`)).join(', '));
         check('photos are served display-sized, not at full resolution',
-            painted.length > 0 && painted.every(p => p.src.includes('?w=')), painted[0]?.src ?? '');
+            painted.length > 0 && painted.every(p => p.sized),
+            painted.map(p => p.src).join(', '));
     }
 
     console.log('\nreading real EXIF and dates');
@@ -245,24 +306,60 @@ try {
     console.log('\nmedia:// on a real folder');
     const proto = await cdp.evaluate(`(async () => {
         const files = (await window.api.getAutoOpen())?.files ?? [];
-        const p = files[0].path;
-        const enc = 'media://local/' + encodeURIComponent(p).replace(/%2F/g, '/');
+        const url = p => 'media://local/' + encodeURIComponent(p).replace(/%2F/g, '/');
+        /*
+         * Every file here is chosen by kind, never by position. The first
+         * entry was a 453MB video in a folder whose first directory held clips, so
+         * the probe asked for a display-sized variant of a video — which
+         * correctly has none — and then tried to decode it as an image. The
+         * third time this script has reported a right answer as a failure for
+         * assuming what the folder holds.
+         */
+        const photo = files.find(f => f.type === 'image');
+        const enc = url(photo.path);
         const full = await fetch(enc);
         const small = await fetch(enc + '?w=256');
-        const outside = await fetch('media://local/' + encodeURIComponent('/etc/hosts').replace(/%2F/g, '/'));
-        const range = await fetch(enc, { headers: { Range: 'bytes=0-99' } });
-        const bmp = await createImageBitmap(await small.blob());
+        const outside = await fetch(url('/etc/hosts'));
+        /*
+         * Ranges are asked of a file served as its own bytes. A HEIC never is
+         * — Chromium cannot decode one, so every request for it goes through
+         * the transcode and comes back 200 — and asking that file for a range
+         * called correct behaviour a failure.
+         */
+        const raw = files.find(f => f.type === 'video' || !/\\.(heic|heif)$/i.test(f.name));
+        const range = raw ? (await fetch(url(raw.path), { headers: { Range: 'bytes=0-99' } })).status : null;
+        /*
+         * The decode is the check, so its failure has to be reported rather
+         * than thrown: an unguarded rejection here aborted the whole run, and
+         * took every check after it down with a file it could not decode.
+         */
+        let dim = null, decodeError = null;
+        const blob = await small.blob();
+        /* What actually came back, so a decode failure can be diagnosed from the report. */
+        const head = [...new Uint8Array(await blob.slice(0, 4).arrayBuffer())]
+            .map(b => b.toString(16).padStart(2, '0')).join(' ');
+        try { const b = await createImageBitmap(blob); dim = b.width + 'x' + b.height; }
+        catch (e) { decodeError = e.message; }
         return JSON.stringify({
             full: full.status, small: small.status, outside: outside.status,
-            range: range.status, dim: bmp.width + 'x' + bmp.height,
+            range, rawName: raw?.name ?? null, dim, decodeError,
+            name: photo.name, smallType: small.headers.get('content-type'),
+            smallBytes: blob.size, head,
             bytes: Number(full.headers.get('content-length') ?? 0),
         });
     })()`).then(JSON.parse);
     check('a real photo is served over media://', proto.full === 200, `${proto.full}, ${proto.bytes} bytes`);
-    const maxDim = Math.max(...proto.dim.split('x').map(Number));
+    const maxDim = proto.dim ? Math.max(...proto.dim.split('x').map(Number)) : 0;
     check('a display-sized variant is derived from it, capped on its longest side',
-        proto.small === 200 && maxDim === 256, `${proto.dim} (longest side ${maxDim})`);
-    check('byte ranges still work', proto.range === 206, String(proto.range));
+        proto.small === 200 && maxDim === 256 && !proto.decodeError,
+        proto.decodeError
+            ? `${proto.name}: ${proto.decodeError} \u2014 ${proto.small} ${proto.smallType}, ${proto.smallBytes} bytes, starts ${proto.head}`
+            : `${proto.dim} (longest side ${maxDim})`);
+    if (proto.range === null) {
+        console.log('    (every file here is transcoded \u2014 none is served as its own bytes)');
+    } else {
+        check('byte ranges still work', proto.range === 206, `${proto.range} on ${proto.rawName}`);
+    }
     check('a path outside the opened folder is still refused', proto.outside === 403, String(proto.outside));
 
     console.log('\nthe grid, on real photos');
