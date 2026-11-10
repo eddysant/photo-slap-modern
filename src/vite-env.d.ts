@@ -123,6 +123,9 @@ interface Window {
         setPowerBlocked: (blocked: boolean) => Promise<void>;
         scanDedupeExact: (dirs: string[], includeVideos: boolean) => Promise<{ hash: string; files: string[] }[]>;
         scanDedupeFiles: (dirs: string[], kind: 'images' | 'videos') => Promise<string[]>;
+        /** Hashes an earlier scan computed that are still good, plus each file's current stamp. */
+        getCachedHashes: (paths: string[]) => Promise<{ known: Record<string, string>; stamps: Record<string, string> }>;
+        putCachedHashes: (entries: { path: string; stamp: string; hash: string }[]) => Promise<number>;
         getFileInfo: (paths: string[]) => Promise<Record<string, { size: number; mtimeMs: number }>>;
         on: (channel: string, listener: (event: any, ...args: any[]) => void) => () => void;
     }

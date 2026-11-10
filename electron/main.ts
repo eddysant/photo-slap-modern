@@ -5,7 +5,6 @@ import path from 'node:path'
 import fs from 'node:fs/promises'
 import { statSync, createReadStream } from 'node:fs'
 import { Readable } from 'node:stream'
-import crypto from 'node:crypto'
 import Store from 'electron-store'
 import sharp from 'sharp'
 import { scanDirectory } from './fileScanner'
@@ -23,8 +22,10 @@ import {
   allowRoot, isAllowedPath, assertAllowedPath, assertAllowedPaths, filterAllowedPaths, mediaUrlToPath,
 } from './pathAccess'
 import { sanitizeUploadName, findFreeUploadPath } from './guestUpload'
-import { createConcurrencyLimit } from './concurrencyLimit'
-import { writeCacheEntry } from './imageCache'
+import { createImageDeriver } from './imageDeriver'
+import { openStampedCacheFile } from './stampedCache'
+import { lookupDates, DATE_CACHE_VERSION } from './dateTaken'
+import { lookupHashes, storeHashes, isHash, HASH_CACHE_VERSION } from './perceptualHashCache'
 import { decodeHeicImage } from './lazyDeps'
 import ExifReader from 'exifreader';
 
@@ -75,47 +76,6 @@ const MIME_TYPES: Record<string, string> = {
 };
 const mimeFor = (p: string) => MIME_TYPES[path.extname(p).toLowerCase()] ?? 'application/octet-stream';
 
-// Derived images (HEIC transcodes and display-sized downscales) are cached
-// on disk keyed by path+mtime+size+dimension, so each variant is computed once.
-let imageCacheDir: string | null = null;
-const IMAGE_CACHE_MAX_BYTES = 500 * 1024 * 1024;
-// Photo-frame installs run for weeks without a restart, so a startup-only
-// sweep would let the cache grow unbounded for the entire session. Bytes
-// written since the last sweep trigger the next one.
-const IMAGE_CACHE_SWEEP_INTERVAL_BYTES = 50 * 1024 * 1024;
-let bytesSinceLastEviction = 0;
-let evictionInFlight: Promise<void> | null = null;
-
-function noteCacheWrite(bytes: number) {
-  bytesSinceLastEviction += bytes;
-  if (bytesSinceLastEviction < IMAGE_CACHE_SWEEP_INTERVAL_BYTES || evictionInFlight) return;
-  bytesSinceLastEviction = 0;
-  evictionInFlight = evictImageCache().finally(() => { evictionInFlight = null; });
-}
-
-// LRU sweep: hits touch mtime, so oldest mtime = least recently used
-async function evictImageCache() {
-  if (!imageCacheDir) return;
-  try {
-    const names = await fs.readdir(imageCacheDir);
-    const entries = await Promise.all(names.map(async (name) => {
-      const p = path.join(imageCacheDir!, name);
-      const stat = await fs.stat(p);
-      return { p, size: stat.size, mtimeMs: stat.mtimeMs };
-    }));
-    let total = entries.reduce((sum, e) => sum + e.size, 0);
-    if (total <= IMAGE_CACHE_MAX_BYTES) return;
-    entries.sort((a, b) => a.mtimeMs - b.mtimeMs);
-    for (const entry of entries) {
-      if (total <= IMAGE_CACHE_MAX_BYTES) break;
-      await fs.unlink(entry.p).catch(() => { });
-      total -= entry.size;
-    }
-  } catch {
-    // best effort
-  }
-}
-
 // libvips sizes its thread pool to the CPU and keeps an operation cache, and
 // neither earns its memory here. Every derived image is already cached on
 // disk keyed by path+mtime+size, so a second in-memory copy of the same
@@ -151,76 +111,16 @@ const isScalableImage = (p: string) => /\.(jpe?g|png|webp|bmp|heic|heif)$/i.test
 // large library pays. Raising it to four is a one-line trade if throughput
 // ever matters more than the ~30MB.
 const DERIVE_CONCURRENCY = 3;
-const withDeriveSlot = createConcurrencyLimit(DERIVE_CONCURRENCY);
-const deriveInFlight = new Map<string, Promise<{ buffer: Buffer; type: string }>>();
-
-/**
- * HEIC transcode and/or downscale to `maxDim` (longest side), disk-cached.
- * Downscaling exists because full-resolution camera photos (often 48MP)
- * become ~200MB GPU textures — several of those alive at once during a
- * transition causes texture thrash and visible artifacts. A display-sized
- * variant is a fraction of the memory and decodes in a fraction of the time.
- */
-async function deriveImage(filePath: string, maxDim: number | null): Promise<{ buffer: Buffer; type: string }> {
-  const asPng = /\.png$/i.test(filePath); // keep alpha for PNGs
-  const type = asPng ? 'image/png' : 'image/jpeg';
-
-  let cachePath: string | null = null;
-  if (imageCacheDir) {
-    try {
-      const stat = await fs.stat(filePath);
-      const key = crypto.createHash('sha1')
-        .update(`${filePath}:${stat.mtimeMs}:${stat.size}:${maxDim ?? 'full'}`)
-        .digest('hex');
-      cachePath = path.join(imageCacheDir, `${key}.${asPng ? 'png' : 'jpg'}`);
-      const cached = await fs.readFile(cachePath); // cache hit — no slot needed
-      fs.utimes(cachePath, new Date(), new Date()).catch(() => { }); // LRU touch
-      return { buffer: cached, type };
-    } catch {
-      // cache miss — derive below
-    }
-  }
-
-  const inFlightKey = `${filePath}:${maxDim ?? 'full'}`;
-  const existing = deriveInFlight.get(inFlightKey);
-  if (existing) return existing;
-
-  const job = withDeriveSlot(async () => {
-    let pipeline: ReturnType<typeof sharp>;
-    if (isHeic(filePath)) {
-      // heic-decode (WASM libheif) does the HEVC decode — prebuilt sharp
-      // binaries can't, HEVC being patent-encumbered
-      const { width, height, data } = await decodeHeicImage(await fs.readFile(filePath));
-      // `Buffer.from(typedArray)` copies: a second full-size RGBA buffer —
-      // 48MB for a 12MP photo — on top of the one libheif just handed over.
-      // A view over the same bytes costs nothing.
-      const raw = ArrayBuffer.isView(data)
-        ? Buffer.from(data.buffer, data.byteOffset, data.byteLength)
-        : Buffer.from(data as ArrayBuffer);
-      pipeline = sharp(raw, { raw: { width, height, channels: 4 } });
-    } else {
-      pipeline = sharp(filePath).rotate(); // bake EXIF orientation
-    }
-    if (maxDim) {
-      pipeline = pipeline.resize(maxDim, maxDim, { fit: 'inside', withoutEnlargement: true });
-    }
-    const buffer = asPng
-      ? await pipeline.png().toBuffer()
-      : await pipeline.jpeg({ quality: 90 }).toBuffer();
-
-    if (cachePath) {
-      // Atomic, or a concurrent request for the same key reads a half-written
-      // entry as a cache hit and is served a truncated image. See imageCache.ts.
-      writeCacheEntry(cachePath, buffer)
-        .then(() => noteCacheWrite(buffer.length))
-        .catch(() => { });
-    }
-    return { buffer, type };
-  }).finally(() => deriveInFlight.delete(inFlightKey));
-
-  deriveInFlight.set(inFlightKey, job);
-  return job;
-}
+// Derived images (HEIC transcodes and display-sized downscales) are cached
+// on disk, LRU-capped. Photo-frame installs run for weeks without a restart,
+// so the sweep runs at startup and again every 50MB written.
+const imageDeriver = createImageDeriver({
+  decodeHeic: decodeHeicImage,
+  concurrency: DERIVE_CONCURRENCY,
+  maxBytes: 500 * 1024 * 1024,
+  sweepIntervalBytes: 50 * 1024 * 1024,
+});
+const deriveImage = imageDeriver.derive;
 
 /**
  * Longest side and whether EXIF says the pixels still need rotating, read
@@ -983,6 +883,24 @@ ipcMain.handle('dedupe:scan:files', async (_event, dirPaths: string[], kind: 'im
   return await scanFiles(assertAllowedPaths(dirPaths), kind);
 });
 
+// Perceptual hashes from earlier duplicate scans, so a re-scan hashes only
+// what is new or edited. See perceptualHashCache.ts.
+const hashCacheFile = openStampedCacheFile<string>(
+  () => path.join(app.getPath('userData'), 'phash-cache.json'),
+  HASH_CACHE_VERSION,
+  isHash,
+);
+
+ipcMain.handle('dedupe:hashes:get', async (_event, paths: string[]) => {
+  return await lookupHashes(filterAllowedPaths(paths), await hashCacheFile.cache());
+});
+
+ipcMain.handle('dedupe:hashes:put', async (_event, entries: unknown) => {
+  const stored = storeHashes(entries, await hashCacheFile.cache(), isAllowedPath);
+  if (stored > 0) hashCacheFile.scheduleFlush();
+  return stored;
+});
+
 // --------- Library metadata (favorites & tags, stored with the photos) ---------
 ipcMain.handle('library:load', async (_event, roots: string[]) => {
   return await loadLibraryMeta(assertAllowedPaths(roots));
@@ -1119,66 +1037,18 @@ ipcMain.handle('files:getInfo', async (_event, paths: string[]) => {
 });
 
 // --------- Date-taken lookup (for date sorting) ---------
-// EXIF dates live near the start of the file, so only the first 256 KB is
-// read; anything without a parseable DateTimeOriginal falls back to mtime.
-const EXIF_DATE_RE = /^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/;
-
-async function getFileDate(filePath: string): Promise<number> {
-  let mtime = 0;
-  try {
-    mtime = (await fs.stat(filePath)).mtimeMs;
-  } catch {
-    return 0;
-  }
-
-  if (!/\.(jpe?g|png|webp|heic|heif|gif|bmp)$/i.test(filePath)) return mtime;
-
-  // A date sort reads a window out of every file in the library, so the
-  // window size is the whole cost: 256KB across 2,000 photos is 512MB of
-  // I/O, measured at 770ms warm on a local SSD and far worse on a network
-  // volume. 64KB covers the EXIF block of every file tested, including a
-  // HEIC, and is 7x less to read; a camera that writes a large embedded
-  // thumbnail ahead of DateTimeOriginal falls through to the old window
-  // rather than silently sorting by mtime.
-  for (const window of EXIF_DATE_WINDOWS) {
-    const taken = await dateFromHead(filePath, window);
-    if (taken) return taken;
-  }
-  return mtime;
-}
-
-const EXIF_DATE_WINDOWS = [64 * 1024, 256 * 1024];
-
-async function dateFromHead(filePath: string, bytes: number): Promise<number | null> {
-  try {
-    const fh = await fs.open(filePath, 'r');
-    const buf = Buffer.alloc(bytes);
-    const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
-    await fh.close();
-    const tags = ExifReader.load(buf.subarray(0, bytesRead));
-    const raw = tags['DateTimeOriginal']?.description || tags['CreateDate']?.description;
-    const m = raw && EXIF_DATE_RE.exec(String(raw));
-    if (m) {
-      const t = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime();
-      if (!isNaN(t) && t > 0) return t;
-    }
-  } catch {
-    // truncated or absent EXIF — the caller widens the window, then gives up
-  }
-  return null;
-}
+// Remembered across launches against each file's size:mtime, so a date sort
+// reads a file's head once rather than at every start. See dateTaken.ts.
+const dateCacheFile = openStampedCacheFile<number>(
+  () => path.join(app.getPath('userData'), 'date-taken.json'),
+  DATE_CACHE_VERSION,
+  (value): value is number => typeof value === 'number' && Number.isFinite(value),
+);
 
 ipcMain.handle('files:getDates', async (_event, paths: string[]) => {
-  const result: Record<string, number> = {};
-  const allowed = filterAllowedPaths(paths);
-  let next = 0;
-  const worker = async () => {
-    while (next < allowed.length) {
-      const p = allowed[next++];
-      result[p] = await getFileDate(p);
-    }
-  };
-  await Promise.all(Array.from({ length: 16 }, worker));
+  const cache = await dateCacheFile.cache();
+  const result = await lookupDates(filterAllowedPaths(paths), { cache });
+  if (cache.dirty) dateCacheFile.scheduleFlush();
   return result;
 });
 
@@ -1308,6 +1178,9 @@ app.on('window-all-closed', () => {
 
 app.on('will-quit', () => {
   mediaWatcher.close()
+  // Best effort: the debounce may still be holding the last batch.
+  void dateCacheFile.flush()
+  void hashCacheFile.flush()
 })
 
 app.on('activate', () => {
@@ -1323,13 +1196,13 @@ app.whenReady().then(async () => {
   applyContentSecurityPolicy();
 
   try {
-    imageCacheDir = path.join(app.getPath('userData'), 'image-cache');
+    const imageCacheDir = path.join(app.getPath('userData'), 'image-cache');
     await fs.mkdir(imageCacheDir, { recursive: true });
-    evictImageCache(); // background LRU sweep
+    void imageDeriver.useCacheDir(imageCacheDir); // index what is there, then sweep
     // remove the pre-1.1.1 cache directory (superseded by image-cache)
     fs.rm(path.join(app.getPath('userData'), 'heic-cache'), { recursive: true, force: true }).catch(() => { });
   } catch {
-    imageCacheDir = null; // cache disabled, transcoding still works
+    // cache disabled, transcoding still works
   }
 
   createWindow();

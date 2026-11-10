@@ -3,6 +3,7 @@ import { FiX, FiCheck } from 'react-icons/fi';
 import { bmvbhash } from 'blockhash-core';
 import { getFileUrl, formatBytes } from '../utils';
 import { groupSimilar } from '../similarity';
+import { splitKnown, inScanOrder, withStamps, scanStatus, type PathHash } from '../hashReuse';
 import {
     type DedupeHistory, type FileStat,
     loadHistory, recordGroup, recordPair, undecidedFrom,
@@ -334,39 +335,67 @@ export function DedupeModal({ isOpen, onClose, rootPaths, onFilesDeleted }: Dedu
             setStatusMsg('Finding files...');
             const images = await window.api.scanDedupeFiles(scanRoots, 'images');
             const videos = includeVideos ? await window.api.scanDedupeFiles(scanRoots, 'videos') : [];
-            const total = images.length + videos.length;
+            const all = [...images, ...videos];
 
-            setStatusMsg(`Processing ${total} files...`);
-            setProgress(0);
+            // Hashes an earlier scan computed are still good for any file
+            // that has not changed since, so only the rest are hashed. The
+            // stamps are each file's size:mtime *now*, before any hashing,
+            // and go back with every hash that is stored.
+            const { known, stamps } = await window.api.getCachedHashes(all);
+            const img = splitKnown(images, known);
+            const vid = splitKnown(videos, known);
+            const reused = img.cached.length + vid.cached.length;
+            const toHash = img.missing.length + vid.missing.length;
+            const remember = (hashes: PathHash[]) => {
+                const entries = withStamps(hashes, stamps);
+                if (entries.length > 0) void window.api.putCachedHashes(entries);
+            };
 
-            const worker = new Worker(new URL('../workers/phashWorker.ts', import.meta.url), { type: 'module' });
-            workerRef.current = worker;
+            setStatusMsg(scanStatus(toHash, reused));
+            setProgress(toHash === 0 ? 100 : 0);
 
-            const imageHashes = await new Promise<{ path: string; hash: string }[]>((resolve, reject) => {
-                worker.onmessage = (e: MessageEvent<PHashMessage>) => {
-                    if (e.data.type === 'progress') {
-                        setProgress(Math.round((e.data.done / total) * 100));
-                    } else {
-                        resolve(e.data.hashes);
-                    }
-                };
-                worker.onerror = (e) => reject(new Error(e.message));
-                worker.postMessage({ paths: images } satisfies PHashRequest);
-            });
-            worker.terminate();
-            workerRef.current = null;
+            const fresh: PathHash[] = [];
+            if (img.missing.length > 0) {
+                const worker = new Worker(new URL('../workers/phashWorker.ts', import.meta.url), { type: 'module' });
+                workerRef.current = worker;
 
-            const hashes = [...imageHashes];
-            for (let i = 0; i < videos.length; i++) {
-                const hash = await hashVideoFrame(videos[i]);
-                if (hash) hashes.push({ path: videos[i], hash });
-                setProgress(Math.round(((images.length + i + 1) / total) * 100));
+                const imageHashes = await new Promise<PathHash[]>((resolve, reject) => {
+                    worker.onmessage = (e: MessageEvent<PHashMessage>) => {
+                        if (e.data.type === 'progress') {
+                            setProgress(Math.round((e.data.done / toHash) * 100));
+                        } else if (e.data.type === 'hashes') {
+                            // Stored as they arrive: a scan closed at 90%
+                            // keeps the 90%.
+                            remember(e.data.hashes);
+                        } else {
+                            resolve(e.data.hashes);
+                        }
+                    };
+                    worker.onerror = (e) => reject(new Error(e.message));
+                    worker.postMessage({ paths: img.missing } satisfies PHashRequest);
+                });
+                worker.terminate();
+                workerRef.current = null;
+                fresh.push(...imageHashes);
             }
 
-            // Group by similarity, transitively (A~B and B~C land together)
+            for (let i = 0; i < vid.missing.length; i++) {
+                const hash = await hashVideoFrame(vid.missing[i]);
+                if (hash) {
+                    const entry = { path: vid.missing[i], hash };
+                    fresh.push(entry);
+                    remember([entry]);
+                }
+                setProgress(Math.round(((img.missing.length + i + 1) / toHash) * 100));
+            }
+
+            // Group by similarity, transitively (A~B and B~C land together).
+            // In scan order whatever was cached: a group's first file is the
+            // one the review offers to keep.
             setStatusMsg('Comparing...');
-            const newGroups: DuplicateGroup[] = groupSimilar(hashes, level.threshold)
-                .map(files => ({ hash: '', files, type: 'similar' as const }));
+            const newGroups: DuplicateGroup[] = groupSimilar(
+                inScanOrder(all, [...img.cached, ...vid.cached, ...fresh]), level.threshold,
+            ).map(files => ({ hash: '', files, type: 'similar' as const }));
 
             await enterReview(newGroups);
         } catch (e) {

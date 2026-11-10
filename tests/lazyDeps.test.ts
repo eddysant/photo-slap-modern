@@ -44,9 +44,23 @@ describe('the HEIC decoder is only loaded when a HEIC is touched', () => {
 
     it('and the rest of the main process decodes through the gated call', () => {
         const users = sources.filter(({ text }) => /\bdecodeHeicImage\s*\(/.test(text));
-        // main.ts (the media:// derive) and libraryHealth.ts (dimensions and
-        // the deep scan) at the least.
-        expect(users.map(u => u.name).sort()).toEqual(['lazyDeps.ts', 'libraryHealth.ts', 'main.ts']);
+        // libraryHealth.ts calls it for dimensions and the deep scan.
+        expect(users.map(u => u.name).sort()).toEqual(['lazyDeps.ts', 'libraryHealth.ts']);
+    });
+
+    /**
+     * The media:// derive no longer calls the decoder by name: it lives in
+     * `imageDeriver.ts`, which takes its decoder as an option so a test can
+     * count the decodes. That makes "which function was it handed" the thing
+     * to pin — an inline decoder built from the memoised loader would work,
+     * stay lazy, and quietly run outside the gate.
+     */
+    it('and the deriver is handed the gated call, not a decoder of its own', () => {
+        const main = sources.find(({ name }) => name === 'main.ts');
+        expect(main?.text).toMatch(/decodeHeic:\s*decodeHeicImage\b/);
+        const deriver = sources.find(({ name }) => name === 'imageDeriver.ts');
+        expect(deriver?.text).toMatch(/options\.decodeHeic/);
+        expect(deriver?.text).not.toMatch(/lazyDeps|heic-decode/);
     });
 
     /**

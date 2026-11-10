@@ -96,6 +96,17 @@ function connect(page) {
 const cfg = path.join(os.homedir(), 'Library/Application Support/photo-slap/config.json');
 let configBackup = null;
 try { configBackup = await fs.readFile(cfg, 'utf8'); } catch { /* none */ }
+/*
+ * The caches that live beside the config — the deep scan's resume cache, the
+ * date-taken cache and the perceptual-hash cache — are put back too. A run
+ * against a fixture leaves entries keyed on paths that stop existing when it
+ * ends, and a check should leave the app directory as it found it.
+ */
+const sideFiles = new Map();
+for (const name of ['deep-verify.json', 'date-taken.json', 'phash-cache.json']) {
+    const file = path.join(path.dirname(cfg), name);
+    try { sideFiles.set(file, await fs.readFile(file, 'utf8')); } catch { sideFiles.set(file, null); }
+}
 
 const before = await fs.readdir(TARGET);
 const mediaExt = /\.(jpg|jpeg|png|gif|webp|bmp|heic|heif|mp4|mov|webm|mkv|ogg)$/i;
@@ -418,9 +429,13 @@ try {
 } finally {
     cdp?.close();
     try { if (child) process.kill(-child.pid, 'SIGTERM'); } catch { /* gone */ }
-    await sleep(500);
+    await sleep(600);
     if (configBackup !== null) await fs.writeFile(cfg, configBackup);
     else await fs.rm(cfg, { force: true });
+    for (const [file, backup] of sideFiles) {
+        if (backup !== null) await fs.writeFile(file, backup);
+        else await fs.rm(file, { force: true });
+    }
     const after = await fs.readdir(TARGET);
     const added = after.filter(f => !before.includes(f));
     console.log(`\nfolder untouched: ${added.length === 0 ? 'yes, nothing written' : 'NO \u2014 added ' + JSON.stringify(added)}`);

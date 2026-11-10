@@ -187,15 +187,19 @@ let configBackup = null;
 try { configBackup = await fs.readFile(cfg, 'utf8'); } catch { /* no config yet */ }
 
 /**
- * The deep scan's resume cache lives beside the config, and this run writes
- * to it — the fifth launch runs two deep scans precisely to prove it does.
- * It is restored for the same reason the config is: a check the user did not
+ * Three caches live beside the config and this run writes to all of them:
+ * the deep scan's resume cache (the fifth launch runs two deep scans
+ * precisely to prove it does), the date-taken cache (the date-sort checks)
+ * and the perceptual-hash cache (the duplicate scan). They are restored for
+ * the same reason the config is: a check the user did not
  * start should not leave verdicts in their app directory, least of all ones
  * keyed on temp paths that stopped existing when this script finished.
  */
-const deepCache = path.join(path.dirname(cfg), 'deep-verify.json');
-let deepCacheBackup = null;
-try { deepCacheBackup = await fs.readFile(deepCache, 'utf8'); } catch { /* none yet */ }
+const sideFiles = new Map();
+for (const name of ['deep-verify.json', 'date-taken.json', 'phash-cache.json']) {
+    const file = path.join(path.dirname(cfg), name);
+    try { sideFiles.set(file, await fs.readFile(file, 'utf8')); } catch { sideFiles.set(file, null); }
+}
 await fs.mkdir(path.dirname(cfg), { recursive: true });
 /**
  * A quick-move target inside the library, which is where they usually are.
@@ -733,7 +737,16 @@ try {
         const done = !!document.querySelector('.step-done');
         btnByText('CLOSE')?.click();
         await sleep(400);
-        return JSON.stringify({ before, header, metaName, metaStats, done, after: document.querySelector('.file-info')?.textContent });
+        // What the scan hashed should now be on offer to the next one. Asked
+        // of the files still on disk: the review has deleted some.
+        const survivors = (await window.api.getAutoOpen())?.files.map(f => f.path) ?? [];
+        const remembered = await window.api.getCachedHashes(survivors);
+        return JSON.stringify({
+            before, header, metaName, metaStats, done, after: document.querySelector('.file-info')?.textContent,
+            survivors: survivors.length,
+            hashed: Object.keys(remembered.known).length,
+            stamped: Object.keys(remembered.stamps).length,
+        });
     })()`).then(JSON.parse);
     check('similar scan found the 3-file group', dedupe.header.includes('3 files in group'), dedupe.header);
     if (hasVideos) {
@@ -742,6 +755,15 @@ try {
     check('compare card shows filename', /\.(jpg|png)$/.test(dedupe.metaName), dedupe.metaName);
     check('compare card shows size and dimensions', /B/.test(dedupe.metaStats) && /×/.test(dedupe.metaStats), dedupe.metaStats);
     check('review flow completed', dedupe.done);
+    /*
+     * The worker's batch message, the preload bridge, the IPC handler and the
+     * allowlist, together — the only place they are. A unit test can show the
+     * cache keeps what it is given; only this shows a real scan gives it
+     * anything.
+     */
+    check('the scan kept its hashes for the next one',
+        dedupe.hashed >= 2 && dedupe.stamped === dedupe.survivors,
+        `${dedupe.hashed} of ${dedupe.survivors} surviving files have a remembered hash`);
     const expectedDeletes = hasVideos ? 3 : 2; // 2 from the image trio + 1 from the video pair
     check(`slideshow dropped the ${expectedDeletes} deleted files`,
         dedupe.after === `1 / ${fixtureCount - expectedDeletes}`, `${dedupe.before} -> ${dedupe.after}`);
@@ -1348,6 +1370,16 @@ try {
                 break;
             }
         }
+        // The notice and the list are two separate updates: the toast is
+        // shown by the restore callback and the file rejoins the list on the
+        // render after. Reading the counter in the tick the toast first
+        // appears raced that render, and lost it once. Wait for the list,
+        // bounded, and then read both - which also makes the "viewer stayed
+        // where it was" check stricter, since it is now read after the
+        // restore has actually landed.
+        for (let i = 0; i < 20 && !(pos() ?? '').endsWith('/ 4'); i++) {
+            await new Promise(r => setTimeout(r, 150));
+        }
         return JSON.stringify({
             before, removed,
             after: { name: name(), pos: pos() },
@@ -1384,8 +1416,13 @@ try {
     try { if (child) process.kill(-child.pid, 'SIGTERM'); } catch { /* already gone */ }
     if (configBackup !== null) await fs.writeFile(cfg, configBackup);
     else await fs.rm(cfg, { force: true });
-    if (deepCacheBackup !== null) await fs.writeFile(deepCache, deepCacheBackup);
-    else await fs.rm(deepCache, { force: true });
+    // After the app has gone: the caches flush on a debounce and again on
+    // quit, and a restore that lands first is undone by the flush.
+    await sleep(600);
+    for (const [file, backup] of sideFiles) {
+        if (backup !== null) await fs.writeFile(file, backup);
+        else await fs.rm(file, { force: true });
+    }
     await fs.rm(fixture, { recursive: true, force: true });
     if (brokenFixture) await fs.rm(brokenFixture, { recursive: true, force: true });
     if (shuffleFixture) await fs.rm(shuffleFixture, { recursive: true, force: true });

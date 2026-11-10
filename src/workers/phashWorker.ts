@@ -12,7 +12,12 @@ export interface PHashRequest {
 
 export type PHashMessage =
     | { type: 'progress'; done: number; total: number }
+    // A batch as it is made, so a scan that is cancelled keeps what it
+    // hashed: the caller stores these while `done` still carries everything.
+    | { type: 'hashes'; hashes: { path: string; hash: string }[] }
     | { type: 'done'; hashes: { path: string; hash: string }[] };
+
+const BATCH = 25;
 
 const post = (msg: PHashMessage) =>
     (self as unknown as { postMessage(m: PHashMessage): void }).postMessage(msg);
@@ -29,6 +34,12 @@ self.onmessage = async (e: MessageEvent<PHashRequest>) => {
     }
 
     let done = 0;
+    let handedOver = 0;
+    const handOver = () => {
+        if (hashes.length === handedOver) return;
+        post({ type: 'hashes', hashes: hashes.slice(handedOver) });
+        handedOver = hashes.length;
+    };
     for (const filePath of paths) {
         try {
             const res = await fetch(getDisplayUrl(filePath, 256));
@@ -46,7 +57,9 @@ self.onmessage = async (e: MessageEvent<PHashRequest>) => {
         if (done % 10 === 0 || done === paths.length) {
             post({ type: 'progress', done, total: paths.length });
         }
+        if (done % BATCH === 0) handOver();
     }
+    handOver();
 
     post({ type: 'done', hashes });
 };

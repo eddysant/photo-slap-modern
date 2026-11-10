@@ -40,6 +40,8 @@ contextBridge.exposeInMainWorld('api', {
   // Dedupe
   scanDedupeExact: (dirs: string[], includeVideos: boolean) => ipcRenderer.invoke('dedupe:scan:exact', dirs, includeVideos),
   scanDedupeFiles: (dirs: string[], kind: 'images' | 'videos') => ipcRenderer.invoke('dedupe:scan:files', dirs, kind),
+  getCachedHashes: (paths: string[]) => ipcRenderer.invoke('dedupe:hashes:get', paths),
+  putCachedHashes: (entries: { path: string; stamp: string; hash: string }[]) => ipcRenderer.invoke('dedupe:hashes:put', entries),
   getFileInfo: (paths: string[]) => ipcRenderer.invoke('files:getInfo', paths),
   showInFolder: (path: string) => ipcRenderer.invoke('file:showInFolder', path),
   getExif: (path: string) => ipcRenderer.invoke('file:getExif', path),
