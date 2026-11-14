@@ -27,6 +27,18 @@ const SLIDES = 40;
 const PHOTO_COUNT = Number(process.env.MEM_PHOTOS ?? 30);
 const PHOTO_W = Number(process.env.MEM_W ?? 4032);
 const PHOTO_H = Number(process.env.MEM_H ?? 3024);
+/**
+ * `jpeg` (the default) or `heic`. The two take different roads through the
+ * derive pipeline — a HEIC is decoded by the WASM decoder into a full-size
+ * RGBA buffer and can be cut from a larger cached variant, a JPEG never is —
+ * so a change to that pipeline has to be measured on the road it changed.
+ * HEICs are made with `sips`, so `heic` is macOS-only.
+ */
+const PHOTO_FORMAT = process.env.MEM_FORMAT ?? 'jpeg';
+if (!['jpeg', 'heic'].includes(PHOTO_FORMAT)) {
+    console.error(`MEM_FORMAT must be jpeg or heic, not ${PHOTO_FORMAT}`);
+    process.exit(2);
+}
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const mb = bytes => Math.round(bytes / 1024 / 1024);
@@ -50,7 +62,7 @@ const binary = path.join(appPath, 'Contents/MacOS/photo-slap');
 // ---------- fixture ----------
 async function makeFixture() {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'photo-slap-mem-'));
-    process.stdout.write(`  generating ${PHOTO_COUNT} ${PHOTO_W}x${PHOTO_H} photos`);
+    process.stdout.write(`  generating ${PHOTO_COUNT} ${PHOTO_W}x${PHOTO_H} ${PHOTO_FORMAT} photos`);
     for (let i = 0; i < PHOTO_COUNT; i++) {
         // Noise, not a gradient: a flat image compresses to nothing and
         // decodes to a texture the GPU can trivially dedupe.
@@ -60,9 +72,14 @@ async function makeFixture() {
             noise[p + 1] = (p * 13 + i * 71) & 0xff;
             noise[p + 2] = (p * 3 + i * 151) & 0xff;
         }
+        const jpg = path.join(dir, `p${String(i).padStart(2, '0')}.jpg`);
         await sharp(noise, { raw: { width: PHOTO_W, height: PHOTO_H, channels: 3 } })
             .jpeg({ quality: 88 })
-            .toFile(path.join(dir, `p${String(i).padStart(2, '0')}.jpg`));
+            .toFile(jpg);
+        if (PHOTO_FORMAT === 'heic') {
+            execFileSync('sips', ['-s', 'format', 'heic', jpg, '--out', jpg.replace(/\.jpg$/, '.heic')], { stdio: 'ignore' });
+            await fs.rm(jpg);
+        }
         process.stdout.write('.');
     }
     process.stdout.write('\n');
@@ -197,7 +214,7 @@ try {
         src: document.querySelector('.media-element')?.currentSrc ?? '',
     })`));
     const requested = /[?&]w=(\d+)/.exec(view.src)?.[1] ?? 'original';
-    console.log(`\nphoto-slap memory — ${PHOTO_COUNT} x ${PHOTO_W}x${PHOTO_H} photos`);
+    console.log(`\nphoto-slap memory — ${PHOTO_COUNT} x ${PHOTO_W}x${PHOTO_H} ${PHOTO_FORMAT} photos`);
     console.log(`  window ${view.w}x${view.h} @${view.dpr}x — slide variant: ${requested}\n`);
     await sample('at rest');
 

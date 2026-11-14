@@ -307,7 +307,7 @@ A photo frame on a login item runs for weeks, so the resident set matters
 more than a few milliseconds on a decode. `npm run test:memory -- --app
 <path to .app>` measures it: the packaged app against 30 camera-resolution
 photos, sampling the whole process tree by role as the slideshow walks and
-again with the grid open. Dev mode is deliberately not measured — Vite, the
+again with the grid open; `MEM_FORMAT=heic` makes the photos HEICs, which take a different road through the derive pipeline. Dev mode is deliberately not measured — Vite, the
 devtools and an unminified bundle put a floor under it that has nothing to
 do with what ships. Measured on a 1200x800 @2x window, the work below took
 the peak from 1045MB to 600-650MB and the settled figure from 927MB to
@@ -413,6 +413,22 @@ runs) and is the number to compare when a change is a startup cost.
   without a path ever leaving the process. Turning the remote off now clears
   it; it used to stay resident for the rest of the session.
 
+- **Decoding a HEIC once also lowered what main settles at.** The derive
+  rewrite (`imageDeriver.ts`, see the media:// section) holds more at once by
+  design — a HEIC's full-size pixels stay alive while other sizes wait on the
+  same decode, and a finished variant is held until its cache write lands —
+  so it was measured against the build before it, in one session,
+  interleaved, with `MEM_FORMAT=heic` (`scripts/memory.mjs` makes JPEGs by
+  default, and a JPEG never takes the road that changed). After GC: **main
+  465 / 465MB before, 318 / 321MB after; the whole tree 755-765MB before,
+  639-643MB after.** Fewer decodes means fewer 48MB RGBA buffers, and the
+  allocator settles near its high-water mark. Peaks moved within the noise
+  (776-823MB before, 770-877MB after); the 877 was the GPU and renderer
+  processes, which receive the same JPEG variants either way, not main.
+  JPEG runs were unchanged (peak 654 vs 657MB, settled 569 vs 563MB), and so
+  was main at rest (298 vs 299MB), so the new caches cost nothing at
+  startup.
+
 What is left is mostly a floor: the Electron main process sits around 200MB
 before any photo is touched (measured with a fixture small enough that no
 derive runs at all), and sharp adds ~50MB of high-water on top of that.
@@ -477,6 +493,48 @@ leavings. Found by reading a real config after a gate, not by a test.
 requires one, since dev-mode numbers mean nothing. Packaged
 installers land in `release/<version>/` (macOS DMG, Windows NSIS — see
 `electron-builder.json5`).
+
+## Releasing
+
+**"Push it" means cut a release, not just `git push`.** The app Eddy runs comes
+from the Homebrew cask, so a commit that is pushed but not released never
+reaches it. That happened: from v1.9.0 (Oct 27) to Nov 14, 24 commits sat
+pushed and unreleased on `main` — including fixes he then went looking for in
+the installed app, which was still exactly v1.9.0. A release is not done until
+the tap serves it. Steps, in order:
+
+1. **Gate green.** `npm run verify`, `npx vitest run`, then `npm run test:smoke`
+   and `npm run test:e2e` in the background (they launch the app; it is
+   single-instance). A change to the derive pipeline, or to anything else held
+   in main, also gets `npm run test:memory` against a `build:dir` app, compared
+   with the previous build in the same session — the figures move ~50MB
+   between runs, so a lone number proves nothing.
+2. **Bump the version.** `npm version minor --no-git-tag-version` for new
+   features, `patch` for fixes only; it updates `package.json` and
+   `package-lock.json` together. Skipping this is how the confusion above
+   started: every local build since a tag reports the tag's version, so the
+   version string alone cannot tell you what an app contains. Commit as
+   `Release vX.Y.Z`, with the user-visible changes since the last tag
+   (`git log vPREV..HEAD`) in the message.
+3. **Tag and push both.** `git tag vX.Y.Z && git push origin main vX.Y.Z`. The
+   tag runs `.github/workflows/release.yml`: unit tests, a build, the smoke
+   test against the packaged app, then a GitHub Release carrying
+   `photo-slap-Mac-X.Y.Z-Installer.dmg`.
+4. **Watch it land.** `gh run watch` the Release run, then `gh release view
+   vX.Y.Z` and check the DMG is attached. If the run fails, fix forward and
+   tag a new patch version; never move a published tag.
+5. **Update the tap.** [eddysant/homebrew-tap](https://github.com/eddysant/homebrew-tap)
+   updates `Casks/photo-slap.rb` from the latest release on a daily schedule
+   (06:27 UTC), so a release would otherwise wait up to a day. Dispatch it:
+   `gh workflow run update-photo-slap-cask.yml -R eddysant/homebrew-tap`, and
+   `gh run watch` that run. It refuses a release whose DMG asset is missing,
+   which is why step 4 comes first. Then confirm on the tap's `main` that the
+   cask's `version` is X.Y.Z and its `sha256` is the DMG's
+   (`gh release download vX.Y.Z -p '*.dmg'` and `shasum -a 256`).
+6. **Report** the version, the release URL and the tap commit. Upgrading the
+   install on the Mac is the user's own step — `brew update && brew upgrade
+   --cask photo-slap`, then clear the quarantine flag (the build is unsigned;
+   see the README).
 
 **All settings persist through `electron-store` in the main process**, over the
 `store:get` / `store:set` channels; the renderer never touches disk. The
