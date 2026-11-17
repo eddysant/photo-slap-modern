@@ -64,6 +64,36 @@ describe('App does not make a hook object a dependency', () => {
 });
 
 /**
+ * Reads the source: no dependency array anywhere in `App` names `shuffle`.
+ *
+ * The listener check above covers two effects; this one covers all of them,
+ * for the object that did the most damage. `shuffle.progress` changes on
+ * every slide, and the effect that records a view both listed `shuffle` and
+ * reported progress — so it re-ran itself without end, ~10,000 times a
+ * second, resetting the image timer each time: a shuffled show set to play
+ * never moved. The hook now keeps its identity when progress has not changed,
+ * and App names the stable callbacks instead. Either alone would have stopped
+ * the loop; this keeps the second from regressing quietly.
+ */
+describe('App never depends on the whole shuffle object', () => {
+    const source = fs.readFileSync(path.join(import.meta.dirname, '../src/App.tsx'), 'utf8');
+    const arrays = [...source.matchAll(/\}, \[([^\]]*)\]\)/g)].map(m => m[1]);
+
+    it('finds the dependency arrays', () => {
+        expect(arrays.length).toBeGreaterThan(20);
+    });
+
+    it('lists none that name it', () => {
+        const offenders = arrays.filter(deps => deps.split(',').map(d => d.trim()).includes('shuffle'));
+        expect(offenders).toEqual([]);
+    });
+
+    it('hands the navigation hook the stable callbacks, not the object', () => {
+        expect(source).toMatch(/useSlideNavigation\(\{[\s\S]{0,200}shuffle: shuffleOps/);
+    });
+});
+
+/**
  * Reads the source: a quick-move must not go through the delete path.
  *
  * `handleFilesDeleted` calls `meta.forget`, which prunes the file's favorite,

@@ -24,6 +24,7 @@ export const SHORTCUTS: Shortcut[] = [
     { keys: ['X'], label: 'Culling: reject & next', group: 'Organize' },
     { keys: ['1', '2', '3'], label: 'Quick-move to folder 1–3', group: 'Organize' },
     { keys: ['Del', 'Backspace'], label: 'Move to Trash (undoable)', group: 'Organize' },
+    { keys: ['⌘Z'], label: 'Undo the last delete (for 7 seconds)', group: 'Organize' },
 
     { keys: ['M'], label: 'Skip forward 10s', group: 'Video' },
     { keys: ['N'], label: 'Skip back 10s', group: 'Video' },
@@ -32,6 +33,17 @@ export const SHORTCUTS: Shortcut[] = [
     { keys: ['P'], label: 'Photo frame overlay', group: 'Windows' },
     { keys: ['F'], label: 'Reveal in Finder', group: 'Windows' },
 ];
+
+/**
+ * ⌘Z on macOS, Ctrl+Z elsewhere: undo the last delete.
+ *
+ * The keydown handler ignores every other chord, so this is checked before
+ * that rule. Shift is excluded so ⌘⇧Z (redo, by convention) does not also
+ * mean undo.
+ */
+export function isUndoChord(e: Pick<KeyboardEvent, 'key' | 'metaKey' | 'ctrlKey' | 'shiftKey' | 'altKey'>): boolean {
+    return (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'z';
+}
 
 export const SHORTCUT_GROUPS: ShortcutGroup[] = ['Navigate', 'Organize', 'Video', 'Windows'];
 

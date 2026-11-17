@@ -150,14 +150,16 @@ export function usePendingDeletes({ onRemoved, onRestored }: PendingDeletesOptio
         timerRef.current = setTimeout(() => { void flush(); }, UNDO_WINDOW_MS);
     }, [trashNow, flush]);
 
-    const undo = useCallback(() => {
+    /** Put the pending batch back. False when there is nothing left to undo. */
+    const undo = useCallback((): boolean => {
         const files = pendingRef.current;
-        if (!files) return;
+        if (!files) return false;
         if (timerRef.current) clearTimeout(timerRef.current);
         timerRef.current = null;
         pendingRef.current = null;
         setPending(null);
         onRestoredRef.current(files, 'undo');
+        return true;
     }, []);
 
     // Never let a quit or reload cancel a delete the user asked for.

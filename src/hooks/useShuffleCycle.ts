@@ -41,7 +41,23 @@ export function useShuffleCycle() {
     const orderRef = useRef<Record<string, string[]>>({});
 
     const [ready, setReady] = useState(false);
-    const [progress, setProgress] = useState<ShuffleProgress>({ viewed: 0, total: 0 });
+    const [progress, setProgressState] = useState<ShuffleProgress>({ viewed: 0, total: 0 });
+
+    /**
+     * Report progress, keeping the old object when the numbers are the same.
+     *
+     * Progress is reported from effects, and `progress` is part of the object
+     * this hook returns. A fresh `{ viewed, total }` on every report changed
+     * that object's identity even when nothing had changed, so any effect that
+     * both reported progress and listed the object as a dependency ran again,
+     * forever. App's record-a-view effect did exactly that, about 10,000 times
+     * a second: it reset the image timer on every pass, so a shuffled show set
+     * to play never moved.
+     */
+    const setProgress = useCallback((next: ShuffleProgress) => {
+        setProgressState(prev =>
+            prev.viewed === next.viewed && prev.total === next.total ? prev : next);
+    }, []);
 
     useEffect(() => {
         // Each read catches for itself: `Promise.all` reports the first
@@ -126,13 +142,13 @@ export function useShuffleCycle() {
         const next = recordViewed(historyRef.current, key, path);
         if (next !== historyRef.current) persist(next);
         setProgress(getShuffleProgress(items, next[key] ?? []));
-    }, [persist]);
+    }, [persist, setProgress]);
 
     /** Forget what has been seen, without touching the order. */
     const clearViewed = useCallback((key: string, total: number) => {
         setViewed(key, []);
         setProgress({ viewed: 0, total });
-    }, [setViewed]);
+    }, [setViewed, setProgress]);
 
     /**
      * Start the next cycle: forget what was seen and mint a new order under a
@@ -165,7 +181,7 @@ export function useShuffleCycle() {
         clearViewed,
         startNewCycle,
     }), [
-        ready, progress, viewedIn, orderIn, rememberOrder, forgetOrder,
+        ready, progress, setProgress, viewedIn, orderIn, rememberOrder, forgetOrder,
         seedFor, setViewed, recordView, clearViewed, startNewCycle,
     ]);
 }

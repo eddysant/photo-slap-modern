@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { ShortcutsOverlay } from '../src/components/ShortcutsOverlay';
-import { SHORTCUTS, SHORTCUT_GROUPS, shortcutsByGroup } from '../src/shortcuts';
+import { SHORTCUTS, SHORTCUT_GROUPS, isUndoChord, shortcutsByGroup } from '../src/shortcuts';
 import { cullingActionForKey } from '../src/culling';
 
 const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
@@ -30,6 +30,8 @@ describe('documented shortcuts match the handler', () => {
                 // K / Enter / X are routed through cullingActionForKey rather
                 // than the switch, so they never appear as a case.
                 if (cullingActionForKey(key) !== null) continue;
+                // ⌘Z is a chord, checked by isUndoChord before the switch.
+                if (key === '⌘Z' && /if \(isUndoChord\(e\)\) \{[\s\S]{0,80}undoLastDelete\(\)/.test(appSource)) continue;
                 undocumented.push(`${shortcut.label}: ${key}`);
             }
         }
@@ -49,6 +51,34 @@ describe('documented shortcuts match the handler', () => {
 
     it('has no duplicate labels', () => {
         expect(new Set(SHORTCUTS.map(s => s.label)).size).toBe(SHORTCUTS.length);
+    });
+});
+
+describe('the undo chord', () => {
+    const key = (k: string, mods: Partial<Record<'metaKey' | 'ctrlKey' | 'shiftKey' | 'altKey', boolean>> = {}) =>
+        ({ key: k, metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, ...mods });
+
+    it('is ⌘Z, and Ctrl+Z off the Mac', () => {
+        expect(isUndoChord(key('z', { metaKey: true }))).toBe(true);
+        expect(isUndoChord(key('z', { ctrlKey: true }))).toBe(true);
+        // Caps Lock reports the capital
+        expect(isUndoChord(key('Z', { metaKey: true }))).toBe(true);
+    });
+
+    it('is not a bare Z, nor redo, nor another chord', () => {
+        expect(isUndoChord(key('z'))).toBe(false);
+        expect(isUndoChord(key('z', { metaKey: true, shiftKey: true }))).toBe(false);
+        expect(isUndoChord(key('z', { metaKey: true, altKey: true }))).toBe(false);
+        expect(isUndoChord(key('x', { metaKey: true }))).toBe(false);
+    });
+
+    it('is checked after the form-control rule, so a text field keeps its own undo', () => {
+        const formRule = appSource.indexOf("['INPUT', 'SELECT', 'TEXTAREA'].includes");
+        const chord = appSource.indexOf('if (isUndoChord(e))');
+        const modifierRule = appSource.indexOf('if (e.metaKey || e.ctrlKey || e.altKey) return;');
+        expect(formRule).toBeGreaterThan(-1);
+        expect(chord).toBeGreaterThan(formRule);
+        expect(modifierRule).toBeGreaterThan(chord);
     });
 });
 

@@ -117,6 +117,33 @@ describe('recording what has been seen', () => {
         expect(result.current.progress.viewed).toBe(1);
     });
 
+    /**
+     * Reporting the progress it already has must not change the object.
+     *
+     * App's record-a-view effect named the whole hook object as a dependency,
+     * and every report made a fresh `{ viewed, total }`: report, new object,
+     * effect runs, report — about 10,000 times a second. The image timer was
+     * reset on every pass, so a shuffled show set to play never advanced.
+     */
+    it('keeps its identity when a report changes nothing', async () => {
+        const { result } = await mount();
+        act(() => { result.current.recordView(KEY, '/lib/a.jpg', library); });
+        const before = result.current;
+        act(() => { result.current.recordView(KEY, '/lib/a.jpg', library); });
+        expect(result.current).toBe(before);
+        act(() => { result.current.setProgress({ viewed: 1, total: 4 }); });
+        expect(result.current).toBe(before);
+    });
+
+    it('still changes when the numbers do', async () => {
+        const { result } = await mount();
+        act(() => { result.current.recordView(KEY, '/lib/a.jpg', library); });
+        const before = result.current;
+        act(() => { result.current.recordView(KEY, '/lib/b.jpg', library); });
+        expect(result.current).not.toBe(before);
+        expect(result.current.progress).toEqual({ viewed: 2, total: 4 });
+    });
+
     /** A path that has left the library should not inflate the counter. */
     it('counts only what is still in the library', async () => {
         store.shuffleHistory = { [KEY]: ['/lib/a.jpg', '/lib/deleted.jpg'] };

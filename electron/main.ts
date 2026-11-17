@@ -439,6 +439,22 @@ function buildApplicationMenu() {
         isMac ? { role: 'close' } : { role: 'quit' }
       ] as MenuItemConstructorOptions[]
     },
+    // Undo lives where every Mac app keeps it. Like the Actions items, ⌘Z is
+    // shown but not registered: the renderer owns the key, so ⌘Z in the tag
+    // editor or the grid filter still edits the text. Copy and paste are
+    // here because on macOS those keys only reach a text field through the
+    // Edit menu.
+    {
+      label: 'Edit',
+      submenu: [
+        action('Undo Delete', 'CmdOrCtrl+Z', 'undo-delete'),
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' },
+      ] as MenuItemConstructorOptions[]
+    },
     // All slideshow shortcuts, discoverable in one place
     {
       label: 'Actions',

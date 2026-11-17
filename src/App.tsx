@@ -36,6 +36,7 @@ import {
 import { getFileUrl, getDisplayUrl } from './utils'
 import { folderLabel, moveReport } from './quickMove'
 import { cullingActionForKey } from './culling'
+import { isUndoChord } from './shortcuts'
 import { SETTINGS_PRESETS, type SettingsPresetName } from './settingsPresets'
 import { makeShuffleHistoryKey } from './shuffleHistory'
 import { healthIssuesByPath } from './gridFilters'
@@ -95,6 +96,16 @@ function App() {
   // seed, and when a cycle is over. Keyed by library roots + media filter.
   const shuffle = useShuffleCycle()
   const shuffleProgress = shuffle.progress
+  // The callbacks are stable; `shuffle` itself is not, because `progress`
+  // changes with every slide. An effect or callback naming `shuffle` re-runs
+  // on every slide, and an effect that also reports progress re-runs forever.
+  const {
+    ready: shuffleReady, recordView, viewedIn, startNewCycle, clearViewed, forgetOrder,
+  } = shuffle
+  const shuffleOps = useMemo(
+    () => ({ viewedIn, startNewCycle, clearViewed, forgetOrder }),
+    [viewedIn, startNewCycle, clearViewed, forgetOrder],
+  )
 
   /**
    * The style the next slide change will actually use. With `random` this is
@@ -157,7 +168,7 @@ function App() {
    */
   const shuffleKey = currentDirs.length > 0 ? makeShuffleHistoryKey(currentDirs, mediaFilter) : null;
   const nav = useSlideNavigation({
-    files, goTo, replaceFiles, isShuffle, shuffleKey, shuffle, cullingMode,
+    files, goTo, replaceFiles, isShuffle, shuffleKey, shuffle: shuffleOps, cullingMode,
     onQueued: file => showToast(`\u{1F4FA} ${file.name} — queued by a guest`),
   });
   const {
@@ -210,9 +221,9 @@ function App() {
   // the next launch start repeating already-seen media.
   useEffect(() => {
     const file = files[currentIndex];
-    if (!isShuffle || !shuffle.ready || !file || currentDirs.length === 0) return;
-    shuffle.recordView(makeShuffleHistoryKey(currentDirs, mediaFilter), file.path, files);
-  }, [files, currentIndex, isShuffle, currentDirs, mediaFilter, shuffle]);
+    if (!isShuffle || !shuffleReady || !file || currentDirs.length === 0) return;
+    recordView(makeShuffleHistoryKey(currentDirs, mediaFilter), file.path, files);
+  }, [files, currentIndex, isShuffle, currentDirs, mediaFilter, shuffleReady, recordView]);
 
   const toggleFavorite = useCallback(() => {
     const file = files[currentIndex];
@@ -454,20 +465,40 @@ function App() {
     if (pendingDelete) meta.forget(pendingDelete.map(f => f.path));
   }, [pendingDelete, meta]);
 
-  const undoDeleteAndDismiss = useCallback(() => {
-    undoDelete();
-    dismissToast();
-    showToast('Delete undone');
+  // Where the last delete went, so a ⌘Z that arrives after the undo window
+  // can say so instead of a bare "nothing to undo".
+  const lastDeletedRef = useRef<string | null>(null);
+
+  /**
+   * Undo the last delete: the toast's button, ⌘Z, and Edit → Undo Delete.
+   *
+   * Only possible while the delete is still pending. Once the file has gone
+   * to the Trash the app cannot take it back out, so the answer then is
+   * where to find it.
+   */
+  const undoLastDelete = useCallback(() => {
+    if (undoDelete()) {
+      lastDeletedRef.current = null;
+      dismissToast();
+      showToast('Delete undone');
+    } else if (lastDeletedRef.current) {
+      showToast(lastDeletedRef.current);
+    } else {
+      showToast('Nothing to undo');
+    }
   }, [undoDelete, dismissToast, showToast]);
 
   const deleteFiles = useCallback((toDelete: MediaFile[]) => {
     if (toDelete.length === 0) return;
     requestDelete(toDelete);
+    lastDeletedRef.current = toDelete.length === 1
+      ? `${toDelete[0].name} is already in the Trash — use Put Back in Finder to restore it`
+      : `Those ${toDelete.length} files are already in the Trash — use Put Back in Finder to restore them`;
     const label = toDelete.length === 1
       ? `Deleted ${toDelete[0].name}`
       : `Deleted ${toDelete.length} files`;
-    showToast(label, { label: 'Undo', onAction: undoDeleteAndDismiss }, UNDO_WINDOW_MS);
-  }, [requestDelete, showToast, undoDeleteAndDismiss]);
+    showToast(label, { label: 'Undo', onAction: undoLastDelete }, UNDO_WINDOW_MS);
+  }, [requestDelete, showToast, undoLastDelete]);
 
   const deleteCurrentFile = useCallback(() => {
     const file = files[currentIndex];
@@ -740,6 +771,13 @@ function App() {
       // Don't hijack keys while a form control has focus or a chord is held
       const target = e.target as HTMLElement;
       if (['INPUT', 'SELECT', 'TEXTAREA'].includes(target?.tagName)) return;
+      // The one chord the slideshow answers. Checked after the form-control
+      // rule, so ⌘Z in a text field is still the field's own undo.
+      if (isUndoChord(e)) {
+        e.preventDefault();
+        undoLastDelete();
+        return;
+      }
       if (e.metaKey || e.ctrlKey || e.altKey) return;
 
       if (cullingMode) {
@@ -811,7 +849,7 @@ function App() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [nextSlide, prevSlide, togglePlay, deleteCurrentFile, showCurrentInFinder, seekBy, quickMove, toggleFavorite, frameMode, setFrameMode, cullingMode, markCurrentCulling]);
+  }, [nextSlide, prevSlide, togglePlay, deleteCurrentFile, undoLastDelete, showCurrentInFinder, seekBy, quickMove, toggleFavorite, frameMode, setFrameMode, cullingMode, markCurrentCulling]);
 
   // Update window title
   useEffect(() => {
@@ -837,6 +875,7 @@ function App() {
       'seek-back': () => seekBy(-10),
       'reveal': showCurrentInFinder,
       'delete': deleteCurrentFile,
+      'undo-delete': undoLastDelete,
       // Non-destructive, matching the K/X keys. 'delete' above is the only
       // menu action that trashes anything.
       'culling-keep': () => markCurrentCulling('keep'),
@@ -850,7 +889,7 @@ function App() {
       window.api.on('menu:action', (_event, name: string) => actions[name]?.()),
     ];
     return () => cleanups.forEach(c => c());
-  }, [handleOpenDirectory, showCurrentInFinder, nextSlide, prevSlide, togglePlay, seekBy, deleteCurrentFile, toggleFavorite, frameMode, setFrameMode, markCurrentCulling]);
+  }, [handleOpenDirectory, showCurrentInFinder, nextSlide, prevSlide, togglePlay, seekBy, deleteCurrentFile, undoLastDelete, toggleFavorite, frameMode, setFrameMode, markCurrentCulling]);
 
   const fileUrl = currentFile ? getFileUrl(currentFile.path) : '';
   // Memoized because framer-motion reads `variants` when the incoming slide
