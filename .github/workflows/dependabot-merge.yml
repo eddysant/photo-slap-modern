@@ -1,0 +1,47 @@
+# Merges Dependabot's grouped minor/patch PR once CI has passed on it.
+#
+# Runs after CI rather than alongside it, because `main` has no branch
+# protection: GitHub's own auto-merge would have nothing to wait for and
+# would merge the moment it was enabled. `--match-head-commit` makes the
+# merge refuse if the branch moved after the commit CI actually checked.
+#
+# Only the minor-and-patch group branch qualifies (see dependabot.yml).
+# A major has its own branch and is left for a person to review.
+#
+# Merging does not cut a release: the installed app only changes when a
+# release is tagged and the Homebrew tap picks it up (CLAUDE.md, Releasing).
+name: Dependabot merge
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  merge:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.actor.login == 'dependabot[bot]' &&
+      startsWith(github.event.workflow_run.head_branch, 'dependabot/') &&
+      contains(github.event.workflow_run.head_branch, '/minor-and-patch-')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge the PR CI just passed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          pr=$(gh pr list -R "$REPO" --head "$BRANCH" --state open --json number,author \
+            --jq '.[] | select(.author.login | test("dependabot")) | .number')
+          if [ -z "$pr" ]; then
+            echo "No open Dependabot PR for $BRANCH; nothing to merge."
+            exit 0
+          fi
+          gh pr merge "$pr" -R "$REPO" --squash --delete-branch --match-head-commit "$SHA"

@@ -1,0 +1,29 @@
+# Keeps every dependency current without anyone remembering to.
+#
+# Weekly, so a week's releases arrive as one PR rather than a trickle.
+# Minor and patch updates are grouped into one PR per ecosystem and merged
+# by .github/workflows/dependabot-merge.yml once CI passes on it. Majors
+# get a PR each and wait for a person: they are where the breaking changes
+# live (ESLint 10 dropped @eslint/js from its dependencies; TypeScript 7 is
+# not yet supported by typescript-eslint), and CI on Linux does not run the
+# e2e, so a green check on a major says less than it looks.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
