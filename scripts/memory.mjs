@@ -18,6 +18,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { guardUserData } from './userDataGuard.mjs';
 import sharp from 'sharp';
 
 const PORT = 9334;
@@ -163,8 +164,8 @@ function footprint(rootPid) {
 const fixture = await makeFixture();
 
 const cfg = configPath();
-let configBackup = null;
-try { configBackup = await fs.readFile(cfg, 'utf8'); } catch { /* none */ }
+// On disk until restored, so a run that dies cannot lose it (userDataGuard.mjs).
+const userData = guardUserData(path.dirname(cfg), ['config.json']);
 await fs.mkdir(path.dirname(cfg), { recursive: true });
 await fs.writeFile(cfg, JSON.stringify({
     transitionStyle: 'fade', isShuffle: false, mediaFilter: 'both', sortOrder: 'name',
@@ -252,8 +253,7 @@ try {
     cdp?.close();
     try { process.kill(-child.pid, 'SIGTERM'); } catch { /* gone */ }
     await sleep(1500);
-    if (configBackup !== null) await fs.writeFile(cfg, configBackup);
-    else await fs.rm(cfg, { force: true });
+    userData.restore();
     await fs.rm(fixture, { recursive: true, force: true });
 }
 

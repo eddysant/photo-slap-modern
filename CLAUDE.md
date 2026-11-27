@@ -1,6 +1,6 @@
 # photo-slap — Architecture Notes
 
-Retro-styled Electron photo/video slideshow app by Eddy Sant, built with AI assistance. Modernized July 2026 (Electron 43, React 19, Vite 8, ESLint 9 flat config).
+Retro-styled Electron photo/video slideshow app by Eddy Sant, built with AI assistance. Modernized July 2026; dependencies kept current since (Electron 45, React 19, Vite 8, TypeScript 6, ESLint 10 flat config — see **Dependencies**).
 
 ## Process model
 
@@ -490,6 +490,23 @@ fixture paths that stopped existing when it finished, and the intro screen's
 Resume button then offered one of them. The e2e restoring faithfully is what
 hid it: it restored what it found, which already included the smoke run's
 leavings. Found by reading a real config after a gate, not by a test.
+**The backup is on disk, not in a variable** (`scripts/userDataGuard.mjs`,
+shared by all four scripts). It used to be restored from a `finally`, which a
+run killed outright — or ended by Node for an unsettled top-level await,
+exit 13 — never reaches; the next run then backed up the *test seed* as the
+user's settings. Three hung e2e runs in a row erased a real config that way,
+with no copy anywhere. The backup now sits in `.test-run-backup` beside the
+files until it is restored, a run that finds one restores from it before
+taking its own, and an exit or signal handler restores too.
+**A launch is shut down by signalling Electron's main process, not the whole
+group** (`shutdownApp` in `scripts/e2e.mjs`), and the next launch waits for
+every process to be gone rather than for the debug port to go quiet. A
+quitting app stops answering the port well before it releases the port and
+the single-instance lock, and on Electron 45 a group-wide SIGTERM also killed
+the renderer and GPU helpers mid-quit — Electron then abandons the quit, and
+a windowless app on macOS stays running by design. A stack sample of the
+survivor showed an idle event loop and nothing stuck. ⌘Q, a logout and a
+`kill` all signal the main process alone, so the installed app never sees it.
 `test:smoke` takes an optional `-- --app <path>` to run against a packaged
 `.app`, and CI runs it that way before publishing a release; `test:memory`
 requires one, since dev-mode numbers mean nothing. Packaged
@@ -537,6 +554,15 @@ the tap serves it. Steps, in order:
    install on the Mac is the user's own step — `brew update && brew upgrade
    --cask photo-slap`, then clear the quarantine flag (the build is unsigned;
    see the README).
+
+## Dependencies
+
+**Kept current by Dependabot** (`.github/dependabot.yml`): every Monday, npm and GitHub Actions updates arrive as PRs. Minor and patch updates are grouped into one PR per ecosystem and merged by `.github/workflows/dependabot-merge.yml` once CI passes on that exact commit (`--match-head-commit`). It runs on `workflow_run` after CI rather than using GitHub's auto-merge, because `main` has no branch protection and auto-merge would have nothing to wait for. **Majors get a PR each and are not merged automatically:** CI on Linux runs type-check, lint, unit tests and the smoke test, but not the e2e, and a major is where the breaking change lives. Take one by checking out its branch and running the release gate (step 1 of **Releasing**), e2e included. A merged update does not reach the installed app until a release is cut.
+
+Two majors have needed more than a version bump, and one is held back:
+
+- **ESLint 10 no longer depends on `@eslint/js`**, which `eslint.config.js` imports, so it is a direct devDependency now. Its new recommended rule `no-useless-assignment` also flagged one initial value in `scripts/e2e.mjs`.
+- **TypeScript is held at 6.0.x.** TypeScript 7 type-checks this project cleanly, but `typescript-eslint` declares support only below 6.1 and lint crashes outright under 7. Dependabot's TypeScript 7 PR will keep failing CI until `typescript-eslint` widens its range; that red PR is the reminder, so it is not ignored in the config.
 
 **All settings persist through `electron-store` in the main process**, over the
 `store:get` / `store:set` channels; the renderer never touches disk. The

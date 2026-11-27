@@ -15,6 +15,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { guardUserData } from './userDataGuard.mjs';
 import sharp from 'sharp';
 
 const PORT = 9333;
@@ -183,23 +184,11 @@ const fixtureCount = (await fs.readdir(fixture)).length;
 
 // Back up user settings, seed the star wipe
 const cfg = configPath();
-let configBackup = null;
-try { configBackup = await fs.readFile(cfg, 'utf8'); } catch { /* no config yet */ }
-
-/**
- * Three caches live beside the config and this run writes to all of them:
- * the deep scan's resume cache (the fifth launch runs two deep scans
- * precisely to prove it does), the date-taken cache (the date-sort checks)
- * and the perceptual-hash cache (the duplicate scan). They are restored for
- * the same reason the config is: a check the user did not
- * start should not leave verdicts in their app directory, least of all ones
- * keyed on temp paths that stopped existing when this script finished.
- */
-const sideFiles = new Map();
-for (const name of ['deep-verify.json', 'date-taken.json', 'phash-cache.json']) {
-    const file = path.join(path.dirname(cfg), name);
-    try { sideFiles.set(file, await fs.readFile(file, 'utf8')); } catch { sideFiles.set(file, null); }
-}
+// The settings and the three caches beside them — the deep scan's resume
+// cache, the date-taken cache and the perceptual-hash cache — are this
+// run's to overwrite and the user's to get back. The backup is on disk until
+// restored, so a run that dies cannot lose them (userDataGuard.mjs).
+const userData = guardUserData(path.dirname(cfg), ['config.json', 'deep-verify.json', 'date-taken.json', 'phash-cache.json']);
 await fs.mkdir(path.dirname(cfg), { recursive: true });
 /**
  * A quick-move target inside the library, which is where they usually are.
@@ -220,7 +209,7 @@ await fs.writeFile(cfg, JSON.stringify({
 }));
 
 let appLog = '';
-let child = null;
+let child;
 
 // The app is single-instance, so opening a different library means a full
 // relaunch rather than a second process.
@@ -245,16 +234,38 @@ function launchApp(dir) {
 
 async function shutdownApp(proc) {
     if (!proc) return;
-    try { process.kill(-proc.pid, 'SIGTERM'); } catch { /* already gone */ }
-    // Wait for the debug port to go quiet so the next launch gets the lock
-    for (let i = 0; i < 40; i++) {
-        try {
-            await fetch(`http://127.0.0.1:${PORT}/json/list`, { signal: AbortSignal.timeout(500) });
-        } catch {
-            return;
-        }
-        await sleep(500);
+    // Wait for every process in the launch's group to be gone, not for the
+    // debug port to go quiet. An app in the middle of quitting stops
+    // answering the port well before it exits, and still holds the port and
+    // the single-instance lock — so the next launch started inside that
+    // window, failed to bind the port, and was left running in the
+    // background with nothing attached to it.
+    const groupAlive = () => {
+        try { process.kill(-proc.pid, 0); return true; } catch { return false; }
+    };
+    const waitFor = async (gone, ms) => {
+        for (let t = 0; t < ms; t += 250) { if (gone()) return true; await sleep(250); }
+        return gone();
+    };
+    // Signal Electron's main process alone, the way ⌘Q, a logout or a
+    // `kill` would. Signalling the whole group also killed the renderer and
+    // GPU helpers mid-quit, and Electron 45 then abandons the quit: the
+    // window is gone, and on macOS a windowless app stays running by design.
+    // A stack sample showed exactly that — an idle event loop, nothing
+    // stuck. The group (npm, Vite) is cleared up once the app is gone.
+    const mainPid = Number(spawnSync('pgrep', ['-g', String(proc.pid), '-f', 'MacOS/Electron '], { encoding: 'utf8' })
+        .stdout.trim().split('\n')[0]) || null;
+    if (mainPid) {
+        try { process.kill(mainPid, 'SIGTERM'); } catch { /* already gone */ }
+        await waitFor(() => { try { process.kill(mainPid, 0); return false; } catch { return true; } }, 15000);
     }
+    try { process.kill(-proc.pid, 'SIGTERM'); } catch { return; }
+    if (await waitFor(() => !groupAlive(), 10000)) return;
+    // Still there: the app ignored the signal. Kill it so the run can carry
+    // on — and fail, because an app that will not quit is a bug.
+    try { process.kill(-proc.pid, 'SIGKILL'); } catch { /* gone after all */ }
+    await sleep(500);
+    throw new Error('the app was still running after SIGTERM');
 }
 
 /** Connect and wait for the slideshow to show a file counter. */
@@ -1466,16 +1477,10 @@ try {
     console.error(appLog.split('\n').slice(-15).join('\n'));
 } finally {
     cdp?.close();
-    try { if (child) process.kill(-child.pid, 'SIGTERM'); } catch { /* already gone */ }
-    if (configBackup !== null) await fs.writeFile(cfg, configBackup);
-    else await fs.rm(cfg, { force: true });
+    try { await shutdownApp(child); } catch (e) { failures++; console.error('✗', e.message); }
     // After the app has gone: the caches flush on a debounce and again on
     // quit, and a restore that lands first is undone by the flush.
-    await sleep(600);
-    for (const [file, backup] of sideFiles) {
-        if (backup !== null) await fs.writeFile(file, backup);
-        else await fs.rm(file, { force: true });
-    }
+    userData.restore();
     await fs.rm(fixture, { recursive: true, force: true });
     if (brokenFixture) await fs.rm(brokenFixture, { recursive: true, force: true });
     if (shuffleFixture) await fs.rm(shuffleFixture, { recursive: true, force: true });

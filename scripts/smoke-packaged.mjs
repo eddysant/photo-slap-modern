@@ -22,6 +22,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { guardUserData } from './userDataGuard.mjs';
 import sharp from 'sharp';
 
 const PORT = 9346;
@@ -140,19 +141,8 @@ const configPath = () => {
     return path.join(home, '.config/photo-slap/config.json');
 };
 const cfg = configPath();
-let configBackup = null;
-try { configBackup = await fs.readFile(cfg, 'utf8'); } catch { /* no config yet */ }
-/*
- * The caches that live beside the config — the deep scan's resume cache, the
- * date-taken cache and the perceptual-hash cache — are put back too. A run
- * against a fixture leaves entries keyed on paths that stop existing when it
- * ends, and a check should leave the app directory as it found it.
- */
-const sideFiles = new Map();
-for (const name of ['deep-verify.json', 'date-taken.json', 'phash-cache.json']) {
-    const file = path.join(path.dirname(cfg), name);
-    try { sideFiles.set(file, await fs.readFile(file, 'utf8')); } catch { sideFiles.set(file, null); }
-}
+// On disk until restored, so a run that dies cannot lose them (userDataGuard.mjs).
+const userData = guardUserData(path.dirname(cfg), ['config.json', 'deep-verify.json', 'date-taken.json', 'phash-cache.json']);
 
 // VITE_DEV_SERVER_URL must not leak in: its presence is what selects the dev
 // server and the relaxed CSP, which would make this test meaningless.
@@ -291,12 +281,7 @@ try {
     // After the app is gone, or electron-store writes the file again on its
     // way out and undoes this.
     await sleep(600);
-    if (configBackup !== null) await fs.writeFile(cfg, configBackup);
-    else await fs.rm(cfg, { force: true });
-    for (const [file, backup] of sideFiles) {
-        if (backup !== null) await fs.writeFile(file, backup);
-        else await fs.rm(file, { force: true });
-    }
+    userData.restore();
     await fs.rm(fixture, { recursive: true, force: true });
 }
 
