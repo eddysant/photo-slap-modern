@@ -1098,8 +1098,10 @@ try {
     // writing it here is what makes the launch deterministic.
     await fs.writeFile(cfg, JSON.stringify({
         transitionStyle: 'fade', isShuffle: true, mediaFilter: 'both', sortOrder: 'name',
-        isKenBurns: false, isExifEnabled: false, isSmart: false, slideDuration: 600000,
-        remoteEnabled: false,
+        // A short duration for the playback check at the end of this launch.
+        // Nothing advances before then: the show only plays when asked to.
+        isKenBurns: false, isExifEnabled: false, isSmart: false, slideDuration: 1500,
+        autoPlayOnOpen: false, remoteEnabled: false,
         shuffleHistory: {}, shuffleSeeds: {},
     }));
     child = launchApp(shuffleFixture);
@@ -1149,6 +1151,57 @@ try {
     const shuffleLeft = (await fs.readdir(shuffleFixture)).filter(n => n.endsWith('.jpg'));
     check('the two committed deletes reached the Trash and the undone one did not',
         shuffleLeft.length === 6, `${shuffleLeft.length} left: ${JSON.stringify(shuffleLeft.sort())}`);
+
+    // ⌘Z is the same undo as the toast's button, reached without the mouse.
+    const cmdZ = await cdp.evaluate(`(async () => {
+        const pos = () => (document.querySelector('.file-info')?.textContent ?? '').split('·')[0].trim();
+        const name = () => decodeURIComponent((document.querySelector('img.media-element')?.src ?? '').split('?')[0]).split('/').pop();
+        const before = { pos: pos(), name: name() };
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }));
+        await new Promise(r => setTimeout(r, 1100));
+        const deleted = pos();
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', metaKey: true, bubbles: true }));
+        let after = null;
+        for (let i = 0; i < 20; i++) {
+            await new Promise(r => setTimeout(r, 150));
+            if (name() === before.name) { after = { pos: pos(), name: name() }; break; }
+        }
+        return JSON.stringify({ before, deleted, after, toast: document.querySelector('.toast')?.textContent ?? '' });
+    })()`).then(JSON.parse);
+    check('⌘Z undoes a delete and returns to the photo',
+        cmdZ.after?.name === cmdZ.before.name && cmdZ.after?.pos === cmdZ.before.pos && /undone/i.test(cmdZ.toast),
+        JSON.stringify(cmdZ));
+    await sleep(UNDO_WINDOW_MS + 1500);
+    const afterCmdZ = (await fs.readdir(shuffleFixture)).filter(n => n.endsWith('.jpg'));
+    check('and the file never reached the Trash', afterCmdZ.length === 6, `${afterCmdZ.length} left`);
+
+    // A shuffled show set to play has to actually move. It did not, in a
+    // build that never shipped: an effect re-ran itself ~10,000 times a
+    // second, and the image timer was torn down and rebuilt on every pass, so
+    // it never got to fire. Every other check here drives the show by key,
+    // which is why none of them noticed. The timer count is what names the
+    // cause if this regresses; the slides moving is what the user sees.
+    const playing = await cdp.evaluate(`(async () => {
+        const name = () => decodeURIComponent((document.querySelector('img.media-element')?.src ?? '').split('?')[0]).split('/').pop();
+        let timers = 0;
+        const original = window.setInterval;
+        window.setInterval = (fn, ms, ...rest) => { if (ms === 1500) timers++; return original(fn, ms, ...rest); };
+        const button = document.querySelector('button[title^="Play/Pause"]');
+        if (!button?.classList.contains('active')) button?.click();
+        const seen = [name()];
+        const started = Date.now();
+        while (Date.now() - started < 5500) {
+            await new Promise(r => setTimeout(r, 150));
+            if (name() && name() !== seen[seen.length - 1]) seen.push(name());
+        }
+        button?.click();   // pause again
+        window.setInterval = original;
+        return JSON.stringify({ seen, timers, progress: document.querySelector('.file-info')?.textContent ?? '' });
+    })()`).then(JSON.parse);
+    check('a shuffled show set to play moves on by itself',
+        playing.seen.length >= 3, `${playing.seen.length - 1} advances in 5.5s at 1.5s a slide: ${playing.seen.join(' -> ')}`);
+    check('without rebuilding its timer over and over',
+        playing.timers > 0 && playing.timers <= 10, `${playing.timers} timers set in 5.5s`);
     // Sidecars are optional. The options panel promises that session-only
     // metadata writes nothing to the user's folders, and the only way to
     // believe that is to look at the folder.
